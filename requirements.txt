@@ -3,3 +3,6 @@ numpy
 networkx
 matplotlib
 neo4j
+transformers
+datasets
+pandas
