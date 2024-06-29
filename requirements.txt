@@ -1,4 +1,5 @@
 jupyter
+ipykernel
 numpy
 networkx
 matplotlib
@@ -7,5 +8,5 @@ transformers
 datasets
 pandas
 llama-index
+torch
 torch_geometric
-torch-sparse
