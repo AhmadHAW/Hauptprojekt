@@ -6,3 +6,6 @@ neo4j
 transformers
 datasets
 pandas
+llama-index
+torch_geometric
+torch-sparse
