@@ -247,9 +247,9 @@ class GNNTrainer():
         df = movie_lens_loader.llm_df.apply(lambda row: __get_embedding(row, movie_lens_loader), axis = 1)
         #compress the embeddings of all user embeddings to two dimensions
         df[f"pca_2_user_embedding"] = ""
-        for split in ["train", "test", "dev", "rest"]:
+        for split in ["train", "test", "val", "rest"]:
             condition = df['split'] == split
-            user_embeddings = list(df[df["split"] == split]["user_embedding"].values)
+            user_embeddings = list(df[condition]["user_embedding"].values)
             if split == "train":
                 if not self.user_pca_train or self.force_recompute:
                     self.user_pca_train = PCA(n_components=2)  # Reduce to 2 dimensions
@@ -266,14 +266,18 @@ class GNNTrainer():
                 if not self.user_pca_rest or self.force_recompute:
                     self.user_pca_rest = PCA(n_components=2)  # Reduce to 2 dimensions
                 pca = self.user_pca_rest
+            print(len(user_embeddings), len(user_embeddings[0]))
+            print(pca.fit_transform(user_embeddings))
+            print(pca.fit_transform(user_embeddings).squeeze())
             pca_2_user_embeddings = pca.fit_transform(user_embeddings).squeeze().tolist()
+            pca_2_user_embeddings = list(map(lambda emb: str(emb), pca_2_user_embeddings))
             df.loc[condition, 'pca_2_user_embedding'] = pca_2_user_embeddings
 
         #compress the embeddings of all movie embeddings to two dimensions
         df[f"pca_2_movie_embedding"] = ""
-        for split in ["train", "test", "dev", "rest"]:
+        for split in ["train", "test", "val", "rest"]:
             condition = df['split'] == split
-            movie_embeddings = list(df[df["split"] == split]["movie_embedding"].values)
+            movie_embeddings = list(df[condition]["movie_embedding"].values)
             if split == "train":
                 if not self.movie_pca_train or self.force_recompute:
                     self.movie_pca_train = PCA(n_components=2)  # Reduce to 2 dimensions
@@ -291,6 +295,7 @@ class GNNTrainer():
                     self.movie_pca_rest = PCA(n_components=2)  # Reduce to 2 dimensions
                 pca = self.movie_pca_rest
             pca_2_movie_embeddings = pca.fit_transform(movie_embeddings).squeeze().tolist()
+            pca_2_movie_embeddings = list(map(lambda emb: str(emb), pca_2_movie_embeddings))
             df.loc[condition, 'pca_2_movie_embedding'] = pca_2_movie_embeddings
         
             
