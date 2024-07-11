@@ -18,7 +18,7 @@ These libraries have strict requirements tho and the correct versions had to be 
 I refer you to the [tutorial](https://colab.research.google.com/drive/1xpzn1Nvai1ygd_P5Yambc_oe4VBPK_ZT?usp=sharing#scrollTo=rwgNwoa26Eja) by torch geometrics, which I used as a template. This tutorial is also a good starting point to understand Graph Representation Learning in general.
 
 ## Dataset Transformation and Trainingsprocesses
-![Overview of the transformation- and trainingsprocesses.](https://github.com/[AhmadHAW]/[Hauptprojekt]/blob/[master]/images/Overview.png?raw=true)
+![Overview of the transformation- and trainingsprocesses.](https://github.com/AhmadHAW/Hauptprojekt/blob/main/images/Overview.png?raw=true)
 
 
 ## Playground
