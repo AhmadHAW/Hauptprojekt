@@ -1,12 +1,9 @@
 jupyter
-ipykernel
 numpy
-networkx
 matplotlib
-neo4j
 transformers
+scikit-learn
 datasets
 pandas
-llama-index
-torch
-torch_geometric
+evaluate
+seaborn
