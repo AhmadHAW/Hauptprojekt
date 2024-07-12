@@ -11,8 +11,8 @@ def row_to_prompt_datapoint(row):
     user_id = row["mappedUserId"]
     title = row["title"]
     genres = row["genres"]
-    user_embedding = row["user_embedding"]
-    movie_embedding = row["movie_embedding"]
+    user_embedding = row["pca_2_user_embedding"]
+    movie_embedding = row["pca_2_movie_embedding"]
     prompt = f"user: {user_id}, title: {title}, genres: {genres} user embedding: {user_embedding}, movie embedding: {movie_embedding}"
     return prompt
 
@@ -303,9 +303,11 @@ class MovieLensLoader():
                 if not existing:
                     random_row = random_row.copy(deep= True)
                     random_row["mappedUserId"] = user_id
-                    user_embedding, movie_embedding = get_embedding_cb(dataset, user_id, movie_id, split)
-                    random_row["user_embedding"] = user_embedding.detach().tolist()
-                    random_row["movie_embedding"] = movie_embedding.detach().tolist()
+                    user_embedding, movie_embedding, pca_2_user_embedding, pca_2_movie_embedding = get_embedding_cb(dataset, user_id, movie_id, add_pca = True, split = split)
+                    random_row["user_embedding"] = user_embedding
+                    random_row["movie_embedding"] = movie_embedding
+                    random_row["pca_2_user_embedding"] = pca_2_user_embedding
+                    random_row["pca_2_movie_embedding"] = pca_2_movie_embedding
         prompt = row_to_prompt_datapoint(random_row)
         labels = 1 if existing else 0
         result = {"prompt": prompt, "labels": labels}

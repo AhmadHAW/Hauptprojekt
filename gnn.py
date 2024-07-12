@@ -204,8 +204,8 @@ class GNNTrainer():
         embeddings = self.model.forward_without_classifier(sampled_data)
         user_node_id_index = (sampled_data['user'].n_id == user_id).nonzero(as_tuple=True)[0].item()
         movie_node_id_index = (sampled_data['movie'].n_id == movie_id).nonzero(as_tuple=True)[0].item()
-        user_embedding = embeddings["user"][user_node_id_index]
-        movie_embedding = embeddings["movie"][movie_node_id_index]
+        user_embedding = embeddings["user"][user_node_id_index].detach().tolist()
+        movie_embedding = embeddings["movie"][movie_node_id_index].detach().tolist()
         if add_pca:
             assert split
             if split == "train":
@@ -221,14 +221,36 @@ class GNNTrainer():
                 user_pca = self.user_pca_rest
                 movie_pca = self.movie_pca_rest
 
-            pca_2_user_embedding = user_pca.fit_transform(user_embedding.reshape(1, -1))
-            pca_2_movie_embedding = movie_pca.fit_transform(movie_embedding.reshape(1, -1))
+            pca_2_user_embedding = user_pca.transform([user_embedding])[0]
+            pca_2_movie_embedding = movie_pca.transform([movie_embedding])[0]
         else:
             pca_2_user_embedding = None
             pca_2_movie_embedding = None
         return user_embedding, movie_embedding, pca_2_user_embedding, pca_2_movie_embedding
     
-    def get_embeddings(self, movie_lens_loader: MovieLensLoader):
+    def __are_embeddings_saved(self, df):
+        user_embeddings_given = "user_embedding" in df.columns
+        user_embeddings_set = ((df["user_embedding"] != "") | (df["user_embedding"].notna())).all()
+        movie_embeddings_given = "movie_embedding" in df.columns
+        movie_embeddings_set = ((df["movie_embedding"] != "") | (df["movie_embedding"].notna())).all()
+
+        pca_2_user_embeddings_given = "pca_2_user_embedding" in df.columns
+        pca_2_user_embeddings_set = ((df["pca_2_user_embedding"] != "") | (df["pca_2_user_embedding"].notna())).all()
+        pca_2_movie_embeddings_given = "pca_2_movie_embedding" in df.columns
+        pca_2_movie_embeddings_set = ((df["pca_2_movie_embedding"] != "") | (df["pca_2_movie_embedding"].notna())).all()
+
+        return (user_embeddings_given and
+                user_embeddings_set and
+                movie_embeddings_given and
+                movie_embeddings_set and
+                pca_2_user_embeddings_given and
+                pca_2_user_embeddings_set and
+                pca_2_movie_embeddings_given and
+                pca_2_movie_embeddings_set
+                )
+
+    
+    def get_embeddings(self, movie_lens_loader: MovieLensLoader, force_recompute = False):
         '''
         This method first passes all edges (user - movie) to the GNN to produce user and movie embeddings.
         Then all embeddings are passed to a PCA and are reduced to 2 dimensions.
@@ -242,68 +264,66 @@ class GNNTrainer():
             row["user_embedding"] = user_embedding.detach().tolist()
             row["movie_embedding"] = movie_embedding.detach().tolist()
             return row
-        
-        #produce the embeddings for all edges
-        df = movie_lens_loader.llm_df.apply(lambda row: __get_embedding(row, movie_lens_loader), axis = 1)
-        #compress the embeddings of all user embeddings to two dimensions
-        df[f"pca_2_user_embedding"] = ""
-        for split in ["train", "test", "val", "rest"]:
-            condition = df['split'] == split
-            user_embeddings = list(df[condition]["user_embedding"].values)
-            if split == "train":
-                if not self.user_pca_train or self.force_recompute:
-                    self.user_pca_train = PCA(n_components=2)  # Reduce to 2 dimensions
-                pca = self.user_pca_train
-            if split == "val":
-                if not self.user_pca_val or self.force_recompute:
-                    self.user_pca_val = PCA(n_components=2)  # Reduce to 2 dimensions
-                pca = self.user_pca_val
-            if split == "test":
-                if not self.user_pca_test or self.force_recompute:
-                    self.user_pca_test = PCA(n_components=2)  # Reduce to 2 dimensions
-                pca = self.user_pca_test
-            if split == "rest":
-                if not self.user_pca_rest or self.force_recompute:
-                    self.user_pca_rest = PCA(n_components=2)  # Reduce to 2 dimensions
-                pca = self.user_pca_rest
-            print(len(user_embeddings), len(user_embeddings[0]))
-            print(pca.fit_transform(user_embeddings))
-            print(pca.fit_transform(user_embeddings).squeeze())
-            pca_2_user_embeddings = pca.fit_transform(user_embeddings).squeeze().tolist()
-            pca_2_user_embeddings = list(map(lambda emb: str(emb), pca_2_user_embeddings))
-            df.loc[condition, 'pca_2_user_embedding'] = pca_2_user_embeddings
+        df = movie_lens_loader.llm_df
+        if not self.__are_embeddings_saved(df):
+            #produce the embeddings for all edges
+            df = movie_lens_loader.llm_df.apply(lambda row: __get_embedding(row, movie_lens_loader), axis = 1)
+            #compress the embeddings of all user embeddings to two dimensions
+            df[f"pca_2_user_embedding"] = ""
+            for split in ["train", "test", "val", "rest"]:
+                condition = df['split'] == split
+                user_embeddings = list(df[condition]["user_embedding"].values)
+                if split == "train":
+                    if not self.user_pca_train or self.force_recompute:
+                        self.user_pca_train = PCA(n_components=2)  # Reduce to 2 dimensions
+                    pca = self.user_pca_train
+                if split == "val":
+                    if not self.user_pca_val or self.force_recompute:
+                        self.user_pca_val = PCA(n_components=2)  # Reduce to 2 dimensions
+                    pca = self.user_pca_val
+                if split == "test":
+                    if not self.user_pca_test or self.force_recompute:
+                        self.user_pca_test = PCA(n_components=2)  # Reduce to 2 dimensions
+                    pca = self.user_pca_test
+                if split == "rest":
+                    if not self.user_pca_rest or self.force_recompute:
+                        self.user_pca_rest = PCA(n_components=2)  # Reduce to 2 dimensions
+                    pca = self.user_pca_rest
+                pca_2_user_embeddings = pca.fit_transform(user_embeddings).squeeze().tolist()
+                pca_2_user_embeddings = list(map(lambda emb: str(emb), pca_2_user_embeddings))
+                df.loc[condition, 'pca_2_user_embedding'] = pca_2_user_embeddings
 
-        #compress the embeddings of all movie embeddings to two dimensions
-        df[f"pca_2_movie_embedding"] = ""
-        for split in ["train", "test", "val", "rest"]:
-            condition = df['split'] == split
-            movie_embeddings = list(df[condition]["movie_embedding"].values)
-            if split == "train":
-                if not self.movie_pca_train or self.force_recompute:
-                    self.movie_pca_train = PCA(n_components=2)  # Reduce to 2 dimensions
-                pca = self.movie_pca_train
-            if split == "val":
-                if not self.movie_pca_val or self.force_recompute:
-                    self.movie_pca_val = PCA(n_components=2)  # Reduce to 2 dimensions
-                pca = self.movie_pca_val
-            if split == "test":
-                if not self.movie_pca_test or self.force_recompute:
-                    self.movie_pca_test = PCA(n_components=2)  # Reduce to 2 dimensions
-                pca = self.movie_pca_test
-            if split == "rest":
-                if not self.movie_pca_rest or self.force_recompute:
-                    self.movie_pca_rest = PCA(n_components=2)  # Reduce to 2 dimensions
-                pca = self.movie_pca_rest
-            pca_2_movie_embeddings = pca.fit_transform(movie_embeddings).squeeze().tolist()
-            pca_2_movie_embeddings = list(map(lambda emb: str(emb), pca_2_movie_embeddings))
-            df.loc[condition, 'pca_2_movie_embedding'] = pca_2_movie_embeddings
-        
+            #compress the embeddings of all movie embeddings to two dimensions
+            df[f"pca_2_movie_embedding"] = ""
+            for split in ["train", "test", "val", "rest"]:
+                condition = df['split'] == split
+                movie_embeddings = list(df[condition]["movie_embedding"].values)
+                if split == "train":
+                    if not self.movie_pca_train or self.force_recompute:
+                        self.movie_pca_train = PCA(n_components=2)  # Reduce to 2 dimensions
+                    pca = self.movie_pca_train
+                if split == "val":
+                    if not self.movie_pca_val or self.force_recompute:
+                        self.movie_pca_val = PCA(n_components=2)  # Reduce to 2 dimensions
+                    pca = self.movie_pca_val
+                if split == "test":
+                    if not self.movie_pca_test or self.force_recompute:
+                        self.movie_pca_test = PCA(n_components=2)  # Reduce to 2 dimensions
+                    pca = self.movie_pca_test
+                if split == "rest":
+                    if not self.movie_pca_rest or self.force_recompute:
+                        self.movie_pca_rest = PCA(n_components=2)  # Reduce to 2 dimensions
+                    pca = self.movie_pca_rest
+                pca_2_movie_embeddings = pca.fit_transform(movie_embeddings).squeeze().tolist()
+                pca_2_movie_embeddings = list(map(lambda emb: str(emb), pca_2_movie_embeddings))
+                df.loc[condition, 'pca_2_movie_embedding'] = pca_2_movie_embeddings
             
-        
-        # Save all PCAs models
-        self.__save_all_pcas()
+                
+            
+            # Save all PCAs models
+            self.__save_all_pcas()
 
-        movie_lens_loader.replace_llm_df(df)
+            movie_lens_loader.replace_llm_df(df)
 
     def __save_all_pcas(self):
         joblib.dump(self.user_pca_train, GNN_USER_TRAIN_PCA)
