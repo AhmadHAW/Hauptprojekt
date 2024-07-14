@@ -32,31 +32,44 @@ In the last step, we visualize the output embeddings of the LLMs with the help o
 ## Knowledge Graph Embedding Generation (Graph Representation Learning)
 So far we have only talked about the use of KGEs in LLMs, but we have not clarified how they are produced from KGs.
 ![Role of LLM in Graph Representation Learning](/images/Roles.png?raw=true)
-[2] describes that KGEs can be translated directly from their graph structure into an embedding or that a **graph neural network (GNN)** can be used for this purpose.
-## Installation Process
-Install most requirements using:
-```pip install -r requirements.txt```
-also install
+In this figure, [2] describes two essential decisions that need to be made when generating KGUs.
+First, graph structures can be embedded directly into a low-dimensional vector space or, for example, a **Graph Neural Network (GNN)** can be trained to produce semantically rich embeddings.
+Secondly, the roles of the LLM and GNN need to be clarified. Put simply, a GNN can be used to produce KGE for downstream tasks of the LLM (LLM as Predictor), GNN and LLN can learn the respective embeddings in an interplay for use in downstream tasks (LLS as Aligner) or the LLM produces semantically rich embeddings of the text for the GNN for use in downstream tasks (LLM as Encoder).
+In this project, we use a Graph Convolutional Network (GCN) to generate the KGEs. GCNs are one of the best state-of-the-art architectures for generating semantically rich KGEs, which we expect to have a strong semantic influence on the behavior of the LLM.
+In addition, we choose the role of the predictor for the LLM, since its behavior is in the foreground and we can thus retain more control over it during training.
 
-```torch-sparse```
-```torch-scatter```
-These libraries have strict requirements tho and the correct versions had to be specified manually (in my case).
-I refer you to the [tutorial](https://colab.research.google.com/drive/1xpzn1Nvai1ygd_P5Yambc_oe4VBPK_ZT?usp=sharing#scrollTo=rwgNwoa26Eja) by torch geometrics, which I used as a template. This tutorial is also a good starting point to understand Graph Representation Learning in general.
+In [5], a distinction is also made between three graph embedding techniques: node embeddings, edge embeddings and subgraph embeddings.
+For **node embeddings**, a mapping function $f: v_i \rightarrow R^d$ is learned so that for a graph $G = (V,E)$, where $V$ is the set of all nodes and $E$ is the set of all edges of the graph, a low-dimensional vector of dimension $d$ is created for each node $v_i$ such that $d << |V|$ and the **similarity of nodes in the graph is preserved in embedding space**.
+![Example Node Embedding](/images/Node%20Embedding.PNG)
+In this example, all nodes from the given graph are mapped to vectors of dimension $d=4$, with the example values for node $a$.
 
-## Overview
-A top down view on the overall process of Graph Representation Learning in LLMs as implemented in this project.
-![Overview of the transformation- and trainingsprocesses.](/images/Overview.png?raw=true)
-1.    The original (toy) dataset has user nodes and movie nodes, while the nodes are connected with edges from users to movies, if a user watched and rated the movie. In the first step we remove the rating and map new ids, so the graph is ready for link prediction.
-2.    In the second step we train a GCNN on link prediction. The GCNN has to decide if any given edge exists in the original graph.
-3.    With the original dataset and the dataset split we trained the GCNN on, we generate an NLP dataset, where the prompts for the LLM are the sum of the information we have about the user (only id) and the movie (title, genres and id). Again, the task of the LLM is to predict, if any given edge exists.
-4.    Next with the trained GCNN, we produce node embeddings for every user and movie in their respective edge and split. For the user and movie embeddings for every split we fit a PCA and reduce the dimensionality to two. We end up with 8 fitted PCAs (2 for each split: train, val, test, rest)
-5.    The reduced embeddings are now added to the prompt as a text, so the resulting dataset includes the graph embeddings.
-6.    Two LLMs are now trained on predicting if a given edge exists, one on the dataset with embeddings and one without (vanilla).
-## Playground
-Follow the playground for experiments.
+**Graph edge embeddings** define a mapping function $f: e_i->R^d$ for a given graph $G=(V,E)$, so that for vector dimension $d << |E|$ applies and the **similarity between edges of the graph in the embedding space is preserved**.
+
+With **subgraph embeddings**, a mapping function is learned for a given graph $G=(V,E)$ so that $d<<|G_{sub}|$ applies to the low-dimensional embedding and the **similarity of the subgraphs is preserved**.
+
+Edge and subgraph embeddings are often based on node embeddings [5], which is why we only use the node embedding method for simplification in this project.
+
+I refer to the [tutorial script](https://colab.research.google.com/drive/1xpzn1Nvai1ygd_P5Yambc_oe4VBPK_ZT?usp=sharing) of [6] for a detailed implementation and description of how the applied Graph Convolutional Network generates the node embeddings from given nodes and their neighborhoods. We have only made one change to this implementation by allowing you to specify the output dimension of the embedding vector.
+
+## Training and Inference Framework for Language Models on Graphs.
+Now that we understand how KGEs are created and we defined the role of LLM, let's take a closer look at exactly how KGEs can be incorporated into the LLM training and inference process.
+There is ***Graph as Sequence***, ***Graph-Empowered LLM*** and ***Graph-Aware LLM Finetuning*** for LLMs in the role of predictors. With the graph as sequence method, the KGE is embedded in the prompt. This method does not require any changes to the LLM architecture. In the Graph Empowered LLM method, the architecture of the LLM is modified so that text and KGE can be processed together. In Graph Aware LLM Finetuning, neither the input prompt nor the model architecture are changed, but the training process is adapted with the involvement of the KGEs.[2]
+As before, we opt for the supposedly simplest implementation to observe the semantic influence of KGEs on LLMs using the ***graph as sequence method***.
+
+## Dataset MovieLens
+MovieLens is a non-commercial movie-recommendation dataset. Users can rate films via an [Internet service](https://movielens.org/). In its full form, the benchmark dataset consists of 25 million film ratings, 1 million tags applied to 62,000 films and 16,000 users. A smaller version consists of 100000 ratings, 3600 tags, applied to 9000 movies and 600 users.
+A data point has the form ```<user, movie, rating, timestamp>```. Users are only mapped as IDs. Movies have the content <title, ID, genres>. For our research question, we are not looking at the tags for now.
+As already mentioned, we have strictly adhered to the Torch Geometric Tutorial when reshaping the data set. As a result, we get the following data points for the graph model: ```<user, rates, movie>```, where user and movie only consist of the IDs.
+For the LLM we get the following data points: ```<prompt, label>```, where the prompt is a natural language text consisting of *user ID, movie title, movie genres and movie ID*. The label is ```1``` (for user has rated the movie) and ```0``` (for user has not rated the movie).
+The original dataset only contains existing edges. That means we have to generate new (non existing) edges during training.
+## Visualizing the Semantic Embedding Space
+ 
 
 ## Sources
 [1] Knowledge Graph Embedding: A Survey from the Perspective of Representation Spaces
 [2] Large Language Models on Graphs: A Comprehensive Survey
 [3] Retrieval-augmented generation for knowledge-intensive nlp tasks
 [4] Graph Neural Networks for Natural Language Processing: A Survey
+[5] A Survey on Graph Representation Learning Methods
+[6] Fast Graph Representation Learning with {PyTorch Geometric}
+[7] The MovieLens Datasets: History and Context. ACM Transactions on Interactive Intelligent Systems
