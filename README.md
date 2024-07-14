@@ -13,6 +13,7 @@ In the context of KG, this could mean for RAG to extract the nodes and edges rel
 
 KGE, on the other hand, does not include any further textual information in the prediction, but refers exclusively to the specific graph topology of the entire graph and of nodes and edges in their (close) neighborhood.
 ![Possible Graph Structures [1]](/images/Graph-Structures.png?raw=true)
+
 The illustration shows how strongly the structural differences between KG topologies can vary. With KGE, these complex high dimensional graph structures can be embedded on low-dimensional vectors and thus made available to the LLM for further downstream tasks [1][2][4].
 
 ## Research Question and Experiment
@@ -28,7 +29,8 @@ The LLMs should be able to solve the binary classification task (*exists: True/F
 ## Knowledge Graph Embedding Generation (Graph Representation Learning)
 So far we have only talked about the use of KGEs in LLMs, but we have not clarified how they are produced from KGs.
 ![Role of LLM in Graph Representation Learning](images/Roles.PNG?raw=true)
-In this figure, [1] describes two essential decisions that need to be made when generating KGUs.
+
+In this figure, [1] describes two essential decisions that need to be made when generating KGEs.
 First, graph structures can be embedded directly into a low-dimensional vector space or, for example, a **Graph Neural Network (GNN)** can be trained to produce semantically rich embeddings.
 Secondly, the roles of the LLM and GNN need to be clarified. Put simply, a GNN can be used to produce KGE for downstream tasks of the LLM (LLM as Predictor), GNN and LLN can learn the respective embeddings in an interplay for use in downstream tasks (LLS as Aligner) or the LLM produces semantically rich embeddings of the text for the GNN for use in downstream tasks (LLM as Encoder).
 In this project, we use a Graph Convolutional Network (GCN) to generate the KGEs. GCNs are one of the best state-of-the-art architectures for generating semantically rich KGEs, which we expect to have a strong semantic influence on the behavior of the LLM.
@@ -37,6 +39,7 @@ In addition, we choose the role of the predictor for the LLM, since its behavior
 In [5], a distinction is also made between three graph embedding techniques: node embeddings, edge embeddings and subgraph embeddings.
 For **node embeddings**, a mapping function $f: v_i \rightarrow R^d$ is learned so that for a graph $G = (V,E)$, where $V$ is the set of all nodes and $E$ is the set of all edges of the graph, a low-dimensional vector of dimension $d$ is created for each node $v_i$ such that $d << |V|$ and the **similarity of nodes in the graph is preserved in embedding space**.
 ![Example Node Embedding](/images/Node%20Embedding.PNG)
+
 In this example, all nodes from the given graph are mapped to vectors of dimension $d=4$, with the example values for node $a$.
 
 **Graph edge embeddings** define a mapping function $f: e_i->R^d$ for a given graph $G=(V,E)$, so that for vector dimension $d << |E|$ applies and the **similarity between edges of the graph in the embedding space is preserved**.
