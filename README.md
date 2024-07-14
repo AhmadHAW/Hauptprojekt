@@ -63,7 +63,7 @@ For the LLM we get the following data points: ```<prompt, label>```, where the p
 The original dataset only contains existing edges. That means we have to generate new (non existing) edges during training and inference.
 ## Visualizing the Semantic Embedding Space
 We have described how KGEs are generated and how we transfer them to the LLM in the training and inference process. Now let's take a look at how we want to measure and visualize the changes in the semantic understanding of the LLM.
-First, let's look at the general performance of the vanilla LLM and the prompt LLMs. We check whether adding the KGEs leads to an improvement in accuracy. To do this, we look at the training process and then use the evaluation dataset to produce the cofusion matrices of the models.
+First, let's look at the general performance of the vanilla LLM and the prompt LLMs. We check whether adding the KGEs leads to an improvement in accuracy. To do this, we look at the training process and then use the evaluation dataset to produce the confusion matrices of the models.
 
 Then we calculate the positional encodings of all semantically meaningful passages in the prompt, such as user ID, movie ID, movie title, genres, user embedding and movie embedding.
 With the help of these positional encodings, we produce two views, one view of the attentions in the output layer and one view of the embeddings in the output layer.
@@ -71,8 +71,11 @@ With the help of these positional encodings, we produce two views, one view of t
 We expect to observe a shift from the natural language content to the KGEs in the view on the attentions. We may also see a difference in attention for user groups that are strongly or weakly connected (have rated many/few movies).
 
 In the view of the embeddings in the output layer, we can reduce the dimensions with Principal Component Analysis and thus produce a two-dimensional vector space. Here we try to compare the distance and proximity of semantically interesting subgroups more precisely.
-
-
+## Setup
+A large part of the dependencies can be installed with ```pip install -r requirements.txt```. The other libraries torch-scatter and torch-sparse can then be installed with the commands:
+```torch-scatter -f https://data.pyg.org/whl/torch-${TORCH}.html``` and ```torch-sparse -f https://data.pyg.org/whl/torch-${TORCH}.html```, whereby ```${TORCH}``` must be replaced with the current Torch version. It is important that the correct Torch version is installed and specified. For example, problems can occur when installing *Torch-Scatter* and *Torch-Sparse* if the installed Torch version supports Cuda without the host system doing so.
+## Playground
+Follow the [playground](playground.ipynb) for current experiments and a more detailed and practical explanation of the project. 
 ## Sources
 [1] Jin, Bowen et al. “Large Language Models on Graphs: A Comprehensive Survey.” ArXiv abs/2312.02783 (2023): n. pag.
 [2] Cao, Jiahang et al. “Knowledge Graph Embedding: A Survey from the Perspective of Representation Spaces.” ACM Computing Surveys 56 (2022): 1 - 42.
