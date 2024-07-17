@@ -73,10 +73,6 @@ class Model(torch.nn.Module):
         # Convert GNN model into a heterogeneous variant:
         self.gnn = to_hetero(self.gnn, metadata=data.metadata())
         self.model_path = GNN_MODEL_PATH.format(output_channels)
-        #load if there is a trained model and not force_recompute
-        if os.path.isfile(self.model_path) and not force_recompute:
-            print("loading pretrained model")
-            self.gnn.load_state_dict(torch.load(self.model_path))
 
         self.classifier = Classifier()
 
@@ -134,6 +130,10 @@ class GNNTrainer():
         data = data.clone()
         self.model_path = GNN_MODEL_PATH.format(kge_dimension)
         self.model = Model(hidden_channels=64, output_channels = kge_dimension, data=data, force_recompute = force_recompute)
+        #load if there is a trained model and not force_recompute
+        if os.path.isfile(self.model_path) and not force_recompute:
+            print("loading pretrained model")
+            self.model.load_state_dict(torch.load(self.model_path))
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"Device: '{self.device}'")
         self.model.to(self.device)
@@ -196,7 +196,7 @@ class GNNTrainer():
                 total_loss += float(loss) * pred.numel()
                 total_examples += pred.numel()
             print(f"Epoch: {epoch:03d}, Loss: {total_loss / total_examples:.4f}")
-            torch.save(self.model.gnn.state_dict(), self.model_path)
+            torch.save(self.model.state_dict(), self.model_path)
 
     def __link_neighbor_sampling(self, data, user_id, movie_id):
         edge_label_index = torch.tensor([[user_id], [movie_id]])

@@ -263,9 +263,9 @@ class ClassifierBase(ABC):
         
 
 class PromptEncoderOnlyClassifier(ClassifierBase):
-    def __init__(self, movie_lens_loader, get_embedding_cb, model_name = "google/bert_uncased_L-2_H-128_A-2", kge_dimension = 4, force_recompute = False) -> None:
+    def __init__(self, movie_lens_loader, get_embedding_cb, model_name = "google/bert_uncased_L-2_H-128_A-2", kge_dimension = 4, batch_size = 64, force_recompute = False) -> None:
         self.best_model_path = LLM_PROMPT_BEST_MODEL_PATH.format(kge_dimension)
-        super().__init__(df = movie_lens_loader.llm_df, model_name=model_name, force_recompute=force_recompute, kge_dimension = kge_dimension)
+        super().__init__(df = movie_lens_loader.llm_df, model_name=model_name, force_recompute=force_recompute, kge_dimension = kge_dimension, batch_size = batch_size)
         self.train_data_collator = PromptEmbeddingDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_train_data, get_embedding_cb, kge_dimension = kge_dimension)
         self.test_data_collator = PromptEmbeddingDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_test_data, get_embedding_cb, kge_dimension = kge_dimension)
         self.eval_data_collator = PromptEmbeddingDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_val_data, get_embedding_cb, kge_dimension = kge_dimension)
@@ -306,9 +306,9 @@ class PromptEncoderOnlyClassifier(ClassifierBase):
 
 
 class VanillaEncoderOnlyClassifier(ClassifierBase):
-    def __init__(self, df, model_name = "google/bert_uncased_L-2_H-128_A-2", kge_dimension = 4, force_recompute = False) -> None:
+    def __init__(self, df, model_name = "google/bert_uncased_L-2_H-128_A-2", kge_dimension = 4, batch_size = 64, force_recompute = False) -> None:
         self.best_model_path = LLM_VANILLA_BEST_MODEL_PATH.format(kge_dimension)
-        super().__init__(df = df, model_name=model_name, kge_dimension = kge_dimension, force_recompute=force_recompute)
+        super().__init__(df = df, model_name=model_name, kge_dimension = kge_dimension, batch_size = batch_size, force_recompute=force_recompute)
         self.data_collator = VanillaEmbeddingDataCollator(self.tokenizer, df)
     
     def _set_up_trainer(self, dataset, tokenize = False, epochs = 3):
