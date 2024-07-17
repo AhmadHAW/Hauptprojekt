@@ -219,7 +219,7 @@ class GNNTrainer():
         For that a subgraph of the neighbohood is generated and then applied to the GNN. Afterwards only the embeddings of
         given user and movie nodes are returned.
         '''
-        sampled_data = self.__link_neighbor_sampling(data, user_id, movie_id)
+        sampled_data = self.__link_neighbor_sampling(data, user_id, movie_id).to(self.device)
         embeddings = self.model.forward_without_classifier(sampled_data)
         user_node_id_index = (sampled_data['user'].n_id == user_id).nonzero(as_tuple=True)[0].item()
         movie_node_id_index = (sampled_data['movie'].n_id == movie_id).nonzero(as_tuple=True)[0].item()
