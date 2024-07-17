@@ -64,11 +64,12 @@ class PromptEmbeddingDataCollator(DataCollatorBase):
     '''
     The Prompt Data Collator also adds embeddings to the prompt on the fly.
     '''
-    def __init__(self, tokenizer, df, data, get_embedding_cb, false_ratio = 2.0):
+    def __init__(self, tokenizer, df, data, get_embedding_cb, kge_dimension = 4, false_ratio = 2.0):
         super().__init__(tokenizer=tokenizer,false_ratio = false_ratio)
         self.df = df
         self.data = data
         self.get_embedding_cb = get_embedding_cb
+        self.kge_dimension = kge_dimension
 
 
     def _transform_to_false_example(self):
@@ -76,10 +77,10 @@ class PromptEmbeddingDataCollator(DataCollatorBase):
         user_id, movie_id = self._find_non_existing_user_movie()
         random_row = self.df[self.df["mappedMovieId"] == movie_id].iloc[0]
         random_row["mappedUserId"] = user_id
-        user_embedding, movie_embedding, _, _ = self.get_embedding_cb(self.data, user_id, movie_id)
+        user_embedding, movie_embedding = self.get_embedding_cb(self.data, user_id, movie_id)
         random_row["user_embedding"] = user_embedding
         random_row["movie_embedding"] = movie_embedding
-        random_row["prompt"] = row_to_prompt_datapoint(random_row)
+        random_row["prompt"] = row_to_prompt_datapoint(random_row, self.kge_dimension)
         tokenized = self.tokenizer(random_row["prompt"], padding="max_length", truncation=True)
         return {
             "input_ids": tokenized["input_ids"],
@@ -118,7 +119,7 @@ class CustomTrainer(Trainer):
     '''
     def __init__(self, *args, eval_data_collator=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.eval_data_collator = eval_data_collator
+        self.test_data_collator = eval_data_collator
         
 
     def get_eval_dataloader(self, eval_dataset: Optional[Union[str, Dataset]] = None) -> DataLoader:
@@ -151,7 +152,7 @@ class CustomTrainer(Trainer):
             if eval_dataset is not None
             else self.eval_dataset
         )
-        data_collator = self.eval_data_collator
+        data_collator = self.test_data_collator
 
         if is_datasets_available() and isinstance(eval_dataset, datasets.Dataset):
             eval_dataset = self._remove_unused_columns(eval_dataset, description="evaluation")
@@ -183,18 +184,22 @@ class CustomTrainer(Trainer):
         return self.accelerator.prepare(eval_dataloader)
     
 class ClassifierBase(ABC):
-    def __init__(self, df, model_name = "google/bert_uncased_L-2_H-128_A-2", batch_size = 64, force_recompute = False) -> None:
+    def __init__(self, df, model_name = "google/bert_uncased_L-2_H-128_A-2", batch_size = 64, kge_dimension = 4, force_recompute = False) -> None:
+        assert kge_dimension <= 16
         self.model_name = model_name
         self.predictions = None
         self.df = df
         self.trainer = None
         self.batch_size = batch_size
+        self.kge_dimension = kge_dimension
         # Initialize the model and tokenizer
         if os.path.exists(self.best_model_path) and not force_recompute:
             self.model = BertForSequenceClassification.from_pretrained(self.best_model_path, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID)
         else:
             self.model = BertForSequenceClassification.from_pretrained(self.model_name, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID)
-        self.tokenizer = BertTokenizer.from_pretrained(self.model_name, model_max_length=256)
+
+        model_max_length = 256 if kge_dimension <= 8 else 512
+        self.tokenizer = BertTokenizer.from_pretrained(self.model_name, model_max_length=model_max_length)
     
     def tokenize_function(self, example, return_pt = False):
         if return_pt:
@@ -221,17 +226,26 @@ class ClassifierBase(ABC):
         self.trainer.model.save_pretrained(self.best_model_path)
 
     
-    def test_model_on_data(self, dataset):
-        self._set_up_trainer(dataset)
-        test_results = self.trainer.evaluate(eval_dataset = dataset["test"])
+    def evaluate_model_on_data(self, dataset, split):
+        if split == "test":
+            self._set_up_trainer(dataset["test"])
+            test_results = self.trainer.evaluate(eval_dataset = dataset["test"])
+        else:
+            self._set_up_trainer(dataset["val"], self.eval_data_collator)
+            test_results = self.trainer.evaluate(eval_dataset = dataset["val"])
 
         print(test_results)
 
-    def plot_confusion_matrix(self, dataset, tokenize = False, force_recompute = False):
-        self._set_up_trainer(dataset, tokenize = tokenize)
+    def plot_confusion_matrix(self, split, dataset, tokenize = False, force_recompute = False):
+        if split == "test":
+            self._set_up_trainer(dataset, tokenize = tokenize)
+            dataset = dataset["test"]
+        else:
+            self._set_up_trainer(dataset, tokenize = tokenize, eval_data_collator = self.eval_data_collator)
+            dataset = dataset["val"]
         if not self.predictions or force_recompute: 
         # Generate predictions
-            predictions = self.trainer.predict(dataset["val"])
+            predictions = self.trainer.predict(dataset)
             self.predictions = predictions
         # Get predicted labels and true labels
         preds = np.argmax(self.predictions.predictions, axis=-1)
@@ -249,11 +263,12 @@ class ClassifierBase(ABC):
         
 
 class PromptEncoderOnlyClassifier(ClassifierBase):
-    def __init__(self, movie_lens_loader, get_embedding_cb, model_name = "google/bert_uncased_L-2_H-128_A-2", force_recompute = False) -> None:
-        self.best_model_path = LLM_PROMPT_BEST_MODEL_PATH
-        super().__init__(df = movie_lens_loader.llm_df, model_name=model_name, force_recompute=force_recompute)
-        self.train_data_collator = PromptEmbeddingDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_train_data, get_embedding_cb)
-        self.eval_data_collator = PromptEmbeddingDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_val_data, get_embedding_cb)
+    def __init__(self, movie_lens_loader, get_embedding_cb, model_name = "google/bert_uncased_L-2_H-128_A-2", kge_dimension = 4, force_recompute = False) -> None:
+        self.best_model_path = LLM_PROMPT_BEST_MODEL_PATH.format(kge_dimension)
+        super().__init__(df = movie_lens_loader.llm_df, model_name=model_name, force_recompute=force_recompute, kge_dimension = kge_dimension)
+        self.train_data_collator = PromptEmbeddingDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_train_data, get_embedding_cb, kge_dimension = kge_dimension)
+        self.test_data_collator = PromptEmbeddingDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_test_data, get_embedding_cb, kge_dimension = kge_dimension)
+        self.eval_data_collator = PromptEmbeddingDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_val_data, get_embedding_cb, kge_dimension = kge_dimension)
 
     
     
@@ -264,20 +279,20 @@ class PromptEncoderOnlyClassifier(ClassifierBase):
             else:
                 tokenized_dataset = dataset
             training_args = TrainingArguments(
-                output_dir=LLM_PROMPT_TRAINING_PATH,
+                output_dir=LLM_PROMPT_TRAINING_PATH.format(self.kge_dimension),
                 num_train_epochs=epochs,
                 per_device_train_batch_size=self.batch_size,
                 per_device_eval_batch_size=self.batch_size,
                 warmup_steps=500,
                 weight_decay=0.01,
-                logging_dir=PROMPT_LOG_PATH,
+                logging_dir=PROMPT_LOG_PATH.format(self.kge_dimension),
                 logging_steps=10,
                 save_strategy="epoch",
                 eval_strategy="epoch",
                 load_best_model_at_end=True
             )
             if not eval_data_collator:
-                eval_data_collator = self.eval_data_collator
+                eval_data_collator = self.test_data_collator
             # Initialize the Trainer
             self.trainer = CustomTrainer(
                 model=self.model,
@@ -291,9 +306,9 @@ class PromptEncoderOnlyClassifier(ClassifierBase):
 
 
 class VanillaEncoderOnlyClassifier(ClassifierBase):
-    def __init__(self, df, model_name = "google/bert_uncased_L-2_H-128_A-2", force_recompute = False) -> None:
-        self.best_model_path = LLM_VANILLA_BEST_MODEL_PATH
-        super().__init__(df = df, model_name=model_name, force_recompute=force_recompute)
+    def __init__(self, df, model_name = "google/bert_uncased_L-2_H-128_A-2", kge_dimension = 4, force_recompute = False) -> None:
+        self.best_model_path = LLM_VANILLA_BEST_MODEL_PATH.format(kge_dimension)
+        super().__init__(df = df, model_name=model_name, kge_dimension = kge_dimension, force_recompute=force_recompute)
         self.data_collator = VanillaEmbeddingDataCollator(self.tokenizer, df)
     
     def _set_up_trainer(self, dataset, tokenize = False, epochs = 3):
@@ -302,13 +317,13 @@ class VanillaEncoderOnlyClassifier(ClassifierBase):
         else:
             tokenized_dataset = dataset
         training_args = TrainingArguments(
-            output_dir=LLM_VANILLA_TRAINING_PATH,
+            output_dir=LLM_VANILLA_TRAINING_PATH.format(self.kge_dimension),
             num_train_epochs=epochs,
             per_device_train_batch_size=self.batch_size,
             per_device_eval_batch_size=self.batch_size,
             warmup_steps=500,
             weight_decay=0.01,
-            logging_dir=VANILLA_LOG_PATH,
+            logging_dir=VANILLA_LOG_PATH.format(self.kge_dimension),
             logging_steps=10,
             save_strategy="epoch",
             eval_strategy="epoch",
