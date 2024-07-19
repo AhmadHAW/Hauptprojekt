@@ -1,16 +1,20 @@
 import random as rd
-from typing import Optional, Union
+from typing import Optional, Union, Dict, Tuple, List
 from abc import ABC, abstractmethod
 import os
+import ast
 
-from movie_lens_loader import row_to_prompt_datapoint, row_to_vanilla_datapoint, LLM_PROMPT_TRAINING_PATH, LLM_VANILLA_TRAINING_PATH, LLM_PROMPT_BEST_MODEL_PATH, LLM_VANILLA_BEST_MODEL_PATH
+from movie_lens_loader import row_to_prompt_datapoint, row_to_adding_embedding_datapoint, row_to_vanilla_datapoint, LLM_PROMPT_TRAINING_PATH, LLM_ADDING_TRAINING_PATH, LLM_VANILLA_TRAINING_PATH, LLM_PROMPT_BEST_MODEL_PATH, LLM_ADDING_BEST_MODEL_PATH, LLM_VANILLA_BEST_MODEL_PATH
 
 import torch
+from torch import nn
+from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 import datasets
 import numpy as np
 import evaluate
 from torch.utils.data import DataLoader, Dataset
-from transformers import BertForSequenceClassification, BertTokenizer, DataCollatorForLanguageModeling, Trainer, TrainingArguments
+from transformers import BertForSequenceClassification, BertModel, BertTokenizer, DataCollatorForLanguageModeling, Trainer, TrainingArguments
+from transformers.modeling_outputs import SequenceClassifierOutput
 from transformers.utils import is_datasets_available
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 import matplotlib.pyplot as plt
@@ -19,6 +23,7 @@ import matplotlib.pyplot as plt
 ID2LABEL = {0: "FALSE", 1: "TRUE"}
 LABEL2ID = {"FALSE": 0, "TRUE": 1}
 PROMPT_LOG_PATH = f"{LLM_PROMPT_TRAINING_PATH}/logs"
+ADDING_LOG_PATH = f"{LLM_ADDING_TRAINING_PATH}/logs"
 VANILLA_LOG_PATH = f"{LLM_VANILLA_TRAINING_PATH}/logs"
 
 class DataCollatorBase(DataCollatorForLanguageModeling, ABC):
@@ -26,11 +31,12 @@ class DataCollatorBase(DataCollatorForLanguageModeling, ABC):
     The Data Collators are used to generate non-existing edges on the fly. The false ratio allows to decide the ratio,
     in existing edges are replaced with non-existing edges.
     '''
-    def __init__(self, tokenizer, false_ratio = 2.0):
+    def __init__(self, tokenizer, df, false_ratio = 2.0):
         super().__init__(tokenizer=tokenizer, mlm=False)
         assert false_ratio > 0
         self.false_ratio = false_ratio
         self.tokenizer = tokenizer
+        self.df = df
 
     def __call__(self, features):
         new_features = []
@@ -44,14 +50,7 @@ class DataCollatorBase(DataCollatorForLanguageModeling, ABC):
             else:
                 new_features.append(feature)
         # Convert features into batches
-        input_ids = torch.tensor([f["input_ids"] for f in new_features], dtype=torch.long)
-        attention_mask = torch.tensor([f["attention_mask"] for f in new_features], dtype=torch.long)
-        labels = torch.tensor([f["labels"] for f in new_features], dtype=torch.long)
-        return {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "labels": labels
-        }
+        return self._convert_features_into_batches(new_features)
     
     def _find_non_existing_user_movie(self):
         while True:
@@ -60,13 +59,61 @@ class DataCollatorBase(DataCollatorForLanguageModeling, ABC):
             if not ((self.df["mappedUserId"] == user_id) & (self.df["mappedMovieId"] == movie_id)).any():
                 return user_id, movie_id
 
-class PromptEmbeddingDataCollator(DataCollatorBase):
+class TextBasedDataCollator(DataCollatorBase, ABC):
+    def __init__(self, tokenizer, df, false_ratio = 2.0):
+        super().__init__(tokenizer=tokenizer,false_ratio = false_ratio, df = df)
+    
+    def _convert_features_into_batches(self, features: List[Dict]) -> Dict:
+        input_ids = torch.tensor([f["input_ids"] for f in features], dtype=torch.long)
+        attention_mask = torch.tensor([f["attention_mask"] for f in features], dtype=torch.long)
+        labels = torch.tensor([f["labels"] for f in features], dtype=torch.long)
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": labels
+        }
+
+
+class EmbeddingBasedDataCollator(DataCollatorBase):
+    def __init__(self, tokenizer, df, data, get_embedding_cb, kge_dimension = 128, false_ratio = 2.0):
+        super().__init__(tokenizer=tokenizer,false_ratio = false_ratio, df = df)
+        self.data = data
+        self.get_embedding_cb = get_embedding_cb
+        self.kge_dimension = kge_dimension
+
+    def _convert_features_into_batches(self, features: List[Dict]) -> Dict:
+        input_ids = torch.tensor([f["input_ids"] for f in features], dtype=torch.long)
+        attention_mask = torch.tensor([f["attention_mask"] for f in features], dtype=torch.long)
+        labels = torch.tensor([f["labels"] for f in features], dtype=torch.long)
+        graph_embeddings = [f["graph_embeddings"] for f in features]
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": labels,
+            "graph_embeddings": graph_embeddings
+        }
+    
+    def _transform_to_false_example(self):
+        label = 0
+        user_id, movie_id = self._find_non_existing_user_movie()
+        random_row = self.df[self.df["mappedMovieId"] == movie_id].iloc[0]
+        random_row["mappedUserId"] = user_id
+        user_embedding, movie_embedding = self.get_embedding_cb(self.data, user_id, movie_id)
+        random_row["prompt"] = row_to_adding_embedding_datapoint(random_row, self.tokenizer.sep_token, self.tokenizer.pad_token)
+        tokenized = self.tokenizer(random_row["prompt"], padding="max_length", truncation=True)
+        return {
+            "input_ids": tokenized["input_ids"],
+            "attention_mask": tokenized["attention_mask"],
+            "labels": label,
+            "graph_embeddings" : str([user_embedding, movie_embedding]),
+            }
+
+class PromptEmbeddingDataCollator(TextBasedDataCollator):
     '''
     The Prompt Data Collator also adds embeddings to the prompt on the fly.
     '''
     def __init__(self, tokenizer, df, data, get_embedding_cb, kge_dimension = 4, false_ratio = 2.0):
-        super().__init__(tokenizer=tokenizer,false_ratio = false_ratio)
-        self.df = df
+        super().__init__(tokenizer=tokenizer,false_ratio = false_ratio, df = df)
         self.data = data
         self.get_embedding_cb = get_embedding_cb
         self.kge_dimension = kge_dimension
@@ -88,13 +135,12 @@ class PromptEmbeddingDataCollator(DataCollatorBase):
             "labels": label
             }
     
-class VanillaEmbeddingDataCollator(DataCollatorBase):
+class VanillaEmbeddingDataCollator(TextBasedDataCollator):
     '''
     The vanilla data collator does only generate false edges with the prompt, title, user_id and genres.
     '''
     def __init__(self, tokenizer, df, false_ratio = 2.0):
-        super().__init__(tokenizer=tokenizer,false_ratio = false_ratio)
-        self.df = df
+        super().__init__(tokenizer=tokenizer,false_ratio = false_ratio, df = df)
 
 
     def _transform_to_false_example(self):
@@ -183,23 +229,102 @@ class CustomTrainer(Trainer):
 
         return self.accelerator.prepare(eval_dataloader)
     
-class ClassifierBase(ABC):
-    def __init__(self, df, model_name = "google/bert_uncased_L-2_H-128_A-2", batch_size = 64, kge_dimension = 4, force_recompute = False) -> None:
-        assert kge_dimension <= 16
-        self.model_name = model_name
+class InsertEmbeddingBertForSequenceClassification(BertForSequenceClassification):
+    
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        token_type_ids: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        head_mask: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        graph_embeddings: Optional[List[str]] = None,
+    ) -> Union[Tuple[torch.Tensor], SequenceClassifierOutput]:
+        r"""
+        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
+            Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
+            config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
+            `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        if inputs_embeds is None:
+            inputs_embeds = self.bert.embeddings(input_ids)
+
+        if graph_embeddings is not None and len(graph_embeddings) > 0:
+            
+            if attention_mask is not None:
+                mask = (attention_mask.sum(dim = 1) -1)
+                for batch, (cls_embedding_position, graph_embedding) in enumerate(zip(mask,graph_embeddings)):
+                    cls_embedding = inputs_embeds[batch, cls_embedding_position, :]
+                    sep_embedding = inputs_embeds[batch, cls_embedding_position-2, :]
+                    if torch.eq(sep_embedding, cls_embedding).all():
+                        sep_embedding_positions = torch.nonzero(inputs_embeds == sep_embedding)[:-1]
+                    else:
+                        sep_embedding_positions = torch.nonzero(inputs_embeds == sep_embedding)
+                    graph_embedding = torch.tensor(ast.literal_eval(graph_embedding))
+                    for sep_embedding_position, graph_embedding_ in zip(sep_embedding_positions, graph_embedding):
+                        inputs_embeds[batch, sep_embedding_position+1, :] = graph_embedding_
+
+        outputs = self.bert(
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        pooled_output = outputs[1]
+
+        pooled_output = self.dropout(pooled_output)
+        logits = self.classifier(pooled_output)
+
+        loss = None
+        if labels is not None:
+            if self.config.problem_type is None:
+                if self.num_labels == 1:
+                    self.config.problem_type = "regression"
+                elif self.num_labels > 1 and (labels.dtype == torch.long or labels.dtype == torch.int):
+                    self.config.problem_type = "single_label_classification"
+                else:
+                    self.config.problem_type = "multi_label_classification"
+
+            if self.config.problem_type == "regression":
+                loss_fct = MSELoss()
+                if self.num_labels == 1:
+                    loss = loss_fct(logits.squeeze(), labels.squeeze())
+                else:
+                    loss = loss_fct(logits, labels)
+            elif self.config.problem_type == "single_label_classification":
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+            elif self.config.problem_type == "multi_label_classification":
+                loss_fct = BCEWithLogitsLoss()
+                loss = loss_fct(logits, labels)
+        if not return_dict:
+            output = (logits,) + outputs[2:]
+            return ((loss,) + output) if loss is not None else output
+
+        return SequenceClassifierOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+class ClassifierBase():
+    def __init__(self, df, batch_size = 64, force_recompute = False) -> None:
         self.predictions = None
         self.df = df
-        self.trainer = None
         self.batch_size = batch_size
-        self.kge_dimension = kge_dimension
-        # Initialize the model and tokenizer
-        if os.path.exists(self.best_model_path) and not force_recompute:
-            self.model = BertForSequenceClassification.from_pretrained(self.best_model_path, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID)
-        else:
-            self.model = BertForSequenceClassification.from_pretrained(self.model_name, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID)
-
-        model_max_length = 256 if kge_dimension <= 8 else 512
-        self.tokenizer = BertTokenizer.from_pretrained(self.model_name, model_max_length=model_max_length)
+        self.force_recompute = force_recompute
     
     def tokenize_function(self, example, return_pt = False):
         if return_pt:
@@ -218,34 +343,34 @@ class ClassifierBase(ABC):
         return METRIC.compute(predictions=predictions, references=labels)
     
     def train_model_on_data(self, dataset, epochs = 3):
-        self._set_up_trainer(dataset, epochs = epochs)
+        trainer = self._set_up_trainer(dataset, epochs = epochs)
 
         # Train the model
-        self.trainer.train()
+        trainer.train()
 
-        self.trainer.model.save_pretrained(self.best_model_path)
+        trainer.model.save_pretrained(self.best_model_path)
 
     
     def evaluate_model_on_data(self, dataset, split):
         if split == "test":
-            self._set_up_trainer(dataset["test"])
-            test_results = self.trainer.evaluate(eval_dataset = dataset["test"])
+            trainer = self._set_up_trainer(dataset["test"])
+            test_results = trainer.evaluate(eval_dataset = dataset["test"])
         else:
-            self._set_up_trainer(dataset["val"], self.eval_data_collator)
-            test_results = self.trainer.evaluate(eval_dataset = dataset["val"])
+            trainer = self._set_up_trainer(dataset["val"], self.eval_data_collator)
+            test_results = trainer.evaluate(eval_dataset = dataset["val"])
 
         print(test_results)
 
     def plot_confusion_matrix(self, split, dataset, tokenize = False, force_recompute = False):
         if split == "test":
-            self._set_up_trainer(dataset, tokenize = tokenize)
+            trainer = self._set_up_trainer(dataset, tokenize = tokenize)
             dataset = dataset["test"]
         else:
-            self._set_up_trainer(dataset, tokenize = tokenize, eval_data_collator = self.eval_data_collator)
+            trainer = self._set_up_trainer(dataset, tokenize = tokenize, eval_data_collator = self.eval_data_collator)
             dataset = dataset["val"]
         if not self.predictions or force_recompute: 
         # Generate predictions
-            predictions = self.trainer.predict(dataset)
+            predictions = trainer.predict(dataset)
             self.predictions = predictions
         # Get predicted labels and true labels
         preds = np.argmax(self.predictions.predictions, axis=-1)
@@ -257,15 +382,80 @@ class ClassifierBase(ABC):
         disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["Negative", "Positive"])
         disp.plot(cmap=plt.cm.Blues)
         plt.show()
+        
+
+class ClassifierOriginalArchitectureBase(ClassifierBase):
+    def __init__(self, df, model_name = "google/bert_uncased_L-2_H-128_A-2", batch_size = 64, model_max_length = 256, force_recompute = False) -> None:
+        super().__init__( df = df, batch_size = batch_size, force_recompute = force_recompute)
+        self.model_name = model_name
+        
+        # Initialize the model and tokenizer
+        if os.path.exists(self.best_model_path) and not self.force_recompute:
+            self.model = BertForSequenceClassification.from_pretrained(self.best_model_path, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID)
+        else:
+            self.model = BertForSequenceClassification.from_pretrained(self.model_name, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID)
+
+        
+        self.tokenizer = BertTokenizer.from_pretrained(self.model_name, model_max_length=model_max_length)
 
 
         
+class AddingEmbeddingsBertClassifierBase(ClassifierBase):
+    def __init__(self, movie_lens_loader, get_embedding_cb, model_name = "google/bert_uncased_L-2_H-128_A-2", kge_dimension = 128, batch_size = 64,model_max_length = 256, force_recompute = False) -> None:
+        super().__init__(df = movie_lens_loader.llm_df, batch_size = batch_size, force_recompute = force_recompute)
+        self.kge_dimension = kge_dimension
+        self.best_model_path = LLM_ADDING_BEST_MODEL_PATH.format(self.kge_dimension)
+        self.model_name = model_name
         
+        # Initialize the model and tokenizer
+        if os.path.exists(self.best_model_path) and not self.force_recompute:
+            self.model = InsertEmbeddingBertForSequenceClassification.from_pretrained(self.best_model_path, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID)
+        else:
+            self.model = InsertEmbeddingBertForSequenceClassification.from_pretrained(self.model_name, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID)
 
-class PromptEncoderOnlyClassifier(ClassifierBase):
-    def __init__(self, movie_lens_loader, get_embedding_cb, model_name = "google/bert_uncased_L-2_H-128_A-2", kge_dimension = 4, batch_size = 64, force_recompute = False) -> None:
-        self.best_model_path = LLM_PROMPT_BEST_MODEL_PATH.format(kge_dimension)
-        super().__init__(df = movie_lens_loader.llm_df, model_name=model_name, force_recompute=force_recompute, kge_dimension = kge_dimension, batch_size = batch_size)
+        model_max_length = 256 if self.kge_dimension <= 8 else 512
+        self.tokenizer = BertTokenizer.from_pretrained(self.model_name, model_max_length=model_max_length)
+        self.train_data_collator = EmbeddingBasedDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_train_data, get_embedding_cb, kge_dimension=self.kge_dimension)
+        self.test_data_collator = EmbeddingBasedDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_test_data, get_embedding_cb, kge_dimension=self.kge_dimension)
+        self.eval_data_collator = EmbeddingBasedDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_val_data, get_embedding_cb, kge_dimension=self.kge_dimension)
+
+    def _set_up_trainer(self, dataset, tokenize = False, eval_data_collator = None, epochs = 3):
+        if tokenize:
+            tokenized_dataset = dataset.map(self.tokenize_function, batched = True)
+        else:
+            tokenized_dataset = dataset
+        training_args = TrainingArguments(
+            output_dir=LLM_ADDING_TRAINING_PATH.format(self.kge_dimension),
+            num_train_epochs=epochs,
+            per_device_train_batch_size=self.batch_size,
+            per_device_eval_batch_size=self.batch_size,
+            warmup_steps=500,
+            weight_decay=0.01,
+            logging_dir=ADDING_LOG_PATH.format(self.kge_dimension),
+            logging_steps=10,
+            save_strategy="epoch",
+            eval_strategy="epoch",
+            load_best_model_at_end=True,
+        )
+        if not eval_data_collator:
+            eval_data_collator = self.test_data_collator
+        # Initialize the Trainer
+        return CustomTrainer(
+            model=self.model,
+            args=training_args,
+            train_dataset=tokenized_dataset["train"],
+            eval_dataset=tokenized_dataset["test"],
+            data_collator=self.train_data_collator,
+            eval_data_collator=eval_data_collator,
+            compute_metrics=self._compute_metrics,
+        )
+
+class PromptBertClassifier(ClassifierOriginalArchitectureBase):
+    def __init__(self, movie_lens_loader, get_embedding_cb, model_name = "google/bert_uncased_L-2_H-128_A-2", kge_dimension = 4, batch_size = 64,model_max_length = 256, force_recompute = False) -> None:
+        assert kge_dimension <= 16
+        self.kge_dimension = kge_dimension
+        self.best_model_path = LLM_PROMPT_BEST_MODEL_PATH.format(self.kge_dimension)
+        super().__init__(df = movie_lens_loader.llm_df, model_name=model_name, force_recompute=force_recompute, batch_size = batch_size,model_max_length = model_max_length)
         self.train_data_collator = PromptEmbeddingDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_train_data, get_embedding_cb, kge_dimension = kge_dimension)
         self.test_data_collator = PromptEmbeddingDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_test_data, get_embedding_cb, kge_dimension = kge_dimension)
         self.eval_data_collator = PromptEmbeddingDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_val_data, get_embedding_cb, kge_dimension = kge_dimension)
@@ -273,42 +463,41 @@ class PromptEncoderOnlyClassifier(ClassifierBase):
     
     
     def _set_up_trainer(self, dataset, tokenize = False, eval_data_collator = None, epochs = 3):
-        if not self.trainer:
-            if tokenize:
-                tokenized_dataset = dataset.map(self.tokenize_function, batched = True)
-            else:
-                tokenized_dataset = dataset
-            training_args = TrainingArguments(
-                output_dir=LLM_PROMPT_TRAINING_PATH.format(self.kge_dimension),
-                num_train_epochs=epochs,
-                per_device_train_batch_size=self.batch_size,
-                per_device_eval_batch_size=self.batch_size,
-                warmup_steps=500,
-                weight_decay=0.01,
-                logging_dir=PROMPT_LOG_PATH.format(self.kge_dimension),
-                logging_steps=10,
-                save_strategy="epoch",
-                eval_strategy="epoch",
-                load_best_model_at_end=True
-            )
-            if not eval_data_collator:
-                eval_data_collator = self.test_data_collator
-            # Initialize the Trainer
-            self.trainer = CustomTrainer(
-                model=self.model,
-                args=training_args,
-                train_dataset=tokenized_dataset["train"],
-                eval_dataset=tokenized_dataset["test"],
-                data_collator=self.train_data_collator,
-                eval_data_collator=eval_data_collator,
-                compute_metrics=self._compute_metrics,
-            )
+        if tokenize:
+            tokenized_dataset = dataset.map(self.tokenize_function, batched = True)
+        else:
+            tokenized_dataset = dataset
+        training_args = TrainingArguments(
+            output_dir=LLM_PROMPT_TRAINING_PATH.format(self.kge_dimension),
+            num_train_epochs=epochs,
+            per_device_train_batch_size=self.batch_size,
+            per_device_eval_batch_size=self.batch_size,
+            warmup_steps=500,
+            weight_decay=0.01,
+            logging_dir=PROMPT_LOG_PATH.format(self.kge_dimension),
+            logging_steps=10,
+            save_strategy="epoch",
+            eval_strategy="epoch",
+            load_best_model_at_end=True
+        )
+        if not eval_data_collator:
+            eval_data_collator = self.test_data_collator
+        # Initialize the Trainer
+        return CustomTrainer(
+            model=self.model,
+            args=training_args,
+            train_dataset=tokenized_dataset["train"],
+            eval_dataset=tokenized_dataset["test"],
+            data_collator=self.train_data_collator,
+            eval_data_collator=eval_data_collator,
+            compute_metrics=self._compute_metrics,
+        )
 
 
-class VanillaEncoderOnlyClassifier(ClassifierBase):
-    def __init__(self, df, model_name = "google/bert_uncased_L-2_H-128_A-2", kge_dimension = 4, batch_size = 64, force_recompute = False) -> None:
-        self.best_model_path = LLM_VANILLA_BEST_MODEL_PATH.format(kge_dimension)
-        super().__init__(df = df, model_name=model_name, kge_dimension = kge_dimension, batch_size = batch_size, force_recompute=force_recompute)
+class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
+    def __init__(self, df, model_name = "google/bert_uncased_L-2_H-128_A-2", batch_size = 64,model_max_length = 256, force_recompute = False) -> None:
+        self.best_model_path = LLM_VANILLA_BEST_MODEL_PATH
+        super().__init__(df = df, model_name=model_name, batch_size = batch_size, model_max_length = model_max_length, force_recompute=force_recompute)
         self.data_collator = VanillaEmbeddingDataCollator(self.tokenizer, df)
     
     def _set_up_trainer(self, dataset, tokenize = False, epochs = 3):
@@ -317,13 +506,13 @@ class VanillaEncoderOnlyClassifier(ClassifierBase):
         else:
             tokenized_dataset = dataset
         training_args = TrainingArguments(
-            output_dir=LLM_VANILLA_TRAINING_PATH.format(self.kge_dimension),
+            output_dir=LLM_VANILLA_TRAINING_PATH,
             num_train_epochs=epochs,
             per_device_train_batch_size=self.batch_size,
             per_device_eval_batch_size=self.batch_size,
             warmup_steps=500,
             weight_decay=0.01,
-            logging_dir=VANILLA_LOG_PATH.format(self.kge_dimension),
+            logging_dir=VANILLA_LOG_PATH,
             logging_steps=10,
             save_strategy="epoch",
             eval_strategy="epoch",
@@ -331,7 +520,7 @@ class VanillaEncoderOnlyClassifier(ClassifierBase):
         )
 
         # Initialize the Trainer
-        self.trainer = Trainer(
+        return Trainer(
             model=self.model,
             args=training_args,
             train_dataset=tokenized_dataset["train"],

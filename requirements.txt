@@ -7,3 +7,4 @@ datasets
 pandas
 evaluate
 seaborn
+accelerate

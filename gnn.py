@@ -1,5 +1,6 @@
 import os
 import joblib
+from typing import Optional
 
 from pandas import DataFrame
 import torch
@@ -113,7 +114,7 @@ class GNNTrainer():
     the GNNTrainer provides a callback function for generating embeddings for given edges.
     Among other things, this function can help to generate non-existent edges on the fly.
     '''
-    def __init__(self, data: HeteroData, force_recompute: bool = False, kge_dimension: int = 4) -> None:
+    def __init__(self, data: HeteroData, force_recompute: bool = False, kge_dimension: Optional[int] = None, hidden_channels: int = 64) -> None:
         '''
         The constructor of the GNNTrainer initializes the model in the corresponding dimensions, the optimizer for the training and data set splits.
         Parameters
@@ -128,8 +129,10 @@ class GNNTrainer():
                                 Default 4
         '''
         data = data.clone()
+        if not kge_dimension:
+            kge_dimension = hidden_channels
         self.model_path = GNN_MODEL_PATH.format(kge_dimension)
-        self.model = Model(hidden_channels=64, output_channels = kge_dimension, data=data, force_recompute = force_recompute)
+        self.model = Model(hidden_channels=hidden_channels, output_channels = kge_dimension, data=data, force_recompute = force_recompute)
         #load if there is a trained model and not force_recompute
         if os.path.isfile(self.model_path) and not force_recompute:
             print("loading pretrained model")
