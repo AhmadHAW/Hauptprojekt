@@ -1,8 +1,7 @@
 import random as rd
 from typing import Optional, Union, Dict, Tuple, List
-from abc import ABC, abstractmethod
+from abc import ABC
 import os
-import ast
 
 from movie_lens_loader import row_to_prompt_datapoint, row_to_adding_embedding_datapoint, row_to_vanilla_datapoint, LLM_PROMPT_TRAINING_PATH, LLM_ADDING_TRAINING_PATH, LLM_VANILLA_TRAINING_PATH, LLM_PROMPT_BEST_MODEL_PATH, LLM_ADDING_BEST_MODEL_PATH, LLM_VANILLA_BEST_MODEL_PATH
 
@@ -18,7 +17,6 @@ from transformers.modeling_outputs import SequenceClassifierOutput
 from transformers.utils import is_datasets_available
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 import matplotlib.pyplot as plt
-
 
 ID2LABEL = {0: "FALSE", 1: "TRUE"}
 LABEL2ID = {"FALSE": 0, "TRUE": 1}
@@ -85,7 +83,12 @@ class EmbeddingBasedDataCollator(DataCollatorBase):
         input_ids = torch.tensor([f["input_ids"] for f in features], dtype=torch.long)
         attention_mask = torch.tensor([f["attention_mask"] for f in features], dtype=torch.long)
         labels = torch.tensor([f["labels"] for f in features], dtype=torch.long)
-        graph_embeddings = [f["graph_embeddings"] for f in features]
+        for f in features:
+            if isinstance(f["graph_embeddings"], list):
+                f["graph_embeddings"] = torch.stack([torch.tensor(f["graph_embeddings"][0]), torch.tensor(f["graph_embeddings"][1])])
+            else:
+                f["graph_embeddings"] = f["graph_embeddings"].to(torch.device('cpu'))
+        graph_embeddings = torch.stack([f["graph_embeddings"] for f in features])
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
@@ -105,7 +108,7 @@ class EmbeddingBasedDataCollator(DataCollatorBase):
             "input_ids": tokenized["input_ids"],
             "attention_mask": tokenized["attention_mask"],
             "labels": label,
-            "graph_embeddings" : str([user_embedding, movie_embedding]),
+            "graph_embeddings" : torch.stack([user_embedding, movie_embedding]),
             }
 
 class PromptEmbeddingDataCollator(TextBasedDataCollator):
@@ -243,7 +246,7 @@ class InsertEmbeddingBertForSequenceClassification(BertForSequenceClassification
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        graph_embeddings: Optional[List[str]] = None,
+        graph_embeddings: Optional[torch.Tensor] = None,
     ) -> Union[Tuple[torch.Tensor], SequenceClassifierOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
@@ -254,22 +257,11 @@ class InsertEmbeddingBertForSequenceClassification(BertForSequenceClassification
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         if inputs_embeds is None:
             inputs_embeds = self.bert.embeddings(input_ids)
-
         if graph_embeddings is not None and len(graph_embeddings) > 0:
             
             if attention_mask is not None:
-                mask = (attention_mask.sum(dim = 1) -1)
-                for batch, (cls_embedding_position, graph_embedding) in enumerate(zip(mask,graph_embeddings)):
-                    cls_embedding = inputs_embeds[batch, cls_embedding_position, :]
-                    sep_embedding = inputs_embeds[batch, cls_embedding_position-2, :]
-                    if torch.eq(sep_embedding, cls_embedding).all():
-                        sep_embedding_positions = torch.nonzero(inputs_embeds == sep_embedding)[:-1]
-                    else:
-                        sep_embedding_positions = torch.nonzero(inputs_embeds == sep_embedding)
-                    graph_embedding = torch.tensor(ast.literal_eval(graph_embedding))
-                    for sep_embedding_position, graph_embedding_ in zip(sep_embedding_positions, graph_embedding):
-                        inputs_embeds[batch, sep_embedding_position+1, :] = graph_embedding_
-
+                mask = ((attention_mask.sum(dim = 1) -1).unsqueeze(1).repeat((1,2))-torch.tensor([3,1]).to(self.device)).unsqueeze(2).repeat((1,1,self.config.hidden_size))        
+                inputs_embeds = inputs_embeds.scatter(1, mask, graph_embeddings)
         outputs = self.bert(
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
@@ -285,7 +277,6 @@ class InsertEmbeddingBertForSequenceClassification(BertForSequenceClassification
 
         pooled_output = self.dropout(pooled_output)
         logits = self.classifier(pooled_output)
-
         loss = None
         if labels is not None:
             if self.config.problem_type is None:
@@ -325,17 +316,6 @@ class ClassifierBase():
         self.df = df
         self.batch_size = batch_size
         self.force_recompute = force_recompute
-    
-    def tokenize_function(self, example, return_pt = False):
-        if return_pt:
-            tokenized =  self.tokenizer(example["prompt"], padding="max_length", truncation=True, return_tensors = "pt")
-        else:
-            tokenized =  self.tokenizer(example["prompt"], padding="max_length", truncation=True)
-        result = {
-            "input_ids": tokenized["input_ids"],
-            "attention_mask": tokenized["attention_mask"],
-            "labels": example["labels"]}
-        return result
     
     def _compute_metrics(self, eval_pred):
         predictions, labels = eval_pred
@@ -398,7 +378,16 @@ class ClassifierOriginalArchitectureBase(ClassifierBase):
         
         self.tokenizer = BertTokenizer.from_pretrained(self.model_name, model_max_length=model_max_length)
 
-
+    def tokenize_function(self, example, return_pt = False):
+        if return_pt:
+            tokenized =  self.tokenizer(example["prompt"], padding="max_length", truncation=True, return_tensors = "pt")
+        else:
+            tokenized =  self.tokenizer(example["prompt"], padding="max_length", truncation=True)
+        result = {
+            "input_ids": tokenized["input_ids"],
+            "attention_mask": tokenized["attention_mask"],
+            "labels": example["labels"]}
+        return result
         
 class AddingEmbeddingsBertClassifierBase(ClassifierBase):
     def __init__(self, movie_lens_loader, get_embedding_cb, model_name = "google/bert_uncased_L-2_H-128_A-2", kge_dimension = 128, batch_size = 64,model_max_length = 256, force_recompute = False) -> None:
@@ -449,6 +438,18 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
             eval_data_collator=eval_data_collator,
             compute_metrics=self._compute_metrics,
         )
+    
+    def tokenize_function(self, example, return_pt = False):
+        if return_pt:
+            tokenized =  self.tokenizer(example["prompt"], padding="max_length", truncation=True, return_tensors = "pt")
+        else:
+            tokenized =  self.tokenizer(example["prompt"], padding="max_length", truncation=True)
+        result = {
+            "input_ids": tokenized["input_ids"],
+            "attention_mask": tokenized["attention_mask"],
+            "labels": example["labels"],
+            "graph_embeddings": example["graph_embeddings"]}
+        return result
 
 class PromptBertClassifier(ClassifierOriginalArchitectureBase):
     def __init__(self, movie_lens_loader, get_embedding_cb, model_name = "google/bert_uncased_L-2_H-128_A-2", kge_dimension = 4, batch_size = 64,model_max_length = 256, force_recompute = False) -> None:

@@ -226,8 +226,8 @@ class GNNTrainer():
         embeddings = self.model.forward_without_classifier(sampled_data)
         user_node_id_index = (sampled_data['user'].n_id == user_id).nonzero(as_tuple=True)[0].item()
         movie_node_id_index = (sampled_data['movie'].n_id == movie_id).nonzero(as_tuple=True)[0].item()
-        user_embedding = embeddings["user"][user_node_id_index].detach().tolist()
-        movie_embedding = embeddings["movie"][movie_node_id_index].detach().tolist()
+        user_embedding = embeddings["user"][user_node_id_index]
+        movie_embedding = embeddings["movie"][movie_node_id_index]
         return user_embedding, movie_embedding
     
     def __are_embeddings_saved(self, df):

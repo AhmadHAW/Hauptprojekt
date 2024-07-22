@@ -355,7 +355,7 @@ class MovieLensLoader():
         movie_embeddings = movie_embeddings.replace("\n", "")
         movie_embeddings = ast.literal_eval(movie_embeddings)
         movie_embeddings = [float(movie_embedding) for movie_embedding in movie_embeddings]
-        embeddings = str([user_embeddings, movie_embeddings])
+        embeddings = [user_embeddings, movie_embeddings]
         return embeddings
     
     def generate_adding_embedding_dataset(self, sep_token, pad_token, tokenize_function:Callable = None, kge_dimension:int = 4, force_recompute: bool = False) -> DatasetDict:
