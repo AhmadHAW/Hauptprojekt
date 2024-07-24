@@ -199,7 +199,7 @@ class GNNTrainer():
                 total_loss += float(loss) * pred.numel()
                 total_examples += pred.numel()
             print(f"Epoch: {epoch:03d}, Loss: {total_loss / total_examples:.4f}")
-            torch.save(self.model.state_dict(), self.model_path)
+            torch.save(self.model.to(device = "cpu").state_dict(), self.model_path)
 
     def __link_neighbor_sampling(self, data, user_id, movie_id):
         edge_label_index = torch.tensor([[user_id], [movie_id]])
@@ -302,4 +302,4 @@ class GNNTrainer():
         print(f"Validation AUC: {auc:.4f}")
 
     def save_model(self):
-        torch.save(self.model.gnn.state_dict(), self.model_path)
+        torch.save(self.model.to(device = "cpu").gnn.state_dict(), self.model_path)

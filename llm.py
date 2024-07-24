@@ -328,7 +328,7 @@ class ClassifierBase():
         # Train the model
         trainer.train()
 
-        trainer.model.save_pretrained(self.best_model_path)
+        trainer.model.to(device = "cpu").save_pretrained(self.best_model_path)
 
     
     def evaluate_model_on_data(self, dataset, split):
