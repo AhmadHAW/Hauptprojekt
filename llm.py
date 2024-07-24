@@ -340,28 +340,6 @@ class ClassifierBase():
             test_results = trainer.evaluate(eval_dataset = dataset["val"])
 
         print(test_results)
-
-    def plot_confusion_matrix(self, split, dataset, tokenize = False, force_recompute = False):
-        if split == "test":
-            trainer = self._set_up_trainer(dataset, tokenize = tokenize)
-            dataset = dataset["test"]
-        else:
-            trainer = self._set_up_trainer(dataset, tokenize = tokenize, eval_data_collator = self.eval_data_collator)
-            dataset = dataset["val"]
-        if not self.predictions or force_recompute: 
-        # Generate predictions
-            predictions = trainer.predict(dataset)
-            self.predictions = predictions
-        # Get predicted labels and true labels
-        preds = np.argmax(self.predictions.predictions, axis=-1)
-        labels = self.predictions.label_ids
-        # Compute confusion matrix
-        cm = confusion_matrix(labels, preds)
-
-        # Display confusion matrix
-        disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["Negative", "Positive"])
-        disp.plot(cmap=plt.cm.Blues)
-        plt.show()
         
 
 class ClassifierOriginalArchitectureBase(ClassifierBase):
@@ -450,6 +428,27 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
             "labels": example["labels"],
             "graph_embeddings": example["graph_embeddings"]}
         return result
+    def plot_confusion_matrix(self, split, dataset, tokenize = False, force_recompute = False):
+        if split == "test":
+            trainer = self._set_up_trainer(dataset, tokenize = tokenize)
+            dataset = dataset["test"]
+        else:
+            trainer = self._set_up_trainer(dataset, tokenize = tokenize, eval_data_collator = self.eval_data_collator)
+            dataset = dataset["val"]
+        if not self.predictions or force_recompute: 
+        # Generate predictions
+            predictions = trainer.predict(dataset)
+            self.predictions = predictions
+        # Get predicted labels and true labels
+        preds = np.argmax(self.predictions.predictions, axis=-1)
+        labels = self.predictions.label_ids
+        # Compute confusion matrix
+        cm = confusion_matrix(labels, preds)
+
+        # Display confusion matrix
+        disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["Negative", "Positive"])
+        disp.plot(cmap=plt.cm.Blues)
+        plt.show()
 
 class PromptBertClassifier(ClassifierOriginalArchitectureBase):
     def __init__(self, movie_lens_loader, get_embedding_cb, model_name = "google/bert_uncased_L-2_H-128_A-2", kge_dimension = 4, batch_size = 64,model_max_length = 256, force_recompute = False) -> None:
@@ -493,6 +492,28 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
             eval_data_collator=eval_data_collator,
             compute_metrics=self._compute_metrics,
         )
+    
+    def plot_confusion_matrix(self, split, dataset, tokenize = False, force_recompute = False):
+        if split == "test":
+            trainer = self._set_up_trainer(dataset, tokenize = tokenize)
+            dataset = dataset["test"]
+        else:
+            trainer = self._set_up_trainer(dataset, tokenize = tokenize, eval_data_collator = self.eval_data_collator)
+            dataset = dataset["val"]
+        if not self.predictions or force_recompute: 
+        # Generate predictions
+            predictions = trainer.predict(dataset)
+            self.predictions = predictions
+        # Get predicted labels and true labels
+        preds = np.argmax(self.predictions.predictions, axis=-1)
+        labels = self.predictions.label_ids
+        # Compute confusion matrix
+        cm = confusion_matrix(labels, preds)
+
+        # Display confusion matrix
+        disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["Negative", "Positive"])
+        disp.plot(cmap=plt.cm.Blues)
+        plt.show()
 
 
 class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
@@ -529,4 +550,25 @@ class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
             data_collator=self.data_collator,
             compute_metrics=self._compute_metrics,
         )
+    
+    def plot_confusion_matrix(self, split, dataset, tokenize = False, force_recompute = False):
+        trainer = self._set_up_trainer(dataset, tokenize = tokenize)
+        if split == "test":
+            dataset = dataset["test"]
+        else:
+            dataset = dataset["val"]
+        if not self.predictions or force_recompute: 
+        # Generate predictions
+            predictions = trainer.predict(dataset)
+            self.predictions = predictions
+        # Get predicted labels and true labels
+        preds = np.argmax(self.predictions.predictions, axis=-1)
+        labels = self.predictions.label_ids
+        # Compute confusion matrix
+        cm = confusion_matrix(labels, preds)
+
+        # Display confusion matrix
+        disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["Negative", "Positive"])
+        disp.plot(cmap=plt.cm.Blues)
+        plt.show()
         

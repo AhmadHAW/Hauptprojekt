@@ -437,7 +437,7 @@ class MovieLensLoader():
                 if not existing:
                     random_row = random_row.copy(deep= True)
                     random_row["mappedUserId"] = user_id
-                    user_embedding, movie_embedding = get_embedding_cb(dataset, user_id, movie_id, add_pca = True, split = split)
+                    user_embedding, movie_embedding = get_embedding_cb(dataset, user_id, movie_id)
                     random_row["user_embedding"] = user_embedding
                     random_row["movie_embedding"] = movie_embedding
         prompt = row_to_prompt_datapoint(random_row, kge_dimension)
@@ -448,7 +448,7 @@ class MovieLensLoader():
         else:
             return result
         
-    def sample_addin_datapoint(self, get_embedding_cb: Callable, sep_token: str, pad_token: str, split: str = "val", existing: bool = True, tokenize_function: Optional[Callable] = None)-> Dict[str, Union[str, int, torch.Tensor]]:
+    def sample_addin_datapoint(self, get_embedding_cb: Callable, sep_token: str, pad_token: str, kge_dimension: int = 4, split: str = "val", existing: bool = True, tokenize_function: Optional[Callable] = None)-> Dict[str, Union[str, int, torch.Tensor]]:
         '''
         Samples one datapoint of the addin model dataset.
         Parameters
@@ -486,13 +486,13 @@ class MovieLensLoader():
                 if not existing:
                     random_row = random_row.copy(deep= True)
                     random_row["mappedUserId"] = user_id
-                    user_embedding, movie_embedding = get_embedding_cb(dataset, user_id, movie_id, add_pca = True, split = split)
-                    random_row["user_embedding"] = user_embedding
-                    random_row["movie_embedding"] = movie_embedding
+                    user_embedding, movie_embedding = get_embedding_cb(dataset, user_id, movie_id)
+                    random_row[f"user_embedding_{kge_dimension}"] = user_embedding
+                    random_row[f"movie_embedding_{kge_dimension}"] = movie_embedding
         prompt = row_to_adding_embedding_datapoint(random_row, sep_token, pad_token)
         labels = 1 if existing else 0
         result = {"prompt": prompt, "labels": labels}
-        embeddings = torch.stack((random_row["user_embedding"], random_row["movie_embedding"]))
+        embeddings = str([random_row[f"user_embedding_{kge_dimension}"], random_row[f"movie_embedding_{kge_dimension}"]])
         if tokenize_function:
             return tokenize_function(result, return_pt = True), embeddings
         else:
