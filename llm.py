@@ -130,7 +130,7 @@ class PromptEmbeddingDataCollator(TextBasedDataCollator):
         user_embedding, movie_embedding = self.get_embedding_cb(self.data, user_id, movie_id)
         random_row["user_embedding"] = user_embedding
         random_row["movie_embedding"] = movie_embedding
-        random_row["prompt"] = row_to_prompt_datapoint(random_row, self.kge_dimension)
+        random_row["prompt"] = row_to_prompt_datapoint(random_row, self.kge_dimension, sep_token=self.tokenizer.sep_token)
         tokenized = self.tokenizer(random_row["prompt"], padding="max_length", truncation=True)
         return {
             "input_ids": tokenized["input_ids"],
@@ -151,7 +151,7 @@ class VanillaEmbeddingDataCollator(TextBasedDataCollator):
         user_id, movie_id = self._find_non_existing_user_movie()
         random_row = self.df[self.df["mappedMovieId"] == movie_id].iloc[0]
         random_row["mappedUserId"] = user_id
-        random_row["prompt"] = row_to_vanilla_datapoint(random_row)
+        random_row["prompt"] = row_to_vanilla_datapoint(random_row, self.tokenizer.sep_token)
         tokenized = self.tokenizer(random_row["prompt"], padding="max_length", truncation=True)
         return {
             "input_ids": tokenized["input_ids"],
@@ -380,7 +380,6 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
         else:
             self.model = InsertEmbeddingBertForSequenceClassification.from_pretrained(self.model_name, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID)
 
-        model_max_length = 256 if self.kge_dimension <= 8 else 512
         self.tokenizer = BertTokenizer.from_pretrained(self.model_name, model_max_length=model_max_length)
         self.train_data_collator = EmbeddingBasedDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_train_data, get_embedding_cb, kge_dimension=self.kge_dimension)
         self.test_data_collator = EmbeddingBasedDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_test_data, get_embedding_cb, kge_dimension=self.kge_dimension)

@@ -14,23 +14,23 @@ def row_to_adding_embedding_datapoint(row, sep_token, pad_token):
     user_id = row["mappedUserId"]
     title = row["title"]
     genres = row["genres"]
-    prompt = f"user: {user_id}, title: {title}, genres: {genres}{sep_token}{pad_token}{sep_token}{pad_token}"
+    prompt = f"user: {user_id}{sep_token}title: {title}{sep_token}genres: {genres}{sep_token}{pad_token}{sep_token}{pad_token}"
     return prompt
 
-def row_to_prompt_datapoint(row, kge_dimension):
+def row_to_prompt_datapoint(row, kge_dimension, sep_token):
     user_id = row["mappedUserId"]
     title = row["title"]
     genres = row["genres"]
     user_embedding = row[f"user_embedding_{kge_dimension}"]
     movie_embedding = row[f"movie_embedding_{kge_dimension}"]
-    prompt = f"user: {user_id}, title: {title}, genres: {genres} user embedding: {user_embedding}, movie embedding: {movie_embedding}"
+    prompt = f"user: {user_id}{sep_token}title: {title}{sep_token}genres: {genres}{sep_token}user embedding: {user_embedding}{sep_token}movie embedding: {movie_embedding}"
     return prompt
 
-def row_to_vanilla_datapoint(row):
+def row_to_vanilla_datapoint(row, sep_token):
     user_id = row["mappedUserId"]
     title = row["title"]
     genres = row["genres"]
-    prompt = f"user: {user_id}, title: {title}, genres: {genres}"
+    prompt = f"user: {user_id}{sep_token}title: {title}{sep_token}genres: {genres}"
     return prompt
 
 ROOT = "./data"                                                     #The root path where models and datasets are saved at.
@@ -248,12 +248,12 @@ class MovieLensLoader():
         torch.save(self.gnn_test_data, GNN_TEST_DATASET_PATH)
         torch.save(self.data, GNN_COMPLETE_DATASET_PATH)
     
-    def __generate_llm_dataset(self) -> None:
+    def __generate_llm_dataset(self, sep_token = "[SEP]") -> None:
         '''
         This method produces prompts given the user id, movie id, movie title and genres.
         '''
         print("generate llm dataset...")
-        self.llm_df["prompt"] = self.llm_df.apply(row_to_vanilla_datapoint, axis=1)
+        self.llm_df["prompt"] = self.llm_df.apply(lambda row: row_to_vanilla_datapoint(row, sep_token=sep_token), axis=1)
 
     def __is_in_split(self, edge_index, user_id, movie_id) -> bool:
         '''
@@ -323,7 +323,7 @@ class MovieLensLoader():
         })
 
 
-    def generate_prompt_embedding_dataset(self, tokenize_function:Callable = None, kge_dimension:int = 4, force_recompute: bool = False) -> DatasetDict:
+    def generate_prompt_embedding_dataset(self, tokenize_function:Callable = None, kge_dimension:int = 4, sep_token:str = "[SEP]", force_recompute: bool = False) -> DatasetDict:
         '''
         Generates the dataset for training the prompt model,
         by passing the tokenizer.tokenize function and
@@ -339,7 +339,7 @@ class MovieLensLoader():
             assert self.llm_df[f"movie_embedding_{kge_dimension}"].notna().all()
             llm_df = self.llm_df.copy(deep = True)
             llm_df["labels"] = 1
-            llm_df["prompt"] = self.llm_df.apply(lambda row: row_to_prompt_datapoint(row, kge_dimension), axis=1)
+            llm_df["prompt"] = self.llm_df.apply(lambda row: row_to_prompt_datapoint(row, kge_dimension, sep_token=sep_token), axis=1)
             dataset = self.__dataset_from_df(llm_df)
             if tokenize_function:
                 dataset = dataset.map(tokenize_function, batched = True)
@@ -382,7 +382,7 @@ class MovieLensLoader():
             dataset.save_to_disk(llm_adding_dataset_path)
         return dataset
     
-    def generate_vanilla_dataset(self, tokenize_function: Callable = None, force_recompute: bool = False) -> DatasetDict:
+    def generate_vanilla_dataset(self, tokenize_function: Callable = None, sep_token = "[SEP]", force_recompute: bool = False) -> DatasetDict:
         '''
         Generates the dataset for training the vanilla model,
         by passing the tokenizer.tokenize function.
@@ -392,14 +392,14 @@ class MovieLensLoader():
         else:
             llm_df = self.llm_df.copy(deep = True)
             llm_df["labels"] = 1
-            llm_df["prompt"] = self.llm_df.apply(row_to_vanilla_datapoint, axis=1)
+            llm_df["prompt"] = self.llm_df.apply(lambda row: row_to_vanilla_datapoint(row, sep_token=sep_token), axis=1)
             dataset = self.__dataset_from_df(llm_df)
             if tokenize_function:
                 dataset = dataset.map(tokenize_function, batched = True)
             dataset.save_to_disk(LLM_VANILLA_DATASET_PATH)
         return dataset
     
-    def sample_prompt_datapoint(self, get_embedding_cb: Callable, split: str = "val", existing: bool = True, tokenize_function: Optional[Callable] = None, kge_dimension: int = 4)-> Dict[str, Union[str, int, torch.Tensor]]:
+    def sample_prompt_datapoint(self, get_embedding_cb: Callable, split: str = "val", existing: bool = True, tokenize_function: Optional[Callable] = None, sep_token = "[SEP]", kge_dimension: int = 4)-> Dict[str, Union[str, int, torch.Tensor]]:
         '''
         Samples one datapoint of the prompt model dataset.
         Parameters
@@ -440,7 +440,7 @@ class MovieLensLoader():
                     user_embedding, movie_embedding = get_embedding_cb(dataset, user_id, movie_id)
                     random_row["user_embedding"] = user_embedding
                     random_row["movie_embedding"] = movie_embedding
-        prompt = row_to_prompt_datapoint(random_row, kge_dimension)
+        prompt = row_to_prompt_datapoint(random_row, kge_dimension, sep_token=sep_token)
         labels = 1 if existing else 0
         result = {"prompt": prompt, "labels": labels}
         if tokenize_function:
@@ -498,7 +498,7 @@ class MovieLensLoader():
         else:
             return result, embeddings
         
-    def sample_vanilla_datapoint(self, split = "val", existing = True, tokenize_function = None):
+    def sample_vanilla_datapoint(self, split = "val", existing = True, tokenize_function = None, sep_token = "[SEP]"):
         '''
         Samples one datapoint of the vanilla model dataset.
         Parameters
@@ -530,7 +530,7 @@ class MovieLensLoader():
                 if not existing:
                     random_row = random_row.copy(deep= True)
                     random_row["mappedUserId"] = user_id
-        prompt = row_to_vanilla_datapoint(random_row)
+        prompt = row_to_vanilla_datapoint(random_row, sep_token=sep_token)
         labels = 1 if existing else 0
         result = {"prompt": prompt, "labels": labels}
         if tokenize_function:
