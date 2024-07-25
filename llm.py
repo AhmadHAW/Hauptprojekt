@@ -316,6 +316,7 @@ class ClassifierBase():
         self.df = df
         self.batch_size = batch_size
         self.force_recompute = force_recompute
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     def _compute_metrics(self, eval_pred):
         predictions, labels = eval_pred
@@ -329,6 +330,7 @@ class ClassifierBase():
         trainer.train()
 
         trainer.model.to(device = "cpu").save_pretrained(self.best_model_path)
+        trainer.model.to(device = self.device)
 
     
     def evaluate_model_on_data(self, dataset, split):
