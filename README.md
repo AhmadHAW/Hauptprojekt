@@ -87,6 +87,7 @@ For **Embedding-Architecture**
 1. Produce Embedding Matrix from input ids.
 2. Calculate Positional Encoding of the ```[SEP][PAD][SEP][PAD][SAP]``` pattern.
 3. Replace input embeddings of ```[PAD]``` tokens with ```KG User Embedding``` and ```KG Movie Embedding```.
+4. Forward input embeddings into the attention blocks.
 
 ## Setup
 A large part of the dependencies can be installed with ```pip install -r requirements.txt```. The other libraries torch-scatter and torch-sparse can then be installed with the commands:
