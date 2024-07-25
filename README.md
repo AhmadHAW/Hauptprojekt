@@ -21,7 +21,6 @@ While RAG is a powerful tool for incorporating factual knowledge into LLMs, in t
 With this knowledge, the following question arises from current research: *How does the **semantic processing of natural language in LLMs** change with the **inclusion of knowledge graph embeddings**, illustrated by a simple experiment?*
 
 In a simple experiment, we want to determine how the inclusion of low dimensional graph embeddings affects the semantic *understanding* of the LLM. To do this, we compare LLMs that have been trained **with and without** the inclusion of KGEs. We want to determine what **degree of *attention*** the trained model gives to the KGEs. In addition, we want to determine how the **semantic properties of the LLM's output embeddings** change when the KGEs are included.
-To simplify matters, we now call the LLM with the inclusion of KGE the "**Prompt-Model**" and the LLM without the inclusion of KGE the "**Vanilla-Model**".
 
 The task for the LLMs is **link prediction**: A task in which the models should determine whether an edge exists between two given nodes.
 The LLMs should be able to solve the binary classification task (*exists: True/False*) with the help of a textual description of both given nodes (Vanilla-Model) and in one case in addition with the help of the given KGE (Prompt-Model).
@@ -53,7 +52,8 @@ I refer to the [tutorial script](https://colab.research.google.com/drive/1xpzn1N
 ## Training and Inference Framework for Language Models on Graphs.
 Now that we understand how KGEs are created and we defined the role of LLM, let's take a closer look at exactly how KGEs can be incorporated into the LLM training and inference process.
 There is ***Graph as Sequence***, ***Graph-Empowered LLM*** and ***Graph-Aware LLM Finetuning*** for LLMs in the role of predictors. With the graph as sequence method, the KGE is embedded in the prompt. This method does not require any changes to the LLM architecture. In the Graph Empowered LLM method, the architecture of the LLM is modified so that text and KGE can be processed together. In Graph Aware LLM Finetuning, neither the input prompt nor the model architecture are changed, but the training process is adapted with the involvement of the KGEs.[1]
-As before, we opt for the supposedly simplest implementation to observe the semantic influence of KGEs on LLMs using the ***graph as sequence method***.
+As before, we opt for the supposedly simplest implementation to observe the semantic influence of KGEs on LLMs using the ***Graph as Sequence*** and ***Graph-Empowered LLM*** methods.
+
 
 ## Dataset MovieLens
 MovieLens is a non-commercial movie-recommendation dataset. Users can rate films via an [Internet service](https://movielens.org/). In its full form, the benchmark dataset consists of 25 million film ratings, 1 million tags applied to 62,000 films and 16,000 users. A smaller version consists of 100000 ratings, 3600 tags, applied to 9000 movies and 600 users.
@@ -62,6 +62,7 @@ As already mentioned, we have strictly adhered to the Torch Geometric Tutorial w
 For the LLM we get the following data points: ```<prompt, label>```, where the prompt is a natural language text consisting of *user ID, movie title, movie genres and movie ID*. The label is ```1``` (for user has rated the movie) and ```0``` (for user has not rated the movie).
 The original dataset only contains existing edges. That means we have to generate new (non existing) edges during training and inference.
 ## Visualizing the Semantic Embedding Space
+To simplify matters, we now call the LLM with the inclusion of KGE in the prompt the "**Prompt-Model**", the LLM with the inclusion of KGE in the attention layer the "**Embedding-Model**" and the LLM without the inclusion of KGE the "**Vanilla-Model**".
 We have described how KGEs are generated and how we transfer them to the LLM in the training and inference process. Now let's take a look at how we want to measure and visualize the changes in the semantic understanding of the LLM.
 First, let's look at the general performance of the vanilla LLM and the prompt LLMs. We check whether adding the KGEs leads to an improvement in accuracy. To do this, we look at the training process and then use the evaluation dataset to produce the confusion matrices of the models.
 
@@ -71,6 +72,22 @@ With the help of these positional encodings, we produce two views, one view of t
 We expect to observe a shift from the natural language content to the KGEs in the view on the attentions. We may also see a difference in attention for user groups that are strongly or weakly connected (have rated many/few movies).
 
 In the view of the embeddings in the output layer, we can reduce the dimensions with Principal Component Analysis and thus produce a two-dimensional vector space. Here we try to compare the distance and proximity of semantically interesting subgroups more precisely.
+
+## Preprocessing the Dataset and Model Architecture
+For **Vanilla-Modell**
+```[CLS]user_id: <user_id>[SEP]movie_id: <movie_id>[SEP]title: {title}[SEP]genres: <genres>[SEP][PAD][PAD]...```
+
+For **Prompt-Modell**
+```[CLS]user_id: <user_id>[SEP]movie_id: <movie_id>[SEP]title: {title}[SEP]genres: <genres>[SEP]user embedding: <user_embedding>[SEP]movie embedding: <movie_embedding>[SEP][PAD][PAD]...```
+
+For **Embedding-Modell**
+```[CLS]user_id: <user_id>[SEP]movie_id: <movie_id>[SEP]title: {title}[SEP]genres: <genres>[SEP][PAD][SEP][PAD][SEP][PAD][PAD]...```
+
+For **Embedding-Architecture**
+1. Produce Embedding Matrix from input ids.
+2. Calculate Positional Encoding of the ```[SEP][PAD][SEP][PAD][SAP]``` pattern.
+3. Replace input embeddings of ```[PAD]``` tokens with ```KG User Embedding``` and ```KG Movie Embedding```.
+
 ## Setup
 A large part of the dependencies can be installed with ```pip install -r requirements.txt```. The other libraries torch-scatter and torch-sparse can then be installed with the commands:
 ```torch-scatter -f https://data.pyg.org/whl/torch-${TORCH}.html``` and ```torch-sparse -f https://data.pyg.org/whl/torch-${TORCH}.html```, whereby ```${TORCH}``` must be replaced with the current Torch version. It is important that the correct Torch version is installed and specified. For example, problems can occur when installing *Torch-Scatter* and *Torch-Sparse* if the installed Torch version supports Cuda without the host system doing so.
