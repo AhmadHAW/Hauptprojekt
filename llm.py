@@ -128,8 +128,8 @@ class PromptEmbeddingDataCollator(TextBasedDataCollator):
         random_row = self.df[self.df["mappedMovieId"] == movie_id].iloc[0]
         random_row["mappedUserId"] = user_id
         user_embedding, movie_embedding = self.get_embedding_cb(self.data, user_id, movie_id)
-        random_row["user_embedding"] = user_embedding
-        random_row["movie_embedding"] = movie_embedding
+        random_row["user_embedding"] = user_embedding.to("cpu").detach().tolist()
+        random_row["movie_embedding"] = movie_embedding.to("cpu").detach().tolist()
         random_row["prompt"] = row_to_prompt_datapoint(random_row, self.kge_dimension, sep_token=self.tokenizer.sep_token)
         tokenized = self.tokenizer(random_row["prompt"], padding="max_length", truncation=True)
         return {

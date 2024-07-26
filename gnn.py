@@ -199,7 +199,7 @@ class GNNTrainer():
                 total_loss += float(loss) * pred.numel()
                 total_examples += pred.numel()
             print(f"Epoch: {epoch:03d}, Loss: {total_loss / total_examples:.4f}")
-        torch.save(self.to(device = "cpu").state_dict(), self.model_path)
+        torch.save(self.model.to(device = "cpu").state_dict(), self.model_path)
         self.model.to(self.device)
 
     def __link_neighbor_sampling(self, data, user_id, movie_id):
@@ -261,8 +261,8 @@ class GNNTrainer():
             user_id = row["mappedUserId"]
             movie_id = row["mappedMovieId"]
             user_embedding, movie_embedding = self.get_embedding(data, user_id, movie_id)
-            row[f"user_embedding_{self.kge_dimension}"] = user_embedding
-            row[f"movie_embedding_{self.kge_dimension}"] = movie_embedding
+            row[f"user_embedding_{self.kge_dimension}"] = user_embedding.to("cpu").detach().tolist()
+            row[f"movie_embedding_{self.kge_dimension}"] = movie_embedding.to("cpu").detach().tolist()
             return row
         df = movie_lens_loader.llm_df
         if not self.__are_embeddings_saved(df) or force_recompute:
