@@ -61,33 +61,39 @@ A data point has the form ```<user, movie, rating, timestamp>```. Users are only
 As already mentioned, we have strictly adhered to the Torch Geometric Tutorial when reshaping the data set. As a result, we get the following data points for the graph model: ```<user, rates, movie>```, where user and movie only consist of the IDs.
 For the LLM we get the following data points: ```<prompt, label>```, where the prompt is a natural language text consisting of *user ID, movie title, movie genres and movie ID*. The label is ```1``` (for user has rated the movie) and ```0``` (for user has not rated the movie).
 The original dataset only contains existing edges. That means we have to generate new (non existing) edges during training and inference.
+
+## Preprocessing the Dataset and Changes in the Model Architecture
+
+All three datasets start with the three attributes: *user_id*, *title* and *genres*. Each attribute is separated by a special seperation token (*[SEP]*). 
+The prompt data record also follows with the attributes *user_embedding* and *movie_embedding*.
+In the embedding dataset, special padding tokens (*[PAD]*) are initially used instead of the embeddings, which are then exchanged with the actual embeddings during forwarding.
+
+For **Vanilla-Modell**, this gives us
+```user_id: <user_id>[SEP]title: {title}[SEP]genres: <genres>[SEP]```
+
+For **Prompt-Modell**, this gives us
+```user_id: <user_id>[SEP]title: {title}[SEP]genres: <genres>[SEP]user embedding: <user_embedding>[SEP]movie embedding: <movie_embedding>[SEP]```
+
+For **Embedding-Modell**, this gives us
+```user_id: <user_id>[SEP]title: {title}[SEP]genres: <genres>[SEP][PAD][SEP][PAD][SEP]```
+
+For **Embedding-Architecture**
+1. Produce input embeddings of the input ids using the embedding matrix.
+2. **Calculate Positional Encoding of the ```[SEP][PAD][SEP][PAD][SAP]``` pattern.**
+3. **Replace input embeddings of ```[PAD]``` tokens with ```User Embedding``` and ```Movie Embedding```.**
+4. Forward input embeddings into the attention blocks.
+
 ## Visualizing the Semantic Embedding Space
 To simplify matters, we now call the LLM with the inclusion of KGE in the prompt the "**Prompt-Model**", the LLM with the inclusion of KGE in the attention layer the "**Embedding-Model**" and the LLM without the inclusion of KGE the "**Vanilla-Model**".
 We have described how KGEs are generated and how we transfer them to the LLM in the training and inference process. Now let's take a look at how we want to measure and visualize the changes in the semantic understanding of the LLM.
-First, let's look at the general performance of the vanilla LLM and the prompt LLMs. We check whether adding the KGEs leads to an improvement in accuracy. To do this, we look at the training process and then use the evaluation dataset to produce the confusion matrices of the models.
+First, let's look at the general performance of the vanilla model, the prompt model and the embedding model. We check whether adding the KGEs leads to an improvement in accuracy. To do this, we look at the training process and then use the evaluation dataset to produce the confusion matrices on the models predictions.
 
 Then we calculate the positional encodings of all semantically meaningful passages in the prompt, such as user ID, movie ID, movie title, genres, user embedding and movie embedding.
-With the help of these positional encodings, we produce two views, one view of the attentions in the output layer and one view of the embeddings in the output layer.
+With the help of these positional encodings, we produce two views, one view of the attentions and one view of the embeddings.
 
 We expect to observe a shift from the natural language content to the KGEs in the view on the attentions. We may also see a difference in attention for user groups that are strongly or weakly connected (have rated many/few movies).
 
 In the view of the embeddings in the output layer, we can reduce the dimensions with Principal Component Analysis and thus produce a two-dimensional vector space. Here we try to compare the distance and proximity of semantically interesting subgroups more precisely.
-
-## Preprocessing the Dataset and Model Architecture
-For **Vanilla-Modell**
-```[CLS]user_id: <user_id>[SEP]movie_id: <movie_id>[SEP]title: {title}[SEP]genres: <genres>[SEP][PAD][PAD]...```
-
-For **Prompt-Modell**
-```[CLS]user_id: <user_id>[SEP]movie_id: <movie_id>[SEP]title: {title}[SEP]genres: <genres>[SEP]user embedding: <user_embedding>[SEP]movie embedding: <movie_embedding>[SEP][PAD][PAD]...```
-
-For **Embedding-Modell**
-```[CLS]user_id: <user_id>[SEP]movie_id: <movie_id>[SEP]title: {title}[SEP]genres: <genres>[SEP][PAD][SEP][PAD][SEP][PAD][PAD]...```
-
-For **Embedding-Architecture**
-1. Produce Embedding Matrix from input ids.
-2. Calculate Positional Encoding of the ```[SEP][PAD][SEP][PAD][SAP]``` pattern.
-3. Replace input embeddings of ```[PAD]``` tokens with ```KG User Embedding``` and ```KG Movie Embedding```.
-4. Forward input embeddings into the attention blocks.
 
 ## Setup
 A large part of the dependencies can be installed with ```pip install -r requirements.txt```. The other libraries torch-scatter and torch-sparse can then be installed with the commands:

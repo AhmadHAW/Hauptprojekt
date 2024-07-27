@@ -2,6 +2,7 @@ import random as rd
 from typing import Optional, Union, Dict, Tuple, List
 from abc import ABC
 import os
+import json
 
 from movie_lens_loader import row_to_prompt_datapoint, row_to_adding_embedding_datapoint, row_to_vanilla_datapoint, LLM_PROMPT_TRAINING_PATH, LLM_ADDING_TRAINING_PATH, LLM_VANILLA_TRAINING_PATH, LLM_PROMPT_BEST_MODEL_PATH, LLM_ADDING_BEST_MODEL_PATH, LLM_VANILLA_BEST_MODEL_PATH
 
@@ -17,12 +18,22 @@ from transformers.modeling_outputs import SequenceClassifierOutput
 from transformers.utils import is_datasets_available
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 import matplotlib.pyplot as plt
+import seaborn as sns
+import networkx as nx
 
 ID2LABEL = {0: "FALSE", 1: "TRUE"}
 LABEL2ID = {"FALSE": 0, "TRUE": 1}
 PROMPT_LOG_PATH = f"{LLM_PROMPT_TRAINING_PATH}/logs"
 ADDING_LOG_PATH = f"{LLM_ADDING_TRAINING_PATH}/logs"
 VANILLA_LOG_PATH = f"{LLM_VANILLA_TRAINING_PATH}/logs"
+
+PROMPT_TRAINING_STATE_PATH = f"{LLM_PROMPT_TRAINING_PATH}/checkpoint-4420/trainer_state.json"
+ADDING_TRAINING_STATE_PATH = f"{LLM_ADDING_TRAINING_PATH}/checkpoint-4420/trainer_state.json"
+VANILLA_TRAINING_STATE_PATH = f"{LLM_VANILLA_TRAINING_PATH}/checkpoint-4420/trainer_state.json"
+
+
+ALL_SEMANTIC_TOKENS = ["user_id", "title", "genres"]
+EMBEDDING_BASED_SEMANTIC_TOKENS = ALL_SEMANTIC_TOKENS + ["user embedding", "movie embedding"]
 
 class DataCollatorBase(DataCollatorForLanguageModeling, ABC):
     '''
@@ -311,10 +322,11 @@ class InsertEmbeddingBertForSequenceClassification(BertForSequenceClassification
         )
 
 class ClassifierBase():
-    def __init__(self, df, batch_size = 64, force_recompute = False) -> None:
+    def __init__(self, df, semantic_datapoints, batch_size = 64, force_recompute = False) -> None:
         self.predictions = None
         self.df = df
         self.batch_size = batch_size
+        self.semantic_datapoints = semantic_datapoints
         self.force_recompute = force_recompute
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
@@ -342,11 +354,159 @@ class ClassifierBase():
             test_results = trainer.evaluate(eval_dataset = dataset["val"])
 
         print(test_results)
+
+    def plot_attentions(self, attentions, title):
+        fig, ax = plt.subplots(figsize=(5, 5))
+        sns.heatmap(attentions, xticklabels=self.semantic_datapoints, yticklabels=self.semantic_datapoints, cmap='viridis', ax=ax)
+        plt.title(title)
+        plt.xlabel('Tokens')
+        plt.ylabel('Tokens')
+        plt.show()
+
+    def plot_attention_graph(self, attentions, title):
+        # Create an undirected graph
+        G = nx.Graph()
+        labels = {}
+        for layer, attentions_ in enumerate(attentions):
+            for from_, inner in enumerate(attentions_):
+                from_name = f"{self.semantic_datapoints[from_]}_{layer}"
+                if layer == 0:
+                    labels[from_name] = self.semantic_datapoints[from_]
+                G.add_node(from_name, name = from_name, layer = layer)
+                for to_, weight in enumerate(inner):
+                    to_name = f"{self.semantic_datapoints[to_]}_{layer+1}"
+                    G.add_node(to_name, name = to_name, layer = layer+1)
+                    G.add_edge(from_name, to_name, weight = weight)
+
+        pos = nx.multipartite_layout(G, subset_key="layer")
+        nx.draw(G, pos=pos, with_labels = False)
+
+        edge_weights = nx.get_edge_attributes(G, 'weight')
+
+        # Create a list of edge thicknesses based on weights
+        # Normalize the weights to get thickness values
+        max_weight = max(edge_weights.values())
+        edge_thickness = [edge_weights[edge] / max_weight * 5 for edge in G.edges()]# Draw edges with varying thicknesses
+        nx.draw_networkx_edges(G, pos, edgelist=G.edges(), width=edge_thickness)
+        shift_to_left = 0.21
+        label_pos = {node: (x - shift_to_left, y) for node, (x, y) in pos.items()}
+        nx.draw_networkx_labels(G,label_pos,labels)
+        # Get the current axis limits
+        x_min, x_max = plt.xlim()
+
+        # Adjust x-axis limits to add more whitespace on the left
+        plt.xlim(x_min - (shift_to_left+0.1), x_max)  # Increase the left limit by 0.1
+        plt.title(title)
+        plt.show()
+
+
+    def _find_sep_in_tokens(self, tokens):
+        return tokens == self.tokenizer.sep_token_id
+    
+    def generate_semantic_attention_matrix(self, dataset, split = "val", batch_size = 64, epochs = 3, step_info_size = 10):
+        self.model.eval()
+        layers = self.model.config.num_hidden_layers
+        data_collator = self._get_data_collator(split)
+        result_matrix = torch.zeros((layers, len(self.semantic_datapoints), len(self.semantic_datapoints)))
+        for epoch in range(epochs):
+            data_loader = DataLoader(dataset=dataset[split], batch_size= batch_size, collate_fn = data_collator)
+            batch = next(iter(data_loader))
+            for idx, batch in enumerate(data_loader):
+                combined_attentions = self._generate_attentions_for_batch(batch)
+                mask = self._find_sep_in_tokens(batch["input_ids"])
+                positions = mask.nonzero(as_tuple=True)
+                cols = positions[1]
+
+                # Step 3: Determine the number of True values per row
+                num_trues_per_row = mask.sum(dim=1)
+                max_trues_per_row = num_trues_per_row.max().item()
+
+                # Step 4: Create an empty tensor to hold the result
+                ranges_over_batch = -torch.ones((mask.size(0), max_trues_per_row), dtype=torch.long)
+
+                # Step 5: Use scatter to place column indices in the ranges_over_batch tensor
+                # Create an index tensor that assigns each column index to the correct position in ranges_over_batch tensor
+                row_indices = torch.arange(mask.size(0)).repeat_interleave(num_trues_per_row)
+                column_indices = torch.cat([torch.arange(n) for n in num_trues_per_row])
+
+                ranges_over_batch[row_indices, column_indices] = cols
+                ranges_over_batch = torch.stack([ranges_over_batch[:, :-1], ranges_over_batch[:, 1:]], dim=2)
+                # Create a tensor of zeros to represent the starting points
+                start_points = torch.zeros(ranges_over_batch.size(0), 1, 2, dtype=ranges_over_batch.dtype)
+
+                # Set the second column to be the first element of the first range
+                start_points[:, 0, 1] = ranges_over_batch[:, 0, 0]
+
+                # Concatenate the start_points tensor with the original ranges_over_batch tensor
+                ranges_over_batch = torch.cat((start_points, ranges_over_batch), dim=1)
+                ranges_over_batch[:,:,0] += 1
+                # Initialize the result matrix
+                for layer in range(layers):
+                    for batch_, ranges in enumerate(ranges_over_batch):
+                        for idx, range_x in enumerate(ranges):
+                            for idy, range_y in enumerate(ranges):
+                                result_matrix[layer, idx, idy] += torch.sum(combined_attentions[layer, batch_, torch.arange(range_x[0],range_x[1])][:, torch.arange(range_y[0], range_y[1])])
+                if idx > 0 and idx % step_info_size ==0:
+                    print(f"Epoch: {epoch}, Batch: {idx}/{len(data_loader)}")
+        normalized_tensor = result_matrix / result_matrix.sum(dim = (1,2), keepdim=True)
+        normalized_tensor_row = result_matrix / result_matrix.sum(dim=2, keepdim=True)
+        return normalized_tensor, normalized_tensor_row
+    
+    def _plot_training_loss_and_accuracy(self, path_to_trainer_state, model_type):
+        with open(path_to_trainer_state, 'r') as f:
+            trainer_state = json.load(f)
+            # Extract loss values and corresponding steps
+        losses = []
+        steps = []
+
+        for log in trainer_state['log_history']:
+            if 'loss' in log:
+                losses.append(log['loss'])
+                steps.append(log['step'])
+
+        # Extract accuracy values and corresponding epochs
+        accuracies = []
+        epochs = []
+
+        for log in trainer_state['log_history']:
+            if 'eval_accuracy' in log:
+                accuracies.append(log['eval_accuracy'])
+                epochs.append(log['epoch'])
+
+        # Find the minimum loss and its corresponding step
+        min_loss = min(losses)
+        min_loss_step = steps[losses.index(min_loss)]
+
+        # Find the maximum accuracy and its corresponding epoch
+        max_accuracy = max(accuracies)
+        max_accuracy_epoch = epochs[accuracies.index(max_accuracy)]
+
+        # Plot loss development over steps
+        plt.figure(figsize=(12, 6))
+        plt.plot(steps, losses, label='Loss')
+        plt.scatter(min_loss_step, min_loss, color='red')  # Mark the minimum loss
+        plt.text(min_loss_step, min_loss, f'Min Loss: {min_loss:.4f}', fontsize=12, verticalalignment='bottom', horizontalalignment='right')
+        plt.xlabel('Steps')
+        plt.ylabel('Loss')
+        plt.title(f'Loss Development over Steps of {model_type} Model')
+        plt.legend()
+        plt.show()
+
+        # Plot accuracy development over epochs
+        plt.figure(figsize=(12, 6))
+        plt.plot(epochs, accuracies, label='Accuracy', color='green')
+        plt.scatter(max_accuracy_epoch, max_accuracy, color='red')  # Mark the maximum accuracy
+        plt.text(max_accuracy_epoch, max_accuracy, f'Max Accuracy: {max_accuracy:.4f}', fontsize=12, verticalalignment='bottom', horizontalalignment='right')
+        plt.xlabel('Epochs')
+        plt.ylabel('Accuracy')
+        plt.title(f'Accuracy Development over Epochs of {model_type} Model')
+        plt.legend()
+        plt.show()
         
 
 class ClassifierOriginalArchitectureBase(ClassifierBase):
-    def __init__(self, df, model_name = "google/bert_uncased_L-2_H-128_A-2", batch_size = 64, model_max_length = 256, force_recompute = False) -> None:
-        super().__init__( df = df, batch_size = batch_size, force_recompute = force_recompute)
+    def __init__(self, df, semantic_datapoints, model_name = "google/bert_uncased_L-2_H-128_A-2", batch_size = 64, model_max_length = 256, force_recompute = False) -> None:
+        super().__init__( df = df, semantic_datapoints = semantic_datapoints, batch_size = batch_size, force_recompute = force_recompute)
         self.model_name = model_name
         
         # Initialize the model and tokenizer
@@ -368,10 +528,15 @@ class ClassifierOriginalArchitectureBase(ClassifierBase):
             "attention_mask": tokenized["attention_mask"],
             "labels": example["labels"]}
         return result
+    
+    def _generate_attentions_for_batch(self, batch):
+        with torch.no_grad():
+            outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], output_attentions=True)
+            return torch.stack([torch.sum(attentions, dim=1).detach() for attentions in outputs.attentions])  # This will contain the attention weights for each layer and head
         
 class AddingEmbeddingsBertClassifierBase(ClassifierBase):
     def __init__(self, movie_lens_loader, get_embedding_cb, model_name = "google/bert_uncased_L-2_H-128_A-2", kge_dimension = 128, batch_size = 64,model_max_length = 256, force_recompute = False) -> None:
-        super().__init__(df = movie_lens_loader.llm_df, batch_size = batch_size, force_recompute = force_recompute)
+        super().__init__(df = movie_lens_loader.llm_df, semantic_datapoints = EMBEDDING_BASED_SEMANTIC_TOKENS, batch_size = batch_size, force_recompute = force_recompute)
         self.kge_dimension = kge_dimension
         self.best_model_path = LLM_ADDING_BEST_MODEL_PATH.format(self.kge_dimension)
         self.model_name = model_name
@@ -451,12 +616,28 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
         disp.plot(cmap=plt.cm.Blues)
         plt.show()
 
+    def _get_data_collator(self, split):
+        return self.test_data_collator if split == "test" else self.eval_data_collator if split == "val" else self.train_data_collator
+    
+    def plot_training_loss_and_accuracy(self, kge_dimension = 128):
+        model_type = "Embedding"
+        self._plot_training_loss_and_accuracy(ADDING_TRAINING_STATE_PATH.format(kge_dimension), model_type)
+
+
+    def _generate_attentions_for_batch(self, batch):
+        with torch.no_grad():
+            outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], graph_embeddings = batch["graph_embeddings"], output_attentions=True)
+            return torch.stack([torch.sum(attentions, dim=1).detach() for attentions in outputs.attentions])  # This will contain the attention weights for each layer and head
+
+
+    
+    
 class PromptBertClassifier(ClassifierOriginalArchitectureBase):
     def __init__(self, movie_lens_loader, get_embedding_cb, model_name = "google/bert_uncased_L-2_H-128_A-2", kge_dimension = 4, batch_size = 64,model_max_length = 256, force_recompute = False) -> None:
         assert kge_dimension <= 16
         self.kge_dimension = kge_dimension
         self.best_model_path = LLM_PROMPT_BEST_MODEL_PATH.format(self.kge_dimension)
-        super().__init__(df = movie_lens_loader.llm_df, model_name=model_name, force_recompute=force_recompute, batch_size = batch_size,model_max_length = model_max_length)
+        super().__init__(df = movie_lens_loader.llm_df, semantic_datapoints=EMBEDDING_BASED_SEMANTIC_TOKENS, model_name=model_name, force_recompute=force_recompute, batch_size = batch_size,model_max_length = model_max_length)
         self.train_data_collator = PromptEmbeddingDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_train_data, get_embedding_cb, kge_dimension = kge_dimension)
         self.test_data_collator = PromptEmbeddingDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_test_data, get_embedding_cb, kge_dimension = kge_dimension)
         self.eval_data_collator = PromptEmbeddingDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_val_data, get_embedding_cb, kge_dimension = kge_dimension)
@@ -516,11 +697,18 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
         disp.plot(cmap=plt.cm.Blues)
         plt.show()
 
+    def plot_training_loss_and_accuracy(self, kge_dimension = 4):
+        model_type = "Prompt"
+        self._plot_training_loss_and_accuracy(PROMPT_TRAINING_STATE_PATH.format(kge_dimension), model_type)
+
+    def _get_data_collator(self, split):
+        return self.test_data_collator if split == "test" else self.eval_data_collator if split == "val" else self.train_data_collator
+
 
 class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
     def __init__(self, df, model_name = "google/bert_uncased_L-2_H-128_A-2", batch_size = 64,model_max_length = 256, force_recompute = False) -> None:
         self.best_model_path = LLM_VANILLA_BEST_MODEL_PATH
-        super().__init__(df = df, model_name=model_name, batch_size = batch_size, model_max_length = model_max_length, force_recompute=force_recompute)
+        super().__init__(df = df, semantic_datapoints=ALL_SEMANTIC_TOKENS, model_name=model_name, batch_size = batch_size, model_max_length = model_max_length, force_recompute=force_recompute)
         self.data_collator = VanillaEmbeddingDataCollator(self.tokenizer, df)
     
     def _set_up_trainer(self, dataset, tokenize = False, epochs = 3):
@@ -572,4 +760,11 @@ class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
         disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["Negative", "Positive"])
         disp.plot(cmap=plt.cm.Blues)
         plt.show()
+
+    def plot_training_loss_and_accuracy(self):
+        model_type = "Vanilla"
+        self._plot_training_loss_and_accuracy(VANILLA_TRAINING_STATE_PATH, model_type)
+
+    def _get_data_collator(self, split = None):
+        return self.data_collator
         
