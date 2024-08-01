@@ -99,7 +99,7 @@ In the view of the embeddings in the output layer, we can reduce the dimensions 
 A large part of the dependencies can be installed with ```pip install -r requirements.txt```. The other libraries torch-scatter and torch-sparse can then be installed with the commands:
 ```torch-scatter -f https://data.pyg.org/whl/torch-${TORCH}.html``` and ```torch-sparse -f https://data.pyg.org/whl/torch-${TORCH}.html```, whereby ```${TORCH}``` must be replaced with the current Torch version. It is important that the correct Torch version is installed and specified. For example, problems can occur when installing *Torch-Scatter* and *Torch-Sparse* if the installed Torch version supports Cuda without the host system doing so.
 ## Experiments
-![Embeddings Plot](/images/Hidden_states.png)
+![Embeddings Plot](/images/Hidden_States.png)
 ![Vanilla Attentions](/images/Vanilla_Attentions.png) 
 ![Prompt Attentions](/images/Prompt_Attentions.png) 
 ![Embedding Attentions](/images/Embedding_Attentions.png) 
