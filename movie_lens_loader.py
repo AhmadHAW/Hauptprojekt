@@ -57,7 +57,9 @@ LLM_PROMPT_DATASET_PATH = f"{LLM_MODEL_DIMENSION_PATH}/prompt_dataset"          
 LLM_ADDING_DATASET_PATH = f"{LLM_MODEL_DIMENSION_PATH}/adding_dataset"                      #The path where the huggingface prompt dataset (tokenized) is saved at.
 LLM_VANILLA_DATASET_PATH = f"{LLM_PATH}/vanilla_dataset"                    #The path where the huggingface vanilla dataset (tokenized) is saved at.
 
-SUB_DIRS = [GNN_PATH, LLM_VANILLA_PATH]
+PCA_PATH = f"{ROOT}/pca"
+
+SUB_DIRS = [GNN_PATH, LLM_VANILLA_PATH, PCA_PATH]
 
 
 class MovieLensLoader():
@@ -399,6 +401,46 @@ class MovieLensLoader():
             dataset.save_to_disk(LLM_VANILLA_DATASET_PATH)
         return dataset
     
+    def sample_datapoints(self, existing, vanilla_classifier, prompt_classifier, embedding_classifier,prompt_getting_embedding_cb, embedding_getting_embedding_cb, singular_title = False, singular_user = False, split: str = "val", sep_token = "[SEP]", pad_token = "[PAD]"):
+        df = self.llm_df[self.llm_df["split"] == split]
+        if singular_user:
+            df = df[df["mappedUserId"] == df.sample(1).iloc[0]["mappedUserId"]]
+        elif singular_title:
+            df = df[df["mappedMovieId"] == df.sample(1).iloc[0]["mappedMovieId"]]
+        if existing:
+            random_row = df.sample(1).iloc[0]
+            user_embedding, movie_embedding = self.__generate_embeddings(random_row, kge_dimension=embedding_classifier.kge_dimension)
+            random_row[f"user_embedding_{embedding_classifier.kge_dimension}"] = torch.tensor(user_embedding)
+            random_row[f"movie_embedding_{embedding_classifier.kge_dimension}"] = torch.tensor(movie_embedding)
+        else:
+            dataset = self.gnn_train_data if split == "train" else self.gnn_val_data if split == "val" else self.gnn_test_data if split == "test" else self.data
+            existing = True
+            while existing:
+                user_id = df["mappedUserId"].sample(1).iloc[0]
+                random_row = self.llm_df.sample(1).iloc[0]
+                movie_id = random_row["mappedMovieId"]
+                existing = ((self.llm_df["mappedMovieId"] == movie_id) & (self.llm_df["mappedUserId"] == user_id)).any()
+                if not existing:
+                    random_row = random_row.copy(deep= True)
+                    random_row["mappedUserId"] = user_id
+                    user_embedding_prompt, movie_embedding_prompt = prompt_getting_embedding_cb(dataset, user_id, movie_id)
+                    random_row[f"user_embedding_{prompt_classifier.kge_dimension}"] = user_embedding_prompt
+                    random_row[f"movie_embedding_{prompt_classifier.kge_dimension}"] = movie_embedding_prompt
+                    user_embedding_embedding, movie_embedding_embedding = embedding_getting_embedding_cb(dataset, user_id, movie_id)
+                    random_row[f"user_embedding_{embedding_classifier.kge_dimension}"] = user_embedding_embedding
+                    random_row[f"movie_embedding_{embedding_classifier.kge_dimension}"] = movie_embedding_embedding
+        prompt_vanilla = row_to_vanilla_datapoint(random_row, sep_token=sep_token)
+        prompt_prompt = row_to_prompt_datapoint(random_row, kge_dimension=prompt_classifier.kge_dimension, sep_token=sep_token)
+        prompt_embedding = row_to_adding_embedding_datapoint(random_row, sep_token=sep_token, pad_token=pad_token)
+        labels = 1 if existing else 0
+        result_vanilla = {"prompt": prompt_vanilla, "labels": labels}
+        result_prompt = {"prompt": prompt_prompt, "labels": labels}
+        graph_embeddings = torch.stack((random_row[f"user_embedding_{embedding_classifier.kge_dimension}"], random_row[f"movie_embedding_{embedding_classifier.kge_dimension}"]))
+        result_embedding = {"prompt": prompt_embedding, "labels": labels, "graph_embeddings": graph_embeddings.unsqueeze(dim = 0)}
+        return vanilla_classifier.tokenize_function(result_vanilla, return_pt = True), prompt_classifier.tokenize_function(result_prompt, return_pt = True), embedding_classifier.tokenize_function(result_embedding, return_pt = True), random_row
+
+
+
     def sample_prompt_datapoint(self, get_embedding_cb: Callable, split: str = "val", existing: bool = True, tokenize_function: Optional[Callable] = None, sep_token = "[SEP]", kge_dimension: int = 4)-> Dict[str, Union[str, int, torch.Tensor]]:
         '''
         Samples one datapoint of the prompt model dataset.

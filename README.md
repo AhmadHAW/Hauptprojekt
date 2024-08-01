@@ -98,8 +98,11 @@ In the view of the embeddings in the output layer, we can reduce the dimensions 
 ## Setup
 A large part of the dependencies can be installed with ```pip install -r requirements.txt```. The other libraries torch-scatter and torch-sparse can then be installed with the commands:
 ```torch-scatter -f https://data.pyg.org/whl/torch-${TORCH}.html``` and ```torch-sparse -f https://data.pyg.org/whl/torch-${TORCH}.html```, whereby ```${TORCH}``` must be replaced with the current Torch version. It is important that the correct Torch version is installed and specified. For example, problems can occur when installing *Torch-Scatter* and *Torch-Sparse* if the installed Torch version supports Cuda without the host system doing so.
-## Playground
-Follow the [playground](playground.ipynb) for current experiments and a more detailed and practical explanation of the project. 
+## Experiments
+![Embeddings Plot](/images/Hidden_states.png)
+![Vanilla Attentions](/images/Vanilla_Attentions.png) 
+![Prompt Attentions](/images/Prompt_Attentions.png) 
+![Embedding Attentions](/images/Embedding_Attentions.png) 
 ## Sources
 [1] Jin, Bowen et al. “Large Language Models on Graphs: A Comprehensive Survey.” ArXiv abs/2312.02783 (2023): n. pag.
 [2] Cao, Jiahang et al. “Knowledge Graph Embedding: A Survey from the Perspective of Representation Spaces.” ACM Computing Surveys 56 (2022): 1 - 42.

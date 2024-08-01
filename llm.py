@@ -4,7 +4,7 @@ from abc import ABC
 import os
 import json
 
-from movie_lens_loader import row_to_prompt_datapoint, row_to_adding_embedding_datapoint, row_to_vanilla_datapoint, LLM_PROMPT_TRAINING_PATH, LLM_ADDING_TRAINING_PATH, LLM_VANILLA_TRAINING_PATH, LLM_PROMPT_BEST_MODEL_PATH, LLM_ADDING_BEST_MODEL_PATH, LLM_VANILLA_BEST_MODEL_PATH
+from movie_lens_loader import row_to_prompt_datapoint, row_to_adding_embedding_datapoint, row_to_vanilla_datapoint, LLM_PROMPT_TRAINING_PATH, LLM_ADDING_TRAINING_PATH, LLM_VANILLA_TRAINING_PATH, LLM_PROMPT_BEST_MODEL_PATH, LLM_ADDING_BEST_MODEL_PATH, LLM_VANILLA_BEST_MODEL_PATH, PCA_PATH
 
 import torch
 from torch import nn
@@ -20,6 +20,8 @@ from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 import matplotlib.pyplot as plt
 import seaborn as sns
 import networkx as nx
+from sklearn.decomposition import PCA
+import joblib
 
 ID2LABEL = {0: "FALSE", 1: "TRUE"}
 LABEL2ID = {"FALSE": 0, "TRUE": 1}
@@ -31,9 +33,47 @@ PROMPT_TRAINING_STATE_PATH = f"{LLM_PROMPT_TRAINING_PATH}/checkpoint-4420/traine
 ADDING_TRAINING_STATE_PATH = f"{LLM_ADDING_TRAINING_PATH}/checkpoint-4420/trainer_state.json"
 VANILLA_TRAINING_STATE_PATH = f"{LLM_VANILLA_TRAINING_PATH}/checkpoint-4420/trainer_state.json"
 
+PCA_VANILLA_MODEL_PATH = f"{PCA_PATH}/vanilla_{{}}.pkl"
+PCA_PROMPT_MODEL_PATH = f"{PCA_PATH}/prompt_{{}}_{{}}.pkl"
+PCA_EMBEDDING_MODEL_PATH = f"{PCA_PATH}/embedding_{{}}_{{}}.pkl"
+
 
 ALL_SEMANTIC_TOKENS = ["user_id", "title", "genres"]
 EMBEDDING_BASED_SEMANTIC_TOKENS = ALL_SEMANTIC_TOKENS + ["user embedding", "movie embedding"]
+
+
+def mean_over_ranges(tens: torch.Tensor, starts: torch.Tensor, ends: torch.Tensor) -> torch.Tensor:
+    '''
+    This operation allows to produce a mean over ranges of different sizes in torch tensor manner only.
+    We use padding positions to calculate an average and then remove the padded positions afterwards.
+    This code was based on ChatGPT suggestions and works on the assumption:
+    Let S be the sum of the padded list of numbers.
+    Let n be the number of elements in the padded list.
+    Let μ be the average of the padded list of numbers.
+    Let r be the difference between the actual range lengths and the max range length 
+    Let x be the number that is at the padding position.
+    μ' = ((μ * n)-(r * x)) / (n - r)
+    '''
+    # input: # ends: torch.tensor([2, 5, 6]) starts: tensor([0, 2, 4])
+    # Compute the maximum length of the ranges
+    max_length = (ends - starts).max(dim = 1)
+    print(max_length.shape) 
+    range_diffs = max_length - (ends-starts) # the amount of times, the range had to be padded 
+    # Create a range tensor from 0 to max_length-1
+    range_tensor = torch.arange(max_length).unsqueeze(0)
+
+    # Compute the ranges using broadcasting and masking
+    ranges = starts.unsqueeze(1) + range_tensor
+    mask = ranges < ends.unsqueeze(1)
+
+    # Apply the mask
+    result = ranges * mask  # result: tensor([[0, 1, 0], [2, 3, 4], [4, 5, 0]]) here padding index is 0
+                            #                        -                     -    positions were padded
+
+    means = torch.mean(tens.gather(dim = 1, index = result), dim = 1) # The mean was computed with the padding positions. We will remove the values from the mean now,
+    values_to_remove = range_diffs * tens[:,0] # the summed value at padded position
+    actual_means = (means * max_length - values_to_remove) / (max_length - range_diffs) # the actual mean without padding positions
+    return actual_means
 
 class DataCollatorBase(DataCollatorForLanguageModeling, ABC):
     '''
@@ -121,6 +161,7 @@ class EmbeddingBasedDataCollator(DataCollatorBase):
             "labels": label,
             "graph_embeddings" : torch.stack([user_embedding, movie_embedding]),
             }
+    
 
 class PromptEmbeddingDataCollator(TextBasedDataCollator):
     '''
@@ -169,6 +210,7 @@ class VanillaEmbeddingDataCollator(TextBasedDataCollator):
             "attention_mask": tokenized["attention_mask"],
             "labels": label
             }
+    
 
 METRIC = evaluate.load('accuracy')
 
@@ -363,7 +405,7 @@ class ClassifierBase():
         plt.ylabel('Tokens')
         plt.show()
 
-    def plot_attention_graph(self, attentions, title):
+    def plot_attention_graph(self, attentions, title, weight_coef = 15):
         # Create an undirected graph
         G = nx.Graph()
         labels = {}
@@ -386,7 +428,7 @@ class ClassifierBase():
         # Create a list of edge thicknesses based on weights
         # Normalize the weights to get thickness values
         max_weight = max(edge_weights.values())
-        edge_thickness = [edge_weights[edge] / max_weight * 5 for edge in G.edges()]# Draw edges with varying thicknesses
+        edge_thickness = [edge_weights[edge] / max_weight * weight_coef for edge in G.edges()]# Draw edges with varying thicknesses
         nx.draw_networkx_edges(G, pos, edgelist=G.edges(), width=edge_thickness)
         shift_to_left = 0.21
         label_pos = {node: (x - shift_to_left, y) for node, (x, y) in pos.items()}
@@ -399,9 +441,96 @@ class ClassifierBase():
         plt.title(title)
         plt.show()
 
+    def forward_dataset_and_save_outputs(self, dataset, split = "val", batch_size = 64, epochs = 3, force_recompute = False):
+        self.model.eval()
+        data_collator = self._get_data_collator(split)
+        last_hidden_states = []
+        attentions = []
+        all_ranges_over_batch = []
+        for epoch in range(epochs):
+            data_loader = DataLoader(dataset=dataset[split], batch_size= batch_size, collate_fn = data_collator)
+            for idx, batch in enumerate(data_loader):
+                with torch.no_grad():
+                    outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], output_hidden_states=True, output_attentions = True)
+                    hidden_states = outputs.hidden_states
+                    last_hidden_states.append(hidden_states[-1])
+                    ranges_over_batch = self._get_ranges_over_batch(batch["input_ids"])
+                    all_ranges_over_batch.append(ranges_over_batch)
+        # Concatenate all hidden states across batches
+        last_hidden_states = torch.cat(last_hidden_states)
+        all_ranges_over_batch = torch.cat(all_ranges_over_batch)
+
+    def init_pca(self, dataset, split = "val", batch_size = 64, epochs = 3, force_recompute = False):
+        if self.pcas_exists() and not force_recompute:
+            return self.load_pcas()
+        else:
+            self.model.eval()
+            data_collator = self._get_data_collator(split)
+            last_hidden_states = []
+            all_ranges_over_batch = []
+            for epoch in range(epochs):
+                data_loader = DataLoader(dataset=dataset[split], batch_size= batch_size, collate_fn = data_collator)
+                for idx, batch in enumerate(data_loader):
+                    with torch.no_grad():
+                        outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], output_hidden_states=True)
+                        hidden_states = outputs.hidden_states
+                        last_hidden_states.append(hidden_states[-1])
+                        ranges_over_batch = self._get_ranges_over_batch(batch["input_ids"])
+                        all_ranges_over_batch.append(ranges_over_batch)
+            # Concatenate all hidden states across batches
+            last_hidden_states = torch.cat(last_hidden_states)
+            all_ranges_over_batch = torch.cat(all_ranges_over_batch)
+            range_last_hidden_states = torch.zeros((all_ranges_over_batch.shape[0], all_ranges_over_batch.shape[1], last_hidden_states.shape[-1]))
+
+            for batch, ranges in enumerate(ranges_over_batch):
+                for idx, range_borders in enumerate(ranges):
+                    range_ = torch.arange(range_borders[0], range_borders[1])
+                    range_last_hidden_states[batch, idx] = torch.mean(last_hidden_states[batch, range_], dim=0)
+            # Convert to numpy arrays
+            range_last_hidden_states = range_last_hidden_states.numpy()
+
+            pcas = []
+            for idx, label in enumerate(self.semantic_datapoints):
+                pca = PCA(n_components=2)  # Adjust number of components as needed
+                pcas.append(pca)
+                position_hidden_states = range_last_hidden_states[:,idx]
+                pca.fit_transform(position_hidden_states)
+                self.save_pca(pca, label = label)
+            return pcas
+
 
     def _find_sep_in_tokens(self, tokens):
         return tokens == self.tokenizer.sep_token_id
+    
+    def _get_ranges_over_batch(self, input_ids):
+        mask = self._find_sep_in_tokens(input_ids)
+        positions = mask.nonzero(as_tuple=True)
+        cols = positions[1]
+
+        # Step 3: Determine the number of True values per row
+        num_trues_per_row = mask.sum(dim=1)
+        max_trues_per_row = num_trues_per_row.max().item()
+
+        # Step 4: Create an empty tensor to hold the result
+        ranges_over_batch = -torch.ones((mask.size(0), max_trues_per_row), dtype=torch.long)
+
+        # Step 5: Use scatter to place column indices in the ranges_over_batch tensor
+        # Create an index tensor that assigns each column index to the correct position in ranges_over_batch tensor
+        row_indices = torch.arange(mask.size(0)).repeat_interleave(num_trues_per_row)
+        column_indices = torch.cat([torch.arange(n) for n in num_trues_per_row])
+
+        ranges_over_batch[row_indices, column_indices] = cols
+        ranges_over_batch = torch.stack([ranges_over_batch[:, :-1], ranges_over_batch[:, 1:]], dim=2)
+        # Create a tensor of zeros to represent the starting points
+        start_points = torch.zeros(ranges_over_batch.size(0), 1, 2, dtype=ranges_over_batch.dtype)
+
+        # Set the second column to be the first element of the first range
+        start_points[:, 0, 1] = ranges_over_batch[:, 0, 0]
+
+        # Concatenate the start_points tensor with the original ranges_over_batch tensor
+        ranges_over_batch = torch.cat((start_points, ranges_over_batch), dim=1)
+        ranges_over_batch[:,:,0] += 1
+        return ranges_over_batch
     
     def generate_semantic_attention_matrix(self, dataset, split = "val", batch_size = 64, epochs = 3, step_info_size = 10):
         self.model.eval()
@@ -410,47 +539,28 @@ class ClassifierBase():
         result_matrix = torch.zeros((layers, len(self.semantic_datapoints), len(self.semantic_datapoints)))
         for epoch in range(epochs):
             data_loader = DataLoader(dataset=dataset[split], batch_size= batch_size, collate_fn = data_collator)
-            batch = next(iter(data_loader))
+            #batch = next(iter(data_loader))
             for idx, batch in enumerate(data_loader):
                 combined_attentions = self._generate_attentions_for_batch(batch)
-                mask = self._find_sep_in_tokens(batch["input_ids"])
-                positions = mask.nonzero(as_tuple=True)
-                cols = positions[1]
-
-                # Step 3: Determine the number of True values per row
-                num_trues_per_row = mask.sum(dim=1)
-                max_trues_per_row = num_trues_per_row.max().item()
-
-                # Step 4: Create an empty tensor to hold the result
-                ranges_over_batch = -torch.ones((mask.size(0), max_trues_per_row), dtype=torch.long)
-
-                # Step 5: Use scatter to place column indices in the ranges_over_batch tensor
-                # Create an index tensor that assigns each column index to the correct position in ranges_over_batch tensor
-                row_indices = torch.arange(mask.size(0)).repeat_interleave(num_trues_per_row)
-                column_indices = torch.cat([torch.arange(n) for n in num_trues_per_row])
-
-                ranges_over_batch[row_indices, column_indices] = cols
-                ranges_over_batch = torch.stack([ranges_over_batch[:, :-1], ranges_over_batch[:, 1:]], dim=2)
-                # Create a tensor of zeros to represent the starting points
-                start_points = torch.zeros(ranges_over_batch.size(0), 1, 2, dtype=ranges_over_batch.dtype)
-
-                # Set the second column to be the first element of the first range
-                start_points[:, 0, 1] = ranges_over_batch[:, 0, 0]
-
-                # Concatenate the start_points tensor with the original ranges_over_batch tensor
-                ranges_over_batch = torch.cat((start_points, ranges_over_batch), dim=1)
-                ranges_over_batch[:,:,0] += 1
+                ranges_over_batch = self._get_ranges_over_batch()
                 # Initialize the result matrix
                 for layer in range(layers):
                     for batch_, ranges in enumerate(ranges_over_batch):
                         for idx, range_x in enumerate(ranges):
+                            from_range = torch.arange(range_x[0],range_x[1])
                             for idy, range_y in enumerate(ranges):
-                                result_matrix[layer, idx, idy] += torch.sum(combined_attentions[layer, batch_, torch.arange(range_x[0],range_x[1])][:, torch.arange(range_y[0], range_y[1])])
+                                to_range = torch.arange(range_y[0], range_y[1])
+                                result_matrix[layer, idx, idy] += torch.sum(combined_attentions[layer, batch_, from_range][:, to_range])/(len(from_range)*len(to_range))
                 if idx > 0 and idx % step_info_size ==0:
                     print(f"Epoch: {epoch}, Batch: {idx}/{len(data_loader)}")
         normalized_tensor = result_matrix / result_matrix.sum(dim = (1,2), keepdim=True)
         normalized_tensor_row = result_matrix / result_matrix.sum(dim=2, keepdim=True)
         return normalized_tensor, normalized_tensor_row
+    
+    def _generate_attentions_for_batch(self, batch):
+        with torch.no_grad():
+            outputs = self.forward_batch(batch, output_attentions = True)
+            return torch.stack([torch.sum(attentions, dim=1).detach() for attentions in outputs.attentions])  # This will contain the attention weights for each layer and head
     
     def _plot_training_loss_and_accuracy(self, path_to_trainer_state, model_type):
         with open(path_to_trainer_state, 'r') as f:
@@ -528,11 +638,9 @@ class ClassifierOriginalArchitectureBase(ClassifierBase):
             "attention_mask": tokenized["attention_mask"],
             "labels": example["labels"]}
         return result
-    
-    def _generate_attentions_for_batch(self, batch):
-        with torch.no_grad():
-            outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], output_attentions=True)
-            return torch.stack([torch.sum(attentions, dim=1).detach() for attentions in outputs.attentions])  # This will contain the attention weights for each layer and head
+        
+    def forward_batch(self, batch, output_attentions = False, output_hidden_states = False):
+        return self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], output_attentions=output_attentions, output_hidden_states = output_hidden_states)
         
 class AddingEmbeddingsBertClassifierBase(ClassifierBase):
     def __init__(self, movie_lens_loader, get_embedding_cb, model_name = "google/bert_uncased_L-2_H-128_A-2", kge_dimension = 128, batch_size = 64,model_max_length = 256, force_recompute = False) -> None:
@@ -623,11 +731,27 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
         model_type = "Embedding"
         self._plot_training_loss_and_accuracy(ADDING_TRAINING_STATE_PATH.format(kge_dimension), model_type)
 
+    
+    def save_pca(self, pca, label):
+        pca_path = PCA_EMBEDDING_MODEL_PATH.format(self.kge_dimension, label)
+        joblib.dump(pca, pca_path)
 
-    def _generate_attentions_for_batch(self, batch):
-        with torch.no_grad():
-            outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], graph_embeddings = batch["graph_embeddings"], output_attentions=True)
-            return torch.stack([torch.sum(attentions, dim=1).detach() for attentions in outputs.attentions])  # This will contain the attention weights for each layer and head
+    def pcas_exists(self):
+        for label in self.semantic_datapoints:
+            pca_path = PCA_EMBEDDING_MODEL_PATH.format(self.kge_dimension, label)
+            if not os.path.exists(pca_path):
+                return False
+        return True
+    
+    def load_pcas(self):
+        pcas = []
+        for label in self.semantic_datapoints:
+            pca_path = PCA_EMBEDDING_MODEL_PATH.format(self.kge_dimension, label)
+            pcas.append(joblib.load(pca_path))
+        return pcas
+        
+    def forward_batch(self, batch, output_attentions = False, output_hidden_states = False):
+        return self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], graph_embeddings = batch["graph_embeddings"], output_attentions=output_attentions, output_hidden_states = output_hidden_states)
 
 
     
@@ -703,6 +827,25 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
 
     def _get_data_collator(self, split):
         return self.test_data_collator if split == "test" else self.eval_data_collator if split == "val" else self.train_data_collator
+    
+    def save_pca(self, pca, label):
+        pca_path = PCA_PROMPT_MODEL_PATH.format(self.kge_dimension, label)
+        joblib.dump(pca, pca_path)
+
+    def pcas_exists(self):
+        for label in self.semantic_datapoints:
+            pca_path = PCA_PROMPT_MODEL_PATH.format(self.kge_dimension, label)
+            if not os.path.exists(pca_path):
+                return False
+        return True
+
+    def load_pcas(self):
+        pcas = []
+        for label in self.semantic_datapoints:
+            pca_path = PCA_PROMPT_MODEL_PATH.format(self.kge_dimension, label)
+            pcas.append(joblib.load(pca_path))
+        return pcas
+    
 
 
 class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
@@ -764,6 +907,25 @@ class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
     def plot_training_loss_and_accuracy(self):
         model_type = "Vanilla"
         self._plot_training_loss_and_accuracy(VANILLA_TRAINING_STATE_PATH, model_type)
+
+    
+    def save_pca(self, pca, label):
+        pca_path = PCA_VANILLA_MODEL_PATH.format(label)
+        joblib.dump(pca, pca_path)
+
+    def pcas_exists(self):
+        for label in self.semantic_datapoints:
+            pca_path = PCA_VANILLA_MODEL_PATH.format(label)
+            if not os.path.exists(pca_path):
+                return False
+        return True
+    
+    def load_pcas(self):
+        pcas = []
+        for label in self.semantic_datapoints:
+            pca_path = PCA_VANILLA_MODEL_PATH.format(label)
+            pcas.append(joblib.load(pca_path))
+        return pcas
 
     def _get_data_collator(self, split = None):
         return self.data_collator
