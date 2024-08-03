@@ -17,13 +17,16 @@ def row_to_adding_embedding_datapoint(row, sep_token, pad_token):
     prompt = f"user: {user_id}{sep_token}title: {title}{sep_token}genres: {genres}{sep_token}{pad_token}{sep_token}{pad_token}"
     return prompt
 
+def transform_embeddings_to_string(embeddings: torch.Tensor, float_numbers: int = 16):
+    return str([format(embedding, f".{float_numbers}f") for embedding in embeddings])
+
 def row_to_prompt_datapoint(row, kge_dimension, sep_token):
     user_id = row["mappedUserId"]
     title = row["title"]
     genres = row["genres"]
     user_embedding = row[f"user_embedding_{kge_dimension}"]
     movie_embedding = row[f"movie_embedding_{kge_dimension}"]
-    prompt = f"user: {user_id}{sep_token}title: {title}{sep_token}genres: {genres}{sep_token}user embedding: {user_embedding}{sep_token}movie embedding: {movie_embedding}"
+    prompt = f"user: {user_id}{sep_token}title: {title}{sep_token}genres: {genres}{sep_token}user embedding: {transform_embeddings_to_string(user_embedding)}{sep_token}movie embedding: {transform_embeddings_to_string(movie_embedding)}"
     return prompt
 
 def row_to_vanilla_datapoint(row, sep_token):
@@ -124,6 +127,7 @@ class MovieLensLoader():
         self.gnn_test_data = torch.load(GNN_TEST_DATASET_PATH)
         self.data = torch.load(GNN_COMPLETE_DATASET_PATH)
         self.llm_df = pd.read_csv(LLM_DATASET_PATH)
+
 
 
     def __download_dataset(self) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -292,7 +296,7 @@ class MovieLensLoader():
         self.__last = "test"
         print("splitting LLM dataset")
         self.llm_df["split"] = self.llm_df.apply(lambda row: self.__find_split(row, train_edge_index, val_edge_index, test_edge_index), axis = 1)
-        self.llm_df.to_csv(LLM_DATASET_PATH, index=False)
+        self.save_llm_df()
 
     def add_graph_embeddings(self, get_embedding_cb: Callable) -> None:
         '''
@@ -309,7 +313,7 @@ class MovieLensLoader():
             return row
 
         self.llm_df = self.llm_df.apply(lambda row: __add_graph_embeddings(row, get_embedding_cb), axis = 1)
-        self.llm_df.to_csv(LLM_DATASET_PATH, index=False)
+        self.save_llm_df()
     
     def __dataset_from_df(self, df: pd.DataFrame) -> DatasetDict:
         '''
@@ -348,16 +352,10 @@ class MovieLensLoader():
             dataset.save_to_disk(llm_prompt_dataset_path)
         return dataset
     
-    def __generate_embeddings(self, row, kge_dimension):
+    def __generate_embeddings(self, row, kge_dimension) -> torch.Tensor:
         user_embeddings = row[f"user_embedding_{kge_dimension}"]
-        user_embeddings = user_embeddings.replace("\n", "")
-        user_embeddings = ast.literal_eval(user_embeddings)
-        user_embeddings = [float(user_embedding) for user_embedding in user_embeddings]
         movie_embeddings = row[f"movie_embedding_{kge_dimension}"]
-        movie_embeddings = movie_embeddings.replace("\n", "")
-        movie_embeddings = ast.literal_eval(movie_embeddings)
-        movie_embeddings = [float(movie_embedding) for movie_embedding in movie_embeddings]
-        embeddings = [user_embeddings, movie_embeddings]
+        embeddings = torch.stack([user_embeddings, movie_embeddings])
         return embeddings
     
     def generate_adding_embedding_dataset(self, sep_token, pad_token, tokenize_function:Callable = None, kge_dimension:int = 4, force_recompute: bool = False) -> DatasetDict:
@@ -409,9 +407,7 @@ class MovieLensLoader():
             df = df[df["mappedMovieId"] == df.sample(1).iloc[0]["mappedMovieId"]]
         if existing:
             random_row = df.sample(1).iloc[0]
-            user_embedding, movie_embedding = self.__generate_embeddings(random_row, kge_dimension=embedding_classifier.kge_dimension)
-            random_row[f"user_embedding_{embedding_classifier.kge_dimension}"] = torch.tensor(user_embedding)
-            random_row[f"movie_embedding_{embedding_classifier.kge_dimension}"] = torch.tensor(movie_embedding)
+            random_row["graph_embeddings"] = self.__generate_embeddings(random_row, kge_dimension=embedding_classifier.kge_dimension)
         else:
             dataset = self.gnn_train_data if split == "train" else self.gnn_val_data if split == "val" else self.gnn_test_data if split == "test" else self.data
             existing = True
@@ -584,7 +580,14 @@ class MovieLensLoader():
         '''
         overrides the current llm dataset with the given dataset.'''
         self.llm_df = df
-        self.llm_df.to_csv(LLM_DATASET_PATH, index = False)
+        self.save_llm_df()
+
+    def save_llm_df(self):
+        columns_without_embeddings = list(filter(lambda column: "embedding" not in column, self.llm_df.columns))
+        columns_with_embeddings = list(filter(lambda column: "embedding" in column, self.llm_df.columns))
+        self.llm_df[columns_without_embeddings].to_csv(LLM_DATASET_PATH, index = False)
+        for column in columns_with_embeddings:
+            torch.save(torch.tensor(self.llm_df[column].tolist()), f"{GNN_PATH}/{column}.pt")
         
             
 

@@ -1,6 +1,6 @@
 import os
 import joblib
-from typing import Optional
+from typing import Optional, Tuple
 
 from pandas import DataFrame
 import torch
@@ -231,7 +231,21 @@ class GNNTrainer():
         movie_embedding = embeddings["movie"][movie_node_id_index]
         return user_embedding, movie_embedding
     
-    def __are_embeddings_saved(self, df):
+    def __get_saved_embeddings(self, df) -> Tuple[torch.Tensor, torch.Tensor]:
+        user_path = f"{GNN_PATH}/user_embedding_{self.kge_dimension}.pt"
+        if not os.path.exists(user_path):
+            return None, None
+        user_embeddings = torch.load(user_path)
+        if len(user_embeddings) < len(df):
+            return None, None
+        movie_path = f"{GNN_PATH}/movie_embedding_{self.kge_dimension}.pt"
+        if not os.path.exists(movie_path):
+            return None, None
+        movie_embeddings = torch.load(movie_path)
+        if len(movie_embeddings) < len(df):
+            return None, None
+        return user_embeddings, movie_embeddings
+        
         if not f"user_embedding_{self.kge_dimension}" in df.columns:
             return False
         if not ((df[f"user_embedding_{self.kge_dimension}"] != "") | (df[f"user_embedding_{self.kge_dimension}"].notna())).all():
@@ -265,12 +279,17 @@ class GNNTrainer():
             row[f"movie_embedding_{self.kge_dimension}"] = movie_embedding.to("cpu").detach().tolist()
             return row
         df = movie_lens_loader.llm_df
-        if not self.__are_embeddings_saved(df) or force_recompute:
+        user_embeddings, movie_embeddings = self.__get_saved_embeddings(df)
+        if user_embeddings is None or movie_embeddings is None or force_recompute:
             #produce the embeddings for all edges
             print(f"Computing embeddings for embedding dimension {self.kge_dimension}.")
             df = movie_lens_loader.llm_df.apply(lambda row: __get_embedding(row, movie_lens_loader), axis = 1)
             #save new embeddings      
-            movie_lens_loader.replace_llm_df(df)        
+            movie_lens_loader.replace_llm_df(df)
+        else:
+            df[f"user_embedding_{self.kge_dimension}"] = user_embeddings.to("cpu").detach().tolist()
+            df[f"movie_embedding_{self.kge_dimension}"] = movie_embeddings.to("cpu").detach().tolist()
+            movie_lens_loader.replace_llm_df(df)
 
         
         

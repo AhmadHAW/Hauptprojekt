@@ -3,14 +3,16 @@ from typing import Optional, Union, Dict, Tuple, List
 from abc import ABC
 import os
 import json
+import ast
 
-from movie_lens_loader import row_to_prompt_datapoint, row_to_adding_embedding_datapoint, row_to_vanilla_datapoint, LLM_PROMPT_TRAINING_PATH, LLM_ADDING_TRAINING_PATH, LLM_VANILLA_TRAINING_PATH, LLM_PROMPT_BEST_MODEL_PATH, LLM_ADDING_BEST_MODEL_PATH, LLM_VANILLA_BEST_MODEL_PATH, PCA_PATH
+from movie_lens_loader import row_to_prompt_datapoint, row_to_adding_embedding_datapoint, row_to_vanilla_datapoint, LLM_PROMPT_TRAINING_PATH, LLM_ADDING_TRAINING_PATH, LLM_VANILLA_TRAINING_PATH, LLM_PROMPT_BEST_MODEL_PATH, LLM_ADDING_BEST_MODEL_PATH, LLM_VANILLA_BEST_MODEL_PATH, PCA_PATH, LLM_VANILLA_PATH, LLM_PROMPT_PATH, LLM_ADDING_PATH
 
 import torch
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 import datasets
 import numpy as np
+import pandas as pd
 import evaluate
 from torch.utils.data import DataLoader, Dataset
 from transformers import BertForSequenceClassification, BertModel, BertTokenizer, DataCollatorForLanguageModeling, Trainer, TrainingArguments
@@ -37,6 +39,18 @@ PCA_VANILLA_MODEL_PATH = f"{PCA_PATH}/vanilla_{{}}.pkl"
 PCA_PROMPT_MODEL_PATH = f"{PCA_PATH}/prompt_{{}}_{{}}.pkl"
 PCA_EMBEDDING_MODEL_PATH = f"{PCA_PATH}/embedding_{{}}_{{}}.pkl"
 
+VANILLA_ATTENTIONS_PATH = f"{LLM_VANILLA_PATH}/attentions.pt"
+PROMPT_ATTENTIONS_PATH = f"{LLM_PROMPT_PATH}/attentions.pt"
+ADDING_ATTENTIONS_PATH = f"{LLM_ADDING_PATH}/attentions.pt"
+VANILLA_HIDDEN_STATES_PATH = f"{LLM_VANILLA_PATH}/hidden_states.pt"
+PROMPT_HIDDEN_STATES_PATH = f"{LLM_PROMPT_PATH}/hidden_states.pt"
+ADDING_HIDDEN_STATES_PATH = f"{LLM_ADDING_PATH}/hidden_states.pt"
+PROMPT_GRAPH_EMBEDDINGS_PATH = f"{LLM_PROMPT_PATH}/graph_embeddings.pt"
+ADDING_GRAPH_EMBEDDINGS_PATH = f"{LLM_ADDING_PATH}/graph_embeddings.pt"
+VANILLA_TOKENS_PATH = f"{LLM_VANILLA_PATH}/tokens.csv"
+PROMPT_TOKENS_PATH = f"{LLM_PROMPT_PATH}/tokens.csv"
+ADDING_TOKENS_PATH = f"{LLM_ADDING_PATH}/tokens.csv"
+
 
 ALL_SEMANTIC_TOKENS = ["user_id", "title", "genres"]
 EMBEDDING_BASED_SEMANTIC_TOKENS = ALL_SEMANTIC_TOKENS + ["user embedding", "movie embedding"]
@@ -56,9 +70,8 @@ def mean_over_ranges(tens: torch.Tensor, starts: torch.Tensor, ends: torch.Tenso
     '''
     # input: # ends: torch.tensor([2, 5, 6]) starts: tensor([0, 2, 4])
     # Compute the maximum length of the ranges
-    max_length = (ends - starts).max(dim = 1)
-    print(max_length.shape) 
-    range_diffs = max_length - (ends-starts) # the amount of times, the range had to be padded 
+    max_length = (ends - starts).max()
+    range_diffs = (max_length - (ends-starts)).unsqueeze(1) # the amount of times, the range had to be padded 
     # Create a range tensor from 0 to max_length-1
     range_tensor = torch.arange(max_length).unsqueeze(0)
 
@@ -69,11 +82,35 @@ def mean_over_ranges(tens: torch.Tensor, starts: torch.Tensor, ends: torch.Tenso
     # Apply the mask
     result = ranges * mask  # result: tensor([[0, 1, 0], [2, 3, 4], [4, 5, 0]]) here padding index is 0
                             #                        -                     -    positions were padded
-
-    means = torch.mean(tens.gather(dim = 1, index = result), dim = 1) # The mean was computed with the padding positions. We will remove the values from the mean now,
+    result = result.unsqueeze(dim = 2).repeat(1,1, tens.shape[2])
+    gather = tens.gather(dim = 1, index = result)
+    means = torch.mean(gather, dim = 1) # The mean was computed with the padding positions. We will remove the values from the mean now,
     values_to_remove = range_diffs * tens[:,0] # the summed value at padded position
     actual_means = (means * max_length - values_to_remove) / (max_length - range_diffs) # the actual mean without padding positions
     return actual_means
+
+def means_over_ranges_cross(all_ranges_over_batch: torch.Tensor, all_attentions: torch.Tensor) -> torch.Tensor:
+    all_attentios_avgs = torch.zeros(all_ranges_over_batch.shape[0], all_ranges_over_batch.shape[1], all_ranges_over_batch.shape[1], all_attentions.shape[-1])
+    for batch, (batch_range, batch_attention) in enumerate(zip(all_ranges_over_batch, all_attentions)):
+        for from_, delimiter_from in enumerate(batch_range):
+            for to_, delimiter_to in enumerate(batch_range):
+                batch_attention_sliced = batch_attention[delimiter_from[0]:delimiter_from[1]][:,delimiter_to[0]:delimiter_to[1]]
+                attention_avg = torch.mean(batch_attention_sliced, dim = (0,1))
+                all_attentios_avgs[batch, from_, to_] = attention_avg
+    return all_attentios_avgs
+
+def avg_over_states(all_ranges_over_batch, last_hidden_states, all_attentions):
+        averaged_hidden_states = []
+        for position in range(all_ranges_over_batch.shape[1]):
+            ranges_over_batch = all_ranges_over_batch[:,position]
+            starts = ranges_over_batch[:,0]
+            ends = ranges_over_batch[:,1]
+            averaged_hidden_state = mean_over_ranges(last_hidden_states, starts, ends)
+            #print(starts.shape, averaged_hidden_state.shape)
+            averaged_hidden_states.append(averaged_hidden_state)
+        averaged_hidden_states = torch.stack(averaged_hidden_states)
+        averaged_attentions = means_over_ranges_cross(all_ranges_over_batch, all_attentions)
+        return averaged_hidden_states, averaged_attentions
 
 class DataCollatorBase(DataCollatorForLanguageModeling, ABC):
     '''
@@ -441,59 +478,20 @@ class ClassifierBase():
         plt.title(title)
         plt.show()
 
-    def forward_dataset_and_save_outputs(self, dataset, split = "val", batch_size = 64, epochs = 3, force_recompute = False):
-        self.model.eval()
-        data_collator = self._get_data_collator(split)
-        last_hidden_states = []
-        attentions = []
-        all_ranges_over_batch = []
-        for epoch in range(epochs):
-            data_loader = DataLoader(dataset=dataset[split], batch_size= batch_size, collate_fn = data_collator)
-            for idx, batch in enumerate(data_loader):
-                with torch.no_grad():
-                    outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], output_hidden_states=True, output_attentions = True)
-                    hidden_states = outputs.hidden_states
-                    last_hidden_states.append(hidden_states[-1])
-                    ranges_over_batch = self._get_ranges_over_batch(batch["input_ids"])
-                    all_ranges_over_batch.append(ranges_over_batch)
-        # Concatenate all hidden states across batches
-        last_hidden_states = torch.cat(last_hidden_states)
-        all_ranges_over_batch = torch.cat(all_ranges_over_batch)
+    
+    
 
-    def init_pca(self, dataset, split = "val", batch_size = 64, epochs = 3, force_recompute = False):
+    def init_pca(self, hidden_states, force_recompute = False):
         if self.pcas_exists() and not force_recompute:
             return self.load_pcas()
         else:
-            self.model.eval()
-            data_collator = self._get_data_collator(split)
-            last_hidden_states = []
-            all_ranges_over_batch = []
-            for epoch in range(epochs):
-                data_loader = DataLoader(dataset=dataset[split], batch_size= batch_size, collate_fn = data_collator)
-                for idx, batch in enumerate(data_loader):
-                    with torch.no_grad():
-                        outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], output_hidden_states=True)
-                        hidden_states = outputs.hidden_states
-                        last_hidden_states.append(hidden_states[-1])
-                        ranges_over_batch = self._get_ranges_over_batch(batch["input_ids"])
-                        all_ranges_over_batch.append(ranges_over_batch)
-            # Concatenate all hidden states across batches
-            last_hidden_states = torch.cat(last_hidden_states)
-            all_ranges_over_batch = torch.cat(all_ranges_over_batch)
-            range_last_hidden_states = torch.zeros((all_ranges_over_batch.shape[0], all_ranges_over_batch.shape[1], last_hidden_states.shape[-1]))
-
-            for batch, ranges in enumerate(ranges_over_batch):
-                for idx, range_borders in enumerate(ranges):
-                    range_ = torch.arange(range_borders[0], range_borders[1])
-                    range_last_hidden_states[batch, idx] = torch.mean(last_hidden_states[batch, range_], dim=0)
-            # Convert to numpy arrays
-            range_last_hidden_states = range_last_hidden_states.numpy()
-
+            
+            hidden_states = hidden_states.numpy()
             pcas = []
             for idx, label in enumerate(self.semantic_datapoints):
                 pca = PCA(n_components=2)  # Adjust number of components as needed
                 pcas.append(pca)
-                position_hidden_states = range_last_hidden_states[:,idx]
+                position_hidden_states = hidden_states[idx]
                 pca.fit_transform(position_hidden_states)
                 self.save_pca(pca, label = label)
             return pcas
@@ -648,6 +646,10 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
         self.kge_dimension = kge_dimension
         self.best_model_path = LLM_ADDING_BEST_MODEL_PATH.format(self.kge_dimension)
         self.model_name = model_name
+        self.attentions_path = ADDING_ATTENTIONS_PATH.format(self.kge_dimension)
+        self.hidden_states_path = ADDING_HIDDEN_STATES_PATH.format(self.kge_dimension)
+        self.graph_embeddings_path = ADDING_GRAPH_EMBEDDINGS_PATH.format(self.kge_dimension)
+        self.tokens_path = ADDING_TOKENS_PATH.format(self.kge_dimension)
         
         # Initialize the model and tokenizer
         if os.path.exists(self.best_model_path) and not self.force_recompute:
@@ -731,6 +733,95 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
         model_type = "Embedding"
         self._plot_training_loss_and_accuracy(ADDING_TRAINING_STATE_PATH.format(kge_dimension), model_type)
 
+    def forward_dataset_and_save_outputs(self, dataset, splits = ["val"], batch_size = 64, epochs = 3, force_recompute = False):
+        if force_recompute or not os.path.exists(self.attentions_path) or not os.path.exists(self.hidden_states_path) or not os.path.exists(self.tokens_path):
+            self.model.eval()
+            last_hidden_states = []
+            all_attentions = []
+            all_ranges_over_batch = []
+            input_ids =  []
+            labels = []
+            graph_embeddings = []
+            splits_ = []
+            for split in splits:
+                splits_.extend([split] * epochs * batch_size) #* len(dataset[split]))
+                data_collator = self._get_data_collator(split)
+                for epoch in range(epochs):
+                    data_loader = DataLoader(dataset=dataset[split], batch_size= batch_size, collate_fn = data_collator)
+                    #for idx, batch in enumerate(data_loader):
+                    if True:
+                        batch = next(iter(data_loader))
+                        with torch.no_grad():
+                            outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], graph_embeddings =  batch["graph_embeddings"], output_hidden_states=True, output_attentions = True)
+                            input_ids.append(batch["input_ids"])
+                            graph_embeddings.append(batch["graph_embeddings"])
+                            labels.extend(batch["labels"])
+                            hidden_states = outputs.hidden_states
+                            attentions = outputs.attentions
+                            last_hidden_states.append(hidden_states[-1])
+                            ranges_over_batch = self._get_ranges_over_batch(batch["input_ids"])
+                            all_ranges_over_batch.append(ranges_over_batch)
+                            all_attentions.append(torch.stack([torch.sum(attention, dim=1).detach() for attention in attentions]))
+            # Concatenate all hidden states across batches
+            graph_embeddings = torch.cat(graph_embeddings)
+            last_hidden_states = torch.cat(last_hidden_states)
+            all_ranges_over_batch = torch.cat(all_ranges_over_batch)
+            input_ids = torch.cat(input_ids)
+            labels = torch.stack(labels).tolist()
+            all_attentions = [layer.reshape(layer.shape[1], layer.shape[2], layer.shape[3], -1) for layer in all_attentions]
+            all_attentions = torch.cat(all_attentions)
+            averaged_hidden_states, averaged_attentions = avg_over_states(all_ranges_over_batch, last_hidden_states, all_attentions)
+            all_tokens = self.get_tokens_as_df(input_ids, all_ranges_over_batch)
+            all_tokens["labels"] = labels
+            all_tokens["split"] = splits_ 
+            
+            torch.save(averaged_attentions, self.attentions_path)
+            torch.save(averaged_hidden_states, self.hidden_states_path)
+            torch.save(graph_embeddings, self.graph_embeddings_path)
+            all_tokens.to_csv(self.tokens_path, index = False)
+            #averaged_hidden_states =averaged_hidden_states.reshape(averaged_hidden_states.shape[1], averaged_hidden_states.shape[0], -1)
+        else:
+            averaged_hidden_states = torch.load(self.hidden_states_path)
+            averaged_attentions = torch.load(self.attentions_path)
+            graph_embeddings = torch.load(self.graph_embeddings)
+            all_tokens = pd.read_csv(self.tokens_path)
+        return averaged_hidden_states, averaged_attentions, graph_embeddings, all_tokens
+    
+    def get_tokens_as_df(self, input_ids, all_ranges_over_batch) -> pd.DataFrame:
+        user_ids = []
+        titles = []
+        genres = []
+        all_semantic_tokens = [user_ids, titles, genres]
+        ends = all_ranges_over_batch[:,:,1]
+        starts = all_ranges_over_batch[:,:,0]
+        # input: # ends: torch.tensor([2, 5, 6]) starts: tensor([0, 2, 4])
+        # Compute the maximum length of the ranges
+        max_length = (ends - starts).max()
+        # Create a range tensor from 0 to max_length-1
+        range_tensor = torch.arange(max_length).unsqueeze(0)
+        for pos, semantic_tokens in enumerate(all_semantic_tokens):
+            # Compute the ranges using broadcasting and masking
+            ranges =  starts[:,pos].unsqueeze(1) + range_tensor
+            mask = ranges < ends[:,pos].unsqueeze(1)
+
+            # Apply the mask
+            result = ranges * mask  # result: tensor([[0, 1, 0], [2, 3, 4], [4, 5, 0]]) here padding index is 0
+                                    #                        -                     -    positions were padded
+            #result = result.unsqueeze(dim = 2).repeat(1,1, input_ids.shape[2])
+            gather = input_ids.gather(dim = 1, index = result)
+            decoded = self.tokenizer.batch_decode(gather, skip_special_tokens = True)
+            if pos == 0:
+                semantic_tokens.extend([decode[len("user : "):] for decode in decoded])
+            if pos == 1:
+                semantic_tokens.extend([decode[len("title : "):] for decode in decoded])
+            if pos == 2:
+                semantic_tokens.extend([decode[len("genres : "):] for decode in decoded])
+        all_semantic_tokens[0] = [int(id) for id in all_semantic_tokens[0]]
+        all_semantic_tokens[2] = [ast.literal_eval(string_list) for string_list in all_semantic_tokens[2]]
+        data = {"user_id": all_semantic_tokens[0], "title": all_semantic_tokens[1], "genres": all_semantic_tokens[2]}
+        df = pd.DataFrame(data)
+        return df
+
     
     def save_pca(self, pca, label):
         pca_path = PCA_EMBEDDING_MODEL_PATH.format(self.kge_dimension, label)
@@ -761,6 +852,10 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
         assert kge_dimension <= 16
         self.kge_dimension = kge_dimension
         self.best_model_path = LLM_PROMPT_BEST_MODEL_PATH.format(self.kge_dimension)
+        self.attentions_path = PROMPT_ATTENTIONS_PATH.format(self.kge_dimension)
+        self.hidden_states_path = PROMPT_HIDDEN_STATES_PATH.format(self.kge_dimension)
+        self.graph_embeddings_path = PROMPT_GRAPH_EMBEDDINGS_PATH.format(self.kge_dimension)
+        self.tokens_path = PROMPT_TOKENS_PATH.format(self.kge_dimension)
         super().__init__(df = movie_lens_loader.llm_df, semantic_datapoints=EMBEDDING_BASED_SEMANTIC_TOKENS, model_name=model_name, force_recompute=force_recompute, batch_size = batch_size,model_max_length = model_max_length)
         self.train_data_collator = PromptEmbeddingDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_train_data, get_embedding_cb, kge_dimension = kge_dimension)
         self.test_data_collator = PromptEmbeddingDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_test_data, get_embedding_cb, kge_dimension = kge_dimension)
@@ -825,6 +920,103 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
         model_type = "Prompt"
         self._plot_training_loss_and_accuracy(PROMPT_TRAINING_STATE_PATH.format(kge_dimension), model_type)
 
+    def forward_dataset_and_save_outputs(self, dataset, splits = ["val"], batch_size = 64, epochs = 3, force_recompute = False):
+        if force_recompute or not os.path.exists(self.attentions_path) or not os.path.exists(self.hidden_states_path) or not os.path.exists(self.tokens_path) or not os.path.exists(self.graph_embeddings_path):
+            self.model.eval()
+            last_hidden_states = []
+            all_attentions = []
+            all_ranges_over_batch = []
+            input_ids =  []
+            labels = []
+            splits_ = []
+            for split in splits:
+                splits_.extend([split] * epochs * batch_size) #* len(dataset[split]))
+                data_collator = self._get_data_collator(split)
+                for epoch in range(epochs):
+                    data_loader = DataLoader(dataset=dataset[split], batch_size= batch_size, collate_fn = data_collator)
+                    #for idx, batch in enumerate(data_loader):
+                    if True:
+                        batch = next(iter(data_loader))
+                        with torch.no_grad():
+                            outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], output_hidden_states=True, output_attentions = True)
+                            input_ids.append(batch["input_ids"])
+                            labels.extend(batch["labels"])
+                            hidden_states = outputs.hidden_states
+                            attentions = outputs.attentions
+                            last_hidden_states.append(hidden_states[-1])
+                            ranges_over_batch = self._get_ranges_over_batch(batch["input_ids"])
+                            all_ranges_over_batch.append(ranges_over_batch)
+                            all_attentions.append(torch.stack([torch.sum(attention, dim=1).detach() for attention in attentions]))
+            # Concatenate all hidden states across batches
+            last_hidden_states = torch.cat(last_hidden_states)
+            all_ranges_over_batch = torch.cat(all_ranges_over_batch)
+            input_ids = torch.cat(input_ids)
+            labels = torch.stack(labels).tolist()
+            all_attentions = [layer.reshape(layer.shape[1], layer.shape[2], layer.shape[3], -1) for layer in all_attentions]
+            all_attentions = torch.cat(all_attentions)
+            averaged_hidden_states, averaged_attentions = avg_over_states(all_ranges_over_batch, last_hidden_states, all_attentions)
+            all_tokens, graph_embeddings = self.get_tokens_as_df(input_ids, all_ranges_over_batch)
+            all_tokens["labels"] = labels
+            all_tokens["split"] = splits_ 
+            
+            torch.save(averaged_attentions, self.attentions_path)
+            torch.save(averaged_hidden_states, self.hidden_states_path)
+            torch.save(graph_embeddings, self.graph_embeddings_path)
+            all_tokens.to_csv(self.tokens_path, index = False)
+            #averaged_hidden_states =averaged_hidden_states.reshape(averaged_hidden_states.shape[1], averaged_hidden_states.shape[0], -1)
+        else:
+            averaged_hidden_states = torch.load(self.hidden_states_path)
+            averaged_attentions = torch.load(self.attentions_path)
+            graph_embeddings = torch.load(self.graph_embeddings)
+            all_tokens = pd.read_csv(self.tokens_path)
+        return averaged_hidden_states, averaged_attentions, graph_embeddings, all_tokens
+
+    def get_tokens_as_df(self, input_ids, all_ranges_over_batch) -> pd.DataFrame:
+        user_ids = []
+        titles = []
+        genres = []
+        user_embeddings = []
+        movie_embeddings = []
+        all_semantic_tokens = [user_ids, titles, genres, user_embeddings, movie_embeddings]
+        ends = all_ranges_over_batch[:,:,1]
+        starts = all_ranges_over_batch[:,:,0]
+        # input: # ends: torch.tensor([2, 5, 6]) starts: tensor([0, 2, 4])
+        # Compute the maximum length of the ranges
+        max_length = (ends - starts).max()
+        # Create a range tensor from 0 to max_length-1
+        range_tensor = torch.arange(max_length).unsqueeze(0)
+        for pos, semantic_tokens in enumerate(all_semantic_tokens):
+            # Compute the ranges using broadcasting and masking
+            ranges =  starts[:,pos].unsqueeze(1) + range_tensor
+            mask = ranges < ends[:,pos].unsqueeze(1)
+
+            # Apply the mask
+            result = ranges * mask  # result: tensor([[0, 1, 0], [2, 3, 4], [4, 5, 0]]) here padding index is 0
+                                    #                        -                     -    positions were padded
+            #result = result.unsqueeze(dim = 2).repeat(1,1, input_ids.shape[2])
+            gather = input_ids.gather(dim = 1, index = result)
+            decoded = self.tokenizer.batch_decode(gather, skip_special_tokens = True)
+            if pos == 0:
+                semantic_tokens.extend([decode[len("user : "):] for decode in decoded])
+            if pos == 1:
+                semantic_tokens.extend([decode[len("title : "):] for decode in decoded])
+            if pos == 2:
+                semantic_tokens.extend([decode[len("genres : "):] for decode in decoded])
+            if pos == 3:
+                semantic_tokens.extend([decode[len("user_embeddings :"):] for decode in decoded])
+            if pos == 4:
+                semantic_tokens.extend([decode[len("movie_embeddings :"):] for decode in decoded])
+        all_semantic_tokens[0] = [int(id) for id in all_semantic_tokens[0]]
+        all_semantic_tokens[2] = [ast.literal_eval(string_list) for string_list in all_semantic_tokens[2]]
+        all_semantic_tokens[3] = [ast.literal_eval(string_list.replace(" ", "")) for string_list in all_semantic_tokens[3]]
+        all_semantic_tokens[4] = [ast.literal_eval(string_list.replace(" ", "")) for string_list in all_semantic_tokens[4]]
+        user_embeddings = torch.tensor(all_semantic_tokens[3])
+        movie_embeddings = torch.tensor(all_semantic_tokens[4])
+        graph_embeddings = torch.stack([user_embeddings, movie_embeddings])
+        data = {"user_id": all_semantic_tokens[0], "title": all_semantic_tokens[1], "genres": all_semantic_tokens[2]}
+        df = pd.DataFrame(data)
+        return df, graph_embeddings
+
     def _get_data_collator(self, split):
         return self.test_data_collator if split == "test" else self.eval_data_collator if split == "val" else self.train_data_collator
     
@@ -851,6 +1043,9 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
 class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
     def __init__(self, df, model_name = "google/bert_uncased_L-2_H-128_A-2", batch_size = 64,model_max_length = 256, force_recompute = False) -> None:
         self.best_model_path = LLM_VANILLA_BEST_MODEL_PATH
+        self.attentions_path = VANILLA_ATTENTIONS_PATH
+        self.hidden_states_path = VANILLA_HIDDEN_STATES_PATH
+        self.tokens_path = VANILLA_TOKENS_PATH
         super().__init__(df = df, semantic_datapoints=ALL_SEMANTIC_TOKENS, model_name=model_name, batch_size = batch_size, model_max_length = model_max_length, force_recompute=force_recompute)
         self.data_collator = VanillaEmbeddingDataCollator(self.tokenizer, df)
     
@@ -926,6 +1121,90 @@ class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
             pca_path = PCA_VANILLA_MODEL_PATH.format(label)
             pcas.append(joblib.load(pca_path))
         return pcas
+    
+    def forward_dataset_and_save_outputs(self, dataset, splits = ["val"], batch_size = 64, epochs = 3, force_recompute = False):
+        if force_recompute or not os.path.exists(self.attentions_path) or not os.path.exists(self.hidden_states_path) or not os.path.exists(self.tokens_path):
+            self.model.eval()
+            last_hidden_states = []
+            all_attentions = []
+            all_ranges_over_batch = []
+            input_ids =  []
+            labels = []
+            splits_ = []
+            for split in splits:
+                splits_.extend([split] * epochs * batch_size) #* len(dataset[split]))
+                data_collator = self._get_data_collator(split)
+                for epoch in range(epochs):
+                    data_loader = DataLoader(dataset=dataset[split], batch_size= batch_size, collate_fn = data_collator)
+                    #for idx, batch in enumerate(data_loader):
+                    if True:
+                        batch = next(iter(data_loader))
+                        with torch.no_grad():
+                            outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], output_hidden_states=True, output_attentions = True)
+                            input_ids.append(batch["input_ids"])
+                            labels.extend(batch["labels"])
+                            hidden_states = outputs.hidden_states
+                            attentions = outputs.attentions
+                            last_hidden_states.append(hidden_states[-1])
+                            ranges_over_batch = self._get_ranges_over_batch(batch["input_ids"])
+                            all_ranges_over_batch.append(ranges_over_batch)
+                            all_attentions.append(torch.stack([torch.sum(attention, dim=1).detach() for attention in attentions]))
+            # Concatenate all hidden states across batches
+            last_hidden_states = torch.cat(last_hidden_states)
+            all_ranges_over_batch = torch.cat(all_ranges_over_batch)
+            input_ids = torch.cat(input_ids)
+            labels = torch.stack(labels).tolist()
+            all_attentions = [layer.reshape(layer.shape[1], layer.shape[2], layer.shape[3], -1) for layer in all_attentions]
+            all_attentions = torch.cat(all_attentions)
+            averaged_hidden_states, averaged_attentions = avg_over_states(all_ranges_over_batch, last_hidden_states, all_attentions)
+            all_tokens = self.get_tokens_as_df(input_ids, all_ranges_over_batch)
+            all_tokens["labels"] = labels
+            all_tokens["split"] = splits_ 
+            
+            torch.save(averaged_attentions, self.attentions_path)
+            torch.save(averaged_hidden_states, self.hidden_states_path)
+            all_tokens.to_csv(self.tokens_path, index = False)
+            #averaged_hidden_states =averaged_hidden_states.reshape(averaged_hidden_states.shape[1], averaged_hidden_states.shape[0], -1)
+        else:
+            averaged_hidden_states = torch.load(self.hidden_states_path)
+            averaged_attentions = torch.load(self.attentions_path)
+            all_tokens = pd.read_csv(self.tokens_path)
+        return averaged_hidden_states, averaged_attentions, all_tokens
+    
+    def get_tokens_as_df(self, input_ids, all_ranges_over_batch) -> pd.DataFrame:
+        user_ids = []
+        titles = []
+        genres = []
+        all_semantic_tokens = [user_ids, titles, genres]
+        ends = all_ranges_over_batch[:,:,1]
+        starts = all_ranges_over_batch[:,:,0]
+        # input: # ends: torch.tensor([2, 5, 6]) starts: tensor([0, 2, 4])
+        # Compute the maximum length of the ranges
+        max_length = (ends - starts).max()
+        # Create a range tensor from 0 to max_length-1
+        range_tensor = torch.arange(max_length).unsqueeze(0)
+        for pos, semantic_tokens in enumerate(all_semantic_tokens):
+            # Compute the ranges using broadcasting and masking
+            ranges =  starts[:,pos].unsqueeze(1) + range_tensor
+            mask = ranges < ends[:,pos].unsqueeze(1)
+
+            # Apply the mask
+            result = ranges * mask  # result: tensor([[0, 1, 0], [2, 3, 4], [4, 5, 0]]) here padding index is 0
+                                    #                        -                     -    positions were padded
+            #result = result.unsqueeze(dim = 2).repeat(1,1, input_ids.shape[2])
+            gather = input_ids.gather(dim = 1, index = result)
+            decoded = self.tokenizer.batch_decode(gather, skip_special_tokens = True)
+            if pos == 0:
+                semantic_tokens.extend([decode[len("user : "):] for decode in decoded])
+            if pos == 1:
+                semantic_tokens.extend([decode[len("title : "):] for decode in decoded])
+            if pos == 2:
+                semantic_tokens.extend([decode[len("genres : "):] for decode in decoded])
+        all_semantic_tokens[0] = [int(id) for id in all_semantic_tokens[0]]
+        all_semantic_tokens[2] = [ast.literal_eval(string_list) for string_list in all_semantic_tokens[2]]
+        data = {"user_id": all_semantic_tokens[0], "title": all_semantic_tokens[1], "genres": all_semantic_tokens[2]}
+        df = pd.DataFrame(data)
+        return df
 
     def _get_data_collator(self, split = None):
         return self.data_collator
