@@ -355,7 +355,7 @@ class MovieLensLoader():
     def __generate_embeddings(self, row, kge_dimension) -> torch.Tensor:
         user_embeddings = row[f"user_embedding_{kge_dimension}"]
         movie_embeddings = row[f"movie_embedding_{kge_dimension}"]
-        embeddings = torch.stack([user_embeddings, movie_embeddings])
+        embeddings = torch.tensor([user_embeddings, movie_embeddings])
         return embeddings
     
     def generate_adding_embedding_dataset(self, sep_token, pad_token, tokenize_function:Callable = None, kge_dimension:int = 4, force_recompute: bool = False) -> DatasetDict:
@@ -408,6 +408,7 @@ class MovieLensLoader():
         if existing:
             random_row = df.sample(1).iloc[0]
             random_row["graph_embeddings"] = self.__generate_embeddings(random_row, kge_dimension=embedding_classifier.kge_dimension)
+            print(random_row[f"user_embedding_{prompt_classifier.kge_dimension}"])
         else:
             dataset = self.gnn_train_data if split == "train" else self.gnn_val_data if split == "val" else self.gnn_test_data if split == "test" else self.data
             existing = True

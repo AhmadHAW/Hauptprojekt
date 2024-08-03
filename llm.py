@@ -446,6 +446,7 @@ class ClassifierBase():
         # Create an undirected graph
         G = nx.Graph()
         labels = {}
+        attentions = torch.mean(attentions, dim = 0).permute((2,0,1))
         for layer, attentions_ in enumerate(attentions):
             for from_, inner in enumerate(attentions_):
                 from_name = f"{self.semantic_datapoints[from_]}_{layer}"
@@ -491,7 +492,7 @@ class ClassifierBase():
             for idx, label in enumerate(self.semantic_datapoints):
                 pca = PCA(n_components=2)  # Adjust number of components as needed
                 pcas.append(pca)
-                position_hidden_states = hidden_states[idx]
+                position_hidden_states = hidden_states[:,idx]
                 pca.fit_transform(position_hidden_states)
                 self.save_pca(pca, label = label)
             return pcas
@@ -733,7 +734,7 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
         model_type = "Embedding"
         self._plot_training_loss_and_accuracy(ADDING_TRAINING_STATE_PATH.format(kge_dimension), model_type)
 
-    def forward_dataset_and_save_outputs(self, dataset, splits = ["val"], batch_size = 64, epochs = 3, force_recompute = False):
+    def forward_dataset_and_save_outputs(self, dataset, splits =  ["train", "test", "val"], batch_size = 64, epochs = 3, force_recompute = False):
         if force_recompute or not os.path.exists(self.attentions_path) or not os.path.exists(self.hidden_states_path) or not os.path.exists(self.tokens_path):
             self.model.eval()
             last_hidden_states = []
@@ -771,21 +772,27 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
             all_attentions = [layer.reshape(layer.shape[1], layer.shape[2], layer.shape[3], -1) for layer in all_attentions]
             all_attentions = torch.cat(all_attentions)
             averaged_hidden_states, averaged_attentions = avg_over_states(all_ranges_over_batch, last_hidden_states, all_attentions)
+            averaged_hidden_states = averaged_hidden_states.permute((1,0,2))
             all_tokens = self.get_tokens_as_df(input_ids, all_ranges_over_batch)
             all_tokens["labels"] = labels
             all_tokens["split"] = splits_ 
-            
+            all_tokens.to_csv(self.tokens_path, index = False)
+            all_tokens["hidden_states"] = torch.unbind(averaged_hidden_states.detach().to("cpu"))
+            all_tokens["attentions"] = torch.unbind(averaged_attentions.detach().to("cpu"))
+            all_tokens["graph_embeddings"] = torch.unbind(graph_embeddings.detach().to("cpu"))
             torch.save(averaged_attentions, self.attentions_path)
             torch.save(averaged_hidden_states, self.hidden_states_path)
             torch.save(graph_embeddings, self.graph_embeddings_path)
-            all_tokens.to_csv(self.tokens_path, index = False)
             #averaged_hidden_states =averaged_hidden_states.reshape(averaged_hidden_states.shape[1], averaged_hidden_states.shape[0], -1)
         else:
             averaged_hidden_states = torch.load(self.hidden_states_path)
             averaged_attentions = torch.load(self.attentions_path)
-            graph_embeddings = torch.load(self.graph_embeddings)
+            graph_embeddings = torch.load(self.graph_embeddings_path)
             all_tokens = pd.read_csv(self.tokens_path)
-        return averaged_hidden_states, averaged_attentions, graph_embeddings, all_tokens
+            all_tokens["hidden_states"] = torch.unbind(averaged_hidden_states)
+            all_tokens["attentions"] = torch.unbind(averaged_attentions)
+            all_tokens["graph_embeddings"] = torch.unbind(graph_embeddings.detach().to("cpu"))
+        return all_tokens
     
     def get_tokens_as_df(self, input_ids, all_ranges_over_batch) -> pd.DataFrame:
         user_ids = []
@@ -920,7 +927,7 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
         model_type = "Prompt"
         self._plot_training_loss_and_accuracy(PROMPT_TRAINING_STATE_PATH.format(kge_dimension), model_type)
 
-    def forward_dataset_and_save_outputs(self, dataset, splits = ["val"], batch_size = 64, epochs = 3, force_recompute = False):
+    def forward_dataset_and_save_outputs(self, dataset, splits = ["train", "test","val"], batch_size = 64, epochs = 3, force_recompute = False):
         if force_recompute or not os.path.exists(self.attentions_path) or not os.path.exists(self.hidden_states_path) or not os.path.exists(self.tokens_path) or not os.path.exists(self.graph_embeddings_path):
             self.model.eval()
             last_hidden_states = []
@@ -955,6 +962,7 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
             all_attentions = [layer.reshape(layer.shape[1], layer.shape[2], layer.shape[3], -1) for layer in all_attentions]
             all_attentions = torch.cat(all_attentions)
             averaged_hidden_states, averaged_attentions = avg_over_states(all_ranges_over_batch, last_hidden_states, all_attentions)
+            averaged_hidden_states = averaged_hidden_states.permute((1,0,2))
             all_tokens, graph_embeddings = self.get_tokens_as_df(input_ids, all_ranges_over_batch)
             all_tokens["labels"] = labels
             all_tokens["split"] = splits_ 
@@ -962,14 +970,21 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
             torch.save(averaged_attentions, self.attentions_path)
             torch.save(averaged_hidden_states, self.hidden_states_path)
             torch.save(graph_embeddings, self.graph_embeddings_path)
-            all_tokens.to_csv(self.tokens_path, index = False)
+            all_tokens.to_csv(self.tokens_path, index = False)            
+            all_tokens["hidden_states"] = torch.unbind(averaged_hidden_states.detach().to("cpu"))
+            all_tokens["attentions"] = torch.unbind(averaged_attentions.detach().to("cpu"))
+            all_tokens["graph_embeddings"] = torch.unbind(graph_embeddings.detach().to("cpu"))
             #averaged_hidden_states =averaged_hidden_states.reshape(averaged_hidden_states.shape[1], averaged_hidden_states.shape[0], -1)
         else:
             averaged_hidden_states = torch.load(self.hidden_states_path)
             averaged_attentions = torch.load(self.attentions_path)
-            graph_embeddings = torch.load(self.graph_embeddings)
+            graph_embeddings = torch.load(self.graph_embeddings_path)
+
             all_tokens = pd.read_csv(self.tokens_path)
-        return averaged_hidden_states, averaged_attentions, graph_embeddings, all_tokens
+            all_tokens["hidden_states"] = torch.unbind(averaged_hidden_states)
+            all_tokens["attentions"] = torch.unbind(averaged_attentions)
+            all_tokens["graph_embeddings"] = torch.unbind(graph_embeddings.detach().to("cpu"))
+        return all_tokens
 
     def get_tokens_as_df(self, input_ids, all_ranges_over_batch) -> pd.DataFrame:
         user_ids = []
@@ -1008,11 +1023,12 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
                 semantic_tokens.extend([decode[len("movie_embeddings :"):] for decode in decoded])
         all_semantic_tokens[0] = [int(id) for id in all_semantic_tokens[0]]
         all_semantic_tokens[2] = [ast.literal_eval(string_list) for string_list in all_semantic_tokens[2]]
-        all_semantic_tokens[3] = [ast.literal_eval(string_list.replace(" ", "")) for string_list in all_semantic_tokens[3]]
-        all_semantic_tokens[4] = [ast.literal_eval(string_list.replace(" ", "")) for string_list in all_semantic_tokens[4]]
+
+        all_semantic_tokens[3] = [[float(str_float) for str_float in ast.literal_eval(string_list.replace(" ", ""))] for string_list in all_semantic_tokens[3]]
+        all_semantic_tokens[4] = [[float(str_float) for str_float in ast.literal_eval(string_list.replace(" ", ""))] for string_list in all_semantic_tokens[4]]
         user_embeddings = torch.tensor(all_semantic_tokens[3])
         movie_embeddings = torch.tensor(all_semantic_tokens[4])
-        graph_embeddings = torch.stack([user_embeddings, movie_embeddings])
+        graph_embeddings = torch.stack([user_embeddings, movie_embeddings]).permute((1,0,2))
         data = {"user_id": all_semantic_tokens[0], "title": all_semantic_tokens[1], "genres": all_semantic_tokens[2]}
         df = pd.DataFrame(data)
         return df, graph_embeddings
@@ -1122,7 +1138,7 @@ class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
             pcas.append(joblib.load(pca_path))
         return pcas
     
-    def forward_dataset_and_save_outputs(self, dataset, splits = ["val"], batch_size = 64, epochs = 3, force_recompute = False):
+    def forward_dataset_and_save_outputs(self, dataset, splits = ["train", "test", "val"], batch_size = 64, epochs = 3, force_recompute = False) -> pd.DataFrame:
         if force_recompute or not os.path.exists(self.attentions_path) or not os.path.exists(self.hidden_states_path) or not os.path.exists(self.tokens_path):
             self.model.eval()
             last_hidden_states = []
@@ -1157,19 +1173,23 @@ class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
             all_attentions = [layer.reshape(layer.shape[1], layer.shape[2], layer.shape[3], -1) for layer in all_attentions]
             all_attentions = torch.cat(all_attentions)
             averaged_hidden_states, averaged_attentions = avg_over_states(all_ranges_over_batch, last_hidden_states, all_attentions)
+            averaged_hidden_states = averaged_hidden_states.permute((1,0,2))
             all_tokens = self.get_tokens_as_df(input_ids, all_ranges_over_batch)
             all_tokens["labels"] = labels
             all_tokens["split"] = splits_ 
-            
+            all_tokens.to_csv(self.tokens_path, index = False)
+            all_tokens["hidden_states"] = torch.unbind(averaged_hidden_states)
+            all_tokens["attentions"] = torch.unbind(averaged_attentions)
             torch.save(averaged_attentions, self.attentions_path)
             torch.save(averaged_hidden_states, self.hidden_states_path)
-            all_tokens.to_csv(self.tokens_path, index = False)
             #averaged_hidden_states =averaged_hidden_states.reshape(averaged_hidden_states.shape[1], averaged_hidden_states.shape[0], -1)
         else:
             averaged_hidden_states = torch.load(self.hidden_states_path)
             averaged_attentions = torch.load(self.attentions_path)
             all_tokens = pd.read_csv(self.tokens_path)
-        return averaged_hidden_states, averaged_attentions, all_tokens
+            all_tokens["hidden_states"] = torch.unbind(averaged_hidden_states)
+            all_tokens["attentions"] = torch.unbind(averaged_attentions)
+        return all_tokens
     
     def get_tokens_as_df(self, input_ids, all_ranges_over_batch) -> pd.DataFrame:
         user_ids = []
