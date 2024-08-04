@@ -161,8 +161,9 @@ class TextBasedDataCollator(DataCollatorBase, ABC):
 
 
 class EmbeddingBasedDataCollator(DataCollatorBase):
-    def __init__(self, tokenizer, df, data, get_embedding_cb, kge_dimension = 128, false_ratio = 2.0):
+    def __init__(self, tokenizer, device, df, data, get_embedding_cb, kge_dimension = 128, false_ratio = 2.0):
         super().__init__(tokenizer=tokenizer,false_ratio = false_ratio, df = df)
+        self.device = device
         self.data = data
         self.get_embedding_cb = get_embedding_cb
         self.kge_dimension = kge_dimension
@@ -175,8 +176,8 @@ class EmbeddingBasedDataCollator(DataCollatorBase):
             if isinstance(f["graph_embeddings"], list):
                 f["graph_embeddings"] = torch.stack([torch.tensor(f["graph_embeddings"][0]), torch.tensor(f["graph_embeddings"][1])])
             else:
-                f["graph_embeddings"] = f["graph_embeddings"].to(torch.device('cpu'))
-        graph_embeddings = torch.stack([f["graph_embeddings"] for f in features])
+                f["graph_embeddings"] = f["graph_embeddings"]
+        graph_embeddings = torch.stack([f["graph_embeddings"].to(self.device) for f in features])
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
@@ -351,7 +352,7 @@ class InsertEmbeddingBertForSequenceClassification(BertForSequenceClassification
             
             if attention_mask is not None:
                 mask = ((attention_mask.sum(dim = 1) -1).unsqueeze(1).repeat((1,2))-torch.tensor([3,1]).to(self.device)).unsqueeze(2).repeat((1,1,self.config.hidden_size))        
-                inputs_embeds = inputs_embeds.scatter(1, mask, graph_embeddings)
+                inputs_embeds = inputs_embeds.to(self.device).scatter(1, mask.to(self.device), graph_embeddings.to(self.device))
         outputs = self.bert(
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
@@ -659,9 +660,9 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
             self.model = InsertEmbeddingBertForSequenceClassification.from_pretrained(self.model_name, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID)
 
         self.tokenizer = BertTokenizer.from_pretrained(self.model_name, model_max_length=model_max_length)
-        self.train_data_collator = EmbeddingBasedDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_train_data, get_embedding_cb, kge_dimension=self.kge_dimension)
-        self.test_data_collator = EmbeddingBasedDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_test_data, get_embedding_cb, kge_dimension=self.kge_dimension)
-        self.eval_data_collator = EmbeddingBasedDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_val_data, get_embedding_cb, kge_dimension=self.kge_dimension)
+        self.train_data_collator = EmbeddingBasedDataCollator(self.tokenizer, self.device, movie_lens_loader.llm_df, movie_lens_loader.gnn_train_data, get_embedding_cb, kge_dimension=self.kge_dimension)
+        self.test_data_collator = EmbeddingBasedDataCollator(self.tokenizer, self.device, movie_lens_loader.llm_df, movie_lens_loader.gnn_test_data, get_embedding_cb, kge_dimension=self.kge_dimension)
+        self.eval_data_collator = EmbeddingBasedDataCollator(self.tokenizer, self.device, movie_lens_loader.llm_df, movie_lens_loader.gnn_val_data, get_embedding_cb, kge_dimension=self.kge_dimension)
 
     def _set_up_trainer(self, dataset, tokenize = False, eval_data_collator = None, epochs = 3):
         if tokenize:
@@ -748,10 +749,11 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
                 splits_.extend([split] * epochs * batch_size) #* len(dataset[split]))
                 data_collator = self._get_data_collator(split)
                 for epoch in range(epochs):
+                    print(f"Embedding Forward Epoch {epoch} from {epochs}")
                     data_loader = DataLoader(dataset=dataset[split], batch_size= batch_size, collate_fn = data_collator)
-                    #for idx, batch in enumerate(data_loader):
-                    if True:
-                        batch = next(iter(data_loader))
+                    for idx, batch in enumerate(data_loader):
+                    #if True:
+                    #    batch = next(iter(data_loader))
                         with torch.no_grad():
                             outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], graph_embeddings =  batch["graph_embeddings"], output_hidden_states=True, output_attentions = True)
                             input_ids.append(batch["input_ids"])
@@ -940,10 +942,11 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
                 splits_.extend([split] * epochs * batch_size) #* len(dataset[split]))
                 data_collator = self._get_data_collator(split)
                 for epoch in range(epochs):
+                    print(f"Prompt Forward Epoch {epoch} from {epochs}")
                     data_loader = DataLoader(dataset=dataset[split], batch_size= batch_size, collate_fn = data_collator)
-                    #for idx, batch in enumerate(data_loader):
-                    if True:
-                        batch = next(iter(data_loader))
+                    for idx, batch in enumerate(data_loader):
+                    #if True:
+                    #    batch = next(iter(data_loader))
                         with torch.no_grad():
                             outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], output_hidden_states=True, output_attentions = True)
                             input_ids.append(batch["input_ids"])
@@ -1151,20 +1154,21 @@ class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
                 splits_.extend([split] * epochs * batch_size) #* len(dataset[split]))
                 data_collator = self._get_data_collator(split)
                 for epoch in range(epochs):
+                    print(f"Vanilla Forward Epoch {epoch} from {epochs}")
                     data_loader = DataLoader(dataset=dataset[split], batch_size= batch_size, collate_fn = data_collator)
-                    #for idx, batch in enumerate(data_loader):
-                    if True:
-                        batch = next(iter(data_loader))
+                    for idx, batch in enumerate(data_loader):
+                    #if True:
+                    #    batch = next(iter(data_loader))
                         with torch.no_grad():
                             outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], output_hidden_states=True, output_attentions = True)
                             input_ids.append(batch["input_ids"])
                             labels.extend(batch["labels"])
                             hidden_states = outputs.hidden_states
                             attentions = outputs.attentions
-                            last_hidden_states.append(hidden_states[-1])
+                            last_hidden_states.append(hidden_states[-1].to("cpu"))
                             ranges_over_batch = self._get_ranges_over_batch(batch["input_ids"])
-                            all_ranges_over_batch.append(ranges_over_batch)
-                            all_attentions.append(torch.stack([torch.sum(attention, dim=1).detach() for attention in attentions]))
+                            all_ranges_over_batch.append(ranges_over_batch.to("cpu"))
+                            all_attentions.append(torch.stack([torch.sum(attention, dim=1).detach().to("cpu") for attention in attentions]))
             # Concatenate all hidden states across batches
             last_hidden_states = torch.cat(last_hidden_states)
             all_ranges_over_batch = torch.cat(all_ranges_over_batch)

@@ -376,6 +376,7 @@ class MovieLensLoader():
             llm_df["labels"] = 1
             llm_df["prompt"] = llm_df.apply(lambda row: row_to_adding_embedding_datapoint(row, sep_token, pad_token), axis=1)
             llm_df["graph_embeddings"] = llm_df.apply(lambda row: self.__generate_embeddings(row, kge_dimension), axis = 1)
+            llm_df["graph_embeddings"] = llm_df["graph_embeddings"].apply(lambda embeddings: embeddings.detach().to("cpu").tolist())
             dataset = self.__dataset_from_df(llm_df)
             if tokenize_function:
                 dataset = dataset.map(tokenize_function, batched = True)
