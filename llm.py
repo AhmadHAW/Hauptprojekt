@@ -766,7 +766,7 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
                             all_ranges_over_batch.append(ranges_over_batch)
                             all_attentions.append(torch.stack([torch.sum(attention, dim=1).detach() for attention in attentions]))
             # Concatenate all hidden states across batches
-            graph_embeddings = torch.cat(graph_embeddings)
+            graph_embeddings = torch.cat(graph_embeddings).detach().to("cpu")
             last_hidden_states = torch.cat(last_hidden_states)
             all_ranges_over_batch = torch.cat(all_ranges_over_batch)
             input_ids = torch.cat(input_ids)
@@ -774,14 +774,15 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
             all_attentions = [layer.reshape(layer.shape[1], layer.shape[2], layer.shape[3], -1) for layer in all_attentions]
             all_attentions = torch.cat(all_attentions)
             averaged_hidden_states, averaged_attentions = avg_over_states(all_ranges_over_batch, last_hidden_states, all_attentions)
-            averaged_hidden_states = averaged_hidden_states.permute((1,0,2))
+            averaged_attentions = averaged_attentions.detach().to("cpu")
+            averaged_hidden_states = averaged_hidden_states.permute((1,0,2)).detach().to("cpu")
             all_tokens = self.get_tokens_as_df(input_ids, all_ranges_over_batch)
             all_tokens["labels"] = labels
             all_tokens["split"] = splits_ 
             all_tokens.to_csv(self.tokens_path, index = False)
-            all_tokens["hidden_states"] = torch.unbind(averaged_hidden_states.detach().to("cpu"))
-            all_tokens["attentions"] = torch.unbind(averaged_attentions.detach().to("cpu"))
-            all_tokens["graph_embeddings"] = torch.unbind(graph_embeddings.detach().to("cpu"))
+            all_tokens["hidden_states"] = torch.unbind(averaged_hidden_states)
+            all_tokens["attentions"] = torch.unbind(averaged_attentions)
+            all_tokens["graph_embeddings"] = torch.unbind(graph_embeddings)
             torch.save(averaged_attentions, self.attentions_path)
             torch.save(averaged_hidden_states, self.hidden_states_path)
             torch.save(graph_embeddings, self.graph_embeddings_path)
@@ -965,8 +966,10 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
             all_attentions = [layer.reshape(layer.shape[1], layer.shape[2], layer.shape[3], -1) for layer in all_attentions]
             all_attentions = torch.cat(all_attentions)
             averaged_hidden_states, averaged_attentions = avg_over_states(all_ranges_over_batch, last_hidden_states, all_attentions)
-            averaged_hidden_states = averaged_hidden_states.permute((1,0,2))
+            averaged_attentions = averaged_attentions.detach().to("cpu")
+            averaged_hidden_states = averaged_hidden_states.permute((1,0,2)).detach().to("cpu")
             all_tokens, graph_embeddings = self.get_tokens_as_df(input_ids, all_ranges_over_batch)
+            graph_embeddings = graph_embeddings.detach().to("cpu")
             all_tokens["labels"] = labels
             all_tokens["split"] = splits_ 
             
@@ -974,9 +977,9 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
             torch.save(averaged_hidden_states, self.hidden_states_path)
             torch.save(graph_embeddings, self.graph_embeddings_path)
             all_tokens.to_csv(self.tokens_path, index = False)            
-            all_tokens["hidden_states"] = torch.unbind(averaged_hidden_states.detach().to("cpu"))
-            all_tokens["attentions"] = torch.unbind(averaged_attentions.detach().to("cpu"))
-            all_tokens["graph_embeddings"] = torch.unbind(graph_embeddings.detach().to("cpu"))
+            all_tokens["hidden_states"] = torch.unbind(averaged_hidden_states)
+            all_tokens["attentions"] = torch.unbind(averaged_attentions)
+            all_tokens["graph_embeddings"] = torch.unbind(graph_embeddings)
             #averaged_hidden_states =averaged_hidden_states.reshape(averaged_hidden_states.shape[1], averaged_hidden_states.shape[0], -1)
         else:
             averaged_hidden_states = torch.load(self.hidden_states_path)
@@ -986,7 +989,7 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
             all_tokens = pd.read_csv(self.tokens_path)
             all_tokens["hidden_states"] = torch.unbind(averaged_hidden_states)
             all_tokens["attentions"] = torch.unbind(averaged_attentions)
-            all_tokens["graph_embeddings"] = torch.unbind(graph_embeddings.detach().to("cpu"))
+            all_tokens["graph_embeddings"] = torch.unbind(graph_embeddings)
         return all_tokens
 
     def get_tokens_as_df(self, input_ids, all_ranges_over_batch) -> pd.DataFrame:
@@ -1177,7 +1180,8 @@ class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
             all_attentions = [layer.reshape(layer.shape[1], layer.shape[2], layer.shape[3], -1) for layer in all_attentions]
             all_attentions = torch.cat(all_attentions)
             averaged_hidden_states, averaged_attentions = avg_over_states(all_ranges_over_batch, last_hidden_states, all_attentions)
-            averaged_hidden_states = averaged_hidden_states.permute((1,0,2))
+            averaged_hidden_states = averaged_hidden_states.permute((1,0,2)).detach().to("cpu")
+            averaged_attentions = averaged_attentions.detach().to("cpu")
             all_tokens = self.get_tokens_as_df(input_ids, all_ranges_over_batch)
             all_tokens["labels"] = labels
             all_tokens["split"] = splits_ 
