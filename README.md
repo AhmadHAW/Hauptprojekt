@@ -98,6 +98,14 @@ In the view of the embeddings in the output layer, we can reduce the dimensions 
 ## Setup
 A large part of the dependencies can be installed with ```pip install -r requirements.txt```. The other libraries torch-scatter and torch-sparse can then be installed with the commands:
 ```torch-scatter -f https://data.pyg.org/whl/torch-${TORCH}.html``` and ```torch-sparse -f https://data.pyg.org/whl/torch-${TORCH}.html```, whereby ```${TORCH}``` must be replaced with the current Torch version. It is important that the correct Torch version is installed and specified. For example, problems can occur when installing *Torch-Scatter* and *Torch-Sparse* if the installed Torch version supports Cuda without the host system doing so.
+## Training Progression
+Here the loss and Accuracy Progression and confusion matrix.
+Vanilla Model             |  Prompt Model             |  Embedding Model
+:-------------------------:|:-------------------------:|:-------------------------:
+![Vanilla Loss Training](/images/Vanilla_Loss_Training.png)  |  ![Prompt Loss Training](/images/Prompt_Loss_Training.png)|![Embedding Loss Training](/images/Embedding_Loss_Training.png)
+![Vanilla Accuracy Training](/images/Vanilla_Accuracy_Training.png)  |  ![Prompt Accuracy Training](/images/Prompt_Accuracy_Training.png)|![Embedding Accuracy Training](/images/Embedding_Accuracy_Training.png)
+![Vanilla Confusion Matrix](/images/Vanilla_Confusion_Matrix.png)  |  ![Prompt Confusion Matrix](/images/Prompt_Confusion_Matrix.png)|![Embedding Confusion Matrix](/images/Embedding_Confusion_Matrix.png)
+
 ## Experiments
 Here we are plotting some of the experiment results, but we will not interpret them at this time. First We can see the Attentions over the two Layers. Then we can see the PCA reduced Embeddings of all models over the features: User, Title and Genre. Last we can see the PCA reduced Embeddings of the Prompt and Embedding Model of all features.
 Vanilla Model             |  Prompt Model             |  Embedding Model
