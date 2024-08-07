@@ -4,6 +4,7 @@ from abc import ABC
 import os
 import json
 import ast
+from pathlib import Path
 
 from movie_lens_loader import row_to_prompt_datapoint, row_to_adding_embedding_datapoint, row_to_vanilla_datapoint, LLM_PROMPT_TRAINING_PATH, LLM_ADDING_TRAINING_PATH, LLM_VANILLA_TRAINING_PATH, LLM_PROMPT_BEST_MODEL_PATH, LLM_ADDING_BEST_MODEL_PATH, LLM_VANILLA_BEST_MODEL_PATH, PCA_PATH, LLM_VANILLA_PATH, LLM_PROMPT_PATH, LLM_ADDING_PATH
 
@@ -50,6 +51,62 @@ ADDING_GRAPH_EMBEDDINGS_PATH = f"{LLM_ADDING_PATH}/graph_embeddings.pt"
 VANILLA_TOKENS_PATH = f"{LLM_VANILLA_PATH}/tokens.csv"
 PROMPT_TOKENS_PATH = f"{LLM_PROMPT_PATH}/tokens.csv"
 ADDING_TOKENS_PATH = f"{LLM_ADDING_PATH}/tokens.csv"
+
+SPLIT_EPOCH_ENDING = f"/split_{{}}_epoch_{{}}.npy"
+TOKENS_ENDING = f"/tokens_{{}}_{{}}.csv"
+
+VANILLA_HIDDEN_STATES_DIR_PATH = f"{LLM_VANILLA_PATH}/hidden_states"
+LAST_HIDDEN_STATES_VANILLA_PATH = f"{VANILLA_HIDDEN_STATES_DIR_PATH}{SPLIT_EPOCH_ENDING}"
+
+VANILLA_RANGES_DIR_PATH = f"{LLM_VANILLA_PATH}/ranges"
+RANGES_VANILLA_PATH = f"{VANILLA_RANGES_DIR_PATH}{SPLIT_EPOCH_ENDING}"
+
+VANILLA_ATTENTIONS_DIR_PATH = f"{LLM_VANILLA_PATH}/attentions"
+ATTENTIONS_VANILLA_PATH = f"{VANILLA_ATTENTIONS_DIR_PATH}{SPLIT_EPOCH_ENDING}"
+
+VANILLA_INPUT_IDS_DIR_PATH = f"{LLM_VANILLA_PATH}/input_ids"
+INPUT_IDS_VANILLA_PATH = f"{VANILLA_INPUT_IDS_DIR_PATH}{SPLIT_EPOCH_ENDING}"
+
+VANILLA_SUB_TOKENS_DIR_PATH = f"{LLM_VANILLA_PATH}/tokens"
+VANILLA_SUB_TOKENS_PATH = f"{VANILLA_SUB_TOKENS_DIR_PATH}{TOKENS_ENDING}"
+
+PROMPT_HIDDEN_STATES_DIR_PATH = f"{LLM_PROMPT_PATH}/hidden_states"
+LAST_HIDDEN_STATES_PROMPT_PATH = f"{PROMPT_HIDDEN_STATES_DIR_PATH}{SPLIT_EPOCH_ENDING}"
+
+PROMPT_RANGES_DIR_PATH = f"{LLM_PROMPT_PATH}/ranges"
+RANGES_PROMPT_PATH = f"{PROMPT_RANGES_DIR_PATH}{SPLIT_EPOCH_ENDING}"
+
+PROMPT_ATTENTIONS_DIR_PATH = f"{LLM_PROMPT_PATH}/attentions"
+ATTENTIONS_PROMPT_PATH = f"{PROMPT_ATTENTIONS_DIR_PATH}{SPLIT_EPOCH_ENDING}"
+
+PROMPT_INPUT_IDS_DIR_PATH = f"{LLM_PROMPT_PATH}/input_ids"
+INPUT_IDS_PROMPT_PATH = f"{PROMPT_INPUT_IDS_DIR_PATH}{SPLIT_EPOCH_ENDING}"
+
+PROMPT_GRAPH_EMBEDDINGS_DIR_PATH = f"{LLM_PROMPT_PATH}/graph_embeddings"
+GRAPH_EMBEDDINGS_PROMPT_PATH = f"{PROMPT_GRAPH_EMBEDDINGS_DIR_PATH}{SPLIT_EPOCH_ENDING}"
+
+PROMPT_SUB_TOKENS_DIR_PATH = f"{LLM_PROMPT_PATH}/tokens"
+PROMPT_SUB_TOKENS_PATH = f"{PROMPT_SUB_TOKENS_DIR_PATH}{TOKENS_ENDING}"
+
+ADDING_HIDDEN_STATES_DIR_PATH = f"{LLM_ADDING_PATH}/hidden_states"
+LAST_HIDDEN_STATES_ADDING_PATH = f"{ADDING_HIDDEN_STATES_DIR_PATH}{SPLIT_EPOCH_ENDING}"
+
+ADDING_RANGES_DIR_PATH = f"{LLM_ADDING_PATH}/ranges"
+RANGES_ADDING_PATH = f"{ADDING_RANGES_DIR_PATH}{SPLIT_EPOCH_ENDING}"
+
+ADDING_ATTENTIONS_DIR_PATH = f"{LLM_ADDING_PATH}/attentions"
+ATTENTIONS_ADDING_PATH = f"{ADDING_ATTENTIONS_DIR_PATH}{SPLIT_EPOCH_ENDING}"
+
+ADDING_INPUT_IDS_DIR_PATH = f"{LLM_ADDING_PATH}/input_ids"
+INPUT_IDS_ADDING_PATH = f"{ADDING_INPUT_IDS_DIR_PATH}{SPLIT_EPOCH_ENDING}"
+
+ADDING_GRAPH_EMBEDDINGS_DIR_PATH = f"{LLM_ADDING_PATH}/graph_embeddings"
+GRAPH_EMBEDDINGS_ADDING_PATH = f"{ADDING_GRAPH_EMBEDDINGS_DIR_PATH}{SPLIT_EPOCH_ENDING}"
+
+ADDING_SUB_TOKENS_DIR_PATH = f"{LLM_ADDING_PATH}/tokens"
+ADDING_SUB_TOKENS_PATH = f"{ADDING_SUB_TOKENS_DIR_PATH}{TOKENS_ENDING}"
+
+
 
 
 ALL_SEMANTIC_TOKENS = ["user_id", "title", "genres"]
@@ -99,18 +156,16 @@ def means_over_ranges_cross(all_ranges_over_batch: torch.Tensor, all_attentions:
                 all_attentios_avgs[batch, from_, to_] = attention_avg
     return all_attentios_avgs
 
-def avg_over_states(all_ranges_over_batch, last_hidden_states, all_attentions):
-        averaged_hidden_states = []
-        for position in range(all_ranges_over_batch.shape[1]):
-            ranges_over_batch = all_ranges_over_batch[:,position]
-            starts = ranges_over_batch[:,0]
-            ends = ranges_over_batch[:,1]
-            averaged_hidden_state = mean_over_ranges(last_hidden_states, starts, ends)
-            #print(starts.shape, averaged_hidden_state.shape)
-            averaged_hidden_states.append(averaged_hidden_state)
-        averaged_hidden_states = torch.stack(averaged_hidden_states)
-        averaged_attentions = means_over_ranges_cross(all_ranges_over_batch, all_attentions)
-        return averaged_hidden_states, averaged_attentions
+def avg_over_last_hidden_states(all_ranges_over_batch, last_hidden_states):
+    averaged_hidden_states = []
+    for position in range(all_ranges_over_batch.shape[1]):
+        ranges_over_batch = all_ranges_over_batch[:,position]
+        starts = ranges_over_batch[:,0]
+        ends = ranges_over_batch[:,1]
+        averaged_hidden_state = mean_over_ranges(last_hidden_states, starts, ends)
+        #print(starts.shape, averaged_hidden_state.shape)
+        averaged_hidden_states.append(averaged_hidden_state)
+    return torch.stack(averaged_hidden_states)
 
 class DataCollatorBase(DataCollatorForLanguageModeling, ABC):
     '''
@@ -735,66 +790,124 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
         model_type = "Embedding"
         self._plot_training_loss_and_accuracy(ADDING_TRAINING_STATE_PATH.format(kge_dimension), model_type)
 
-    def forward_dataset_and_save_outputs(self, dataset, splits =  ["train", "test", "val"], batch_size = 64, epochs = 3, force_recompute = False):
-        if force_recompute or not os.path.exists(self.attentions_path) or not os.path.exists(self.hidden_states_path) or not os.path.exists(self.tokens_path):
+    def forward_dataset_and_save_outputs(self, dataset, splits = ["train", "test","val"], batch_size = 64, epochs = 3, load_fields = ["attentions", "hidden_states", "graph_embeddings"], force_recompute = False):
+        if force_recompute or not os.path.exists(self.attentions_path) or not os.path.exists(self.hidden_states_path) or not os.path.exists(self.tokens_path) or not os.path.exists(self.graph_embeddings_path):
             self.model.eval()
-            last_hidden_states = []
-            all_attentions = []
-            all_ranges_over_batch = []
-            input_ids =  []
-            labels = []
-            graph_embeddings = []
-            splits_ = []
-            for split in splits:
-                splits_.extend([split] * epochs * batch_size) #* len(dataset[split]))
-                data_collator = self._get_data_collator(split)
-                for epoch in range(epochs):
-                    print(f"Embedding Forward Epoch {epoch} from {epochs}")
-                    data_loader = DataLoader(dataset=dataset[split], batch_size= batch_size, collate_fn = data_collator)
-                    for idx, batch in enumerate(data_loader):
-                    #if True:
-                    #    batch = next(iter(data_loader))
-                        with torch.no_grad():
-                            outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], graph_embeddings =  batch["graph_embeddings"], output_hidden_states=True, output_attentions = True)
-                            input_ids.append(batch["input_ids"])
-                            graph_embeddings.append(batch["graph_embeddings"])
-                            labels.extend(batch["labels"])
-                            hidden_states = outputs.hidden_states
-                            attentions = outputs.attentions
-                            last_hidden_states.append(hidden_states[-1])
+            Path(ADDING_ATTENTIONS_DIR_PATH.format(self.kge_dimension)).mkdir(parents=True, exist_ok=True)
+            Path(ADDING_HIDDEN_STATES_DIR_PATH.format(self.kge_dimension)).mkdir(parents=True, exist_ok=True)
+            Path(ADDING_INPUT_IDS_DIR_PATH.format(self.kge_dimension)).mkdir(parents=True, exist_ok=True)
+            Path(ADDING_RANGES_DIR_PATH.format(self.kge_dimension)).mkdir(parents=True, exist_ok=True)
+            Path(ADDING_SUB_TOKENS_DIR_PATH.format(self.kge_dimension)).mkdir(parents=True, exist_ok=True)
+            Path(ADDING_GRAPH_EMBEDDINGS_DIR_PATH.format(self.kge_dimension)).mkdir(parents=True, exist_ok=True)
+            with torch.no_grad():
+                for split in splits:
+                    data_collator = self._get_data_collator(split)
+                    for epoch in range(epochs):
+                        last_hidden_states = []
+                        all_attentions = []
+                        all_graph_embeddings = []
+                        all_tokens = []
+                        print(f"Adding {split} Forward Epoch {epoch + 1} from {epochs}")
+                        data_loader = DataLoader(dataset=dataset[split], batch_size= batch_size, collate_fn = data_collator)
+                        for idx, batch in enumerate(data_loader):
+                        #if True:
+                        #    batch = next(iter(data_loader))
+                            splits_ = [split] *  len(batch["input_ids"])
+                            outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], graph_embeddings = batch["graph_embeddings"], output_hidden_states=True, output_attentions = True)
                             ranges_over_batch = self._get_ranges_over_batch(batch["input_ids"])
-                            all_ranges_over_batch.append(ranges_over_batch)
-                            all_attentions.append(torch.stack([torch.sum(attention, dim=1).detach() for attention in attentions]))
-            # Concatenate all hidden states across batches
-            graph_embeddings = torch.cat(graph_embeddings).detach().to("cpu")
-            last_hidden_states = torch.cat(last_hidden_states)
-            all_ranges_over_batch = torch.cat(all_ranges_over_batch)
-            input_ids = torch.cat(input_ids)
-            labels = torch.stack(labels).tolist()
-            all_attentions = [layer.reshape(layer.shape[1], layer.shape[2], layer.shape[3], -1) for layer in all_attentions]
-            all_attentions = torch.cat(all_attentions)
-            averaged_hidden_states, averaged_attentions = avg_over_states(all_ranges_over_batch, last_hidden_states, all_attentions)
-            averaged_attentions = averaged_attentions.detach().to("cpu")
-            averaged_hidden_states = averaged_hidden_states.permute((1,0,2)).detach().to("cpu")
-            all_tokens = self.get_tokens_as_df(input_ids, all_ranges_over_batch)
-            all_tokens["labels"] = labels
-            all_tokens["split"] = splits_ 
-            all_tokens.to_csv(self.tokens_path, index = False)
-            all_tokens["hidden_states"] = torch.unbind(averaged_hidden_states)
-            all_tokens["attentions"] = torch.unbind(averaged_attentions)
-            all_tokens["graph_embeddings"] = torch.unbind(graph_embeddings)
-            torch.save(averaged_attentions, self.attentions_path)
-            torch.save(averaged_hidden_states, self.hidden_states_path)
-            torch.save(graph_embeddings, self.graph_embeddings_path)
-            #averaged_hidden_states =averaged_hidden_states.reshape(averaged_hidden_states.shape[1], averaged_hidden_states.shape[0], -1)
+                            if "attentions" in load_fields:
+                                attentions = outputs.attentions
+                                attentions = [torch.sum(layer, dim=1) for layer in attentions]
+                                attentions = torch.stack(attentions).permute(1,2,3,0)
+                                attentions = means_over_ranges_cross(ranges_over_batch, attentions)
+                                all_attentions.append(attentions.numpy())
+                                del attentions
+                            if "hidden_states" in load_fields:
+                                hidden_states = outputs.hidden_states[-1]
+                                hidden_states = avg_over_last_hidden_states(ranges_over_batch, hidden_states).permute((1,0,2))
+                                last_hidden_states.append(hidden_states.numpy())
+                                del hidden_states
+                            tokens = self.get_tokens_as_df(batch["input_ids"], ranges_over_batch)
+                            if "graph_embeddings" in load_fields:
+                                all_graph_embeddings.append(batch["graph_embeddings"].numpy())
+                            tokens["labels"] = batch["labels"].tolist()
+                            tokens["split"] = splits_
+                            all_tokens.append(tokens)
+
+
+
+                        # Concatenate all hidden states across batches
+                        all_tokens = pd.concat(all_tokens).reset_index()
+                        all_tokens.to_csv(ADDING_SUB_TOKENS_PATH.format(self.kge_dimension, split, epoch), index = False)
+                        del all_tokens             
+                        if "attentions" in load_fields:
+                            all_attentions = np.concatenate(all_attentions)
+                            np.save(ATTENTIONS_ADDING_PATH.format(self.kge_dimension, split, epoch), all_attentions)
+                            del all_attentions
+                        if "hidden_states" in load_fields:
+                            last_hidden_states = np.concatenate(last_hidden_states)
+                            np.save(LAST_HIDDEN_STATES_ADDING_PATH.format(self.kge_dimension, split, epoch), last_hidden_states)
+                            del last_hidden_states
+                        if "graph_embeddings" in load_fields:
+                            all_graph_embeddings = np.concatenate(all_graph_embeddings)
+                            np.save(GRAPH_EMBEDDINGS_ADDING_PATH.format(self.kge_dimension, split, epoch), all_graph_embeddings)
+                            del all_graph_embeddings
+
+                # all_tokens
+                all_tokens = []
+                for split in splits:
+                    for epoch in range(epochs):
+                        all_tokens.append(pd.read_csv(ADDING_SUB_TOKENS_PATH.format(self.kge_dimension, split, epoch)))
+                all_tokens = pd.concat(all_tokens).reset_index()
+                all_tokens.to_csv(self.tokens_path, index = False)
+
+                # hidden states:
+                if "hidden_states" in load_fields:
+                    last_hidden_states = []
+                    for split in splits:
+                        for epoch in range(epochs):
+                            last_hidden_states.append(torch.from_numpy(np.load(LAST_HIDDEN_STATES_ADDING_PATH.format(self.kge_dimension, split, epoch))))
+                    last_hidden_states = torch.cat(last_hidden_states)
+                    torch.save(last_hidden_states, self.hidden_states_path)
+                    all_tokens["hidden_states"] = last_hidden_states.unbind()
+                    del last_hidden_states
+
+                # attentions:
+                if "attentions" in load_fields:
+                    attentions = []
+                    for split in splits:
+                        for epoch in range(epochs):
+                            attentions_ = torch.from_numpy(np.load(ATTENTIONS_ADDING_PATH.format(self.kge_dimension, split, epoch)))
+                            attentions.append(attentions_)
+                    attentions = torch.cat(attentions)
+                    torch.save(attentions, self.attentions_path)
+                    all_tokens["attentions"] = attentions.unbind()
+                    del attentions
+
+                # graph embeddings:
+                if "graph_embeddings" in load_fields:
+                    graph_embeddings = []
+                    for split in splits:
+                        for epoch in range(epochs):
+                            graph_embeddings.append(torch.from_numpy(np.load(GRAPH_EMBEDDINGS_ADDING_PATH.format(self.kge_dimension, split, epoch))))
+                    graph_embeddings = torch.cat(graph_embeddings)
+                    torch.save(graph_embeddings, self.graph_embeddings_path)
+                    all_tokens["graph_embeddings"] = graph_embeddings.unbind()
+                    del graph_embeddings
         else:
-            averaged_hidden_states = torch.load(self.hidden_states_path)
-            averaged_attentions = torch.load(self.attentions_path)
-            graph_embeddings = torch.load(self.graph_embeddings_path)
             all_tokens = pd.read_csv(self.tokens_path)
-            all_tokens["hidden_states"] = torch.unbind(averaged_hidden_states)
-            all_tokens["attentions"] = torch.unbind(averaged_attentions)
-            all_tokens["graph_embeddings"] = torch.unbind(graph_embeddings.detach().to("cpu"))
+            if "hidden_states" in load_fields:
+                averaged_hidden_states = torch.load(self.hidden_states_path)
+                all_tokens["hidden_states"] = torch.unbind(averaged_hidden_states)
+                del averaged_hidden_states
+            if "attentions" in load_fields:
+                averaged_attentions = torch.load(self.attentions_path)
+                all_tokens["attentions"] = torch.unbind(averaged_attentions)
+                del averaged_attentions
+            if "graph_embeddings" in load_fields:
+                graph_embeddings = torch.load(self.graph_embeddings_path)
+                all_tokens["graph_embeddings"] = torch.unbind(graph_embeddings)
+                del graph_embeddings
         return all_tokens
     
     def get_tokens_as_df(self, input_ids, all_ranges_over_batch) -> pd.DataFrame:
@@ -930,66 +1043,124 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
         model_type = "Prompt"
         self._plot_training_loss_and_accuracy(PROMPT_TRAINING_STATE_PATH.format(kge_dimension), model_type)
 
-    def forward_dataset_and_save_outputs(self, dataset, splits = ["train", "test","val"], batch_size = 64, epochs = 3, force_recompute = False):
+    def forward_dataset_and_save_outputs(self, dataset, splits = ["train", "test","val"], batch_size = 64, epochs = 3, load_fields = ["attentions", "hidden_states", "graph_embeddings"], force_recompute = False):
         if force_recompute or not os.path.exists(self.attentions_path) or not os.path.exists(self.hidden_states_path) or not os.path.exists(self.tokens_path) or not os.path.exists(self.graph_embeddings_path):
             self.model.eval()
-            last_hidden_states = []
-            all_attentions = []
-            all_ranges_over_batch = []
-            input_ids =  []
-            labels = []
-            splits_ = []
-            for split in splits:
-                splits_.extend([split] * epochs * batch_size) #* len(dataset[split]))
-                data_collator = self._get_data_collator(split)
-                for epoch in range(epochs):
-                    print(f"Prompt Forward Epoch {epoch} from {epochs}")
-                    data_loader = DataLoader(dataset=dataset[split], batch_size= batch_size, collate_fn = data_collator)
-                    for idx, batch in enumerate(data_loader):
-                    #if True:
-                    #    batch = next(iter(data_loader))
-                        with torch.no_grad():
+            Path(PROMPT_ATTENTIONS_DIR_PATH.format(self.kge_dimension)).mkdir(parents=True, exist_ok=True)
+            Path(PROMPT_HIDDEN_STATES_DIR_PATH.format(self.kge_dimension)).mkdir(parents=True, exist_ok=True)
+            Path(PROMPT_INPUT_IDS_DIR_PATH.format(self.kge_dimension)).mkdir(parents=True, exist_ok=True)
+            Path(PROMPT_RANGES_DIR_PATH.format(self.kge_dimension)).mkdir(parents=True, exist_ok=True)
+            Path(PROMPT_SUB_TOKENS_DIR_PATH.format(self.kge_dimension)).mkdir(parents=True, exist_ok=True)
+            Path(PROMPT_GRAPH_EMBEDDINGS_DIR_PATH.format(self.kge_dimension)).mkdir(parents=True, exist_ok=True)
+            with torch.no_grad():
+                for split in splits:
+                    data_collator = self._get_data_collator(split)
+                    for epoch in range(epochs):
+                        last_hidden_states = []
+                        all_attentions = []
+                        all_graph_embeddings = []
+                        all_tokens = []
+                        print(f"Prompt {split} Forward Epoch {epoch + 1} from {epochs}")
+                        data_loader = DataLoader(dataset=dataset[split], batch_size= batch_size, collate_fn = data_collator)
+                        for idx, batch in enumerate(data_loader):
+                        #if True:
+                        #    batch = next(iter(data_loader))
+                            splits_ = [split] *  len(batch["input_ids"])
                             outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], output_hidden_states=True, output_attentions = True)
-                            input_ids.append(batch["input_ids"])
-                            labels.extend(batch["labels"])
-                            hidden_states = outputs.hidden_states
-                            attentions = outputs.attentions
-                            last_hidden_states.append(hidden_states[-1])
                             ranges_over_batch = self._get_ranges_over_batch(batch["input_ids"])
-                            all_ranges_over_batch.append(ranges_over_batch)
-                            all_attentions.append(torch.stack([torch.sum(attention, dim=1).detach() for attention in attentions]))
-            # Concatenate all hidden states across batches
-            last_hidden_states = torch.cat(last_hidden_states)
-            all_ranges_over_batch = torch.cat(all_ranges_over_batch)
-            input_ids = torch.cat(input_ids)
-            labels = torch.stack(labels).tolist()
-            all_attentions = [layer.reshape(layer.shape[1], layer.shape[2], layer.shape[3], -1) for layer in all_attentions]
-            all_attentions = torch.cat(all_attentions)
-            averaged_hidden_states, averaged_attentions = avg_over_states(all_ranges_over_batch, last_hidden_states, all_attentions)
-            averaged_attentions = averaged_attentions.detach().to("cpu")
-            averaged_hidden_states = averaged_hidden_states.permute((1,0,2)).detach().to("cpu")
-            all_tokens, graph_embeddings = self.get_tokens_as_df(input_ids, all_ranges_over_batch)
-            graph_embeddings = graph_embeddings.detach().to("cpu")
-            all_tokens["labels"] = labels
-            all_tokens["split"] = splits_ 
-            
-            torch.save(averaged_attentions, self.attentions_path)
-            torch.save(averaged_hidden_states, self.hidden_states_path)
-            torch.save(graph_embeddings, self.graph_embeddings_path)
-            all_tokens.to_csv(self.tokens_path, index = False)            
-            all_tokens["hidden_states"] = torch.unbind(averaged_hidden_states)
-            all_tokens["attentions"] = torch.unbind(averaged_attentions)
-            all_tokens["graph_embeddings"] = torch.unbind(graph_embeddings)
-            #averaged_hidden_states =averaged_hidden_states.reshape(averaged_hidden_states.shape[1], averaged_hidden_states.shape[0], -1)
-        else:
-            averaged_hidden_states = torch.load(self.hidden_states_path)
-            averaged_attentions = torch.load(self.attentions_path)
-            graph_embeddings = torch.load(self.graph_embeddings_path)
+                            if "attentions" in load_fields:
+                                attentions = outputs.attentions
+                                attentions = [torch.sum(layer, dim=1) for layer in attentions]
+                                attentions = torch.stack(attentions).permute(1,2,3,0)
+                                attentions = means_over_ranges_cross(ranges_over_batch, attentions)
+                                all_attentions.append(attentions.numpy())
+                                del attentions
+                            if "hidden_states" in load_fields:
+                                hidden_states = outputs.hidden_states[-1]
+                                hidden_states = avg_over_last_hidden_states(ranges_over_batch, hidden_states).permute((1,0,2))
+                                last_hidden_states.append(hidden_states.numpy())
+                                del hidden_states
+                            tokens, graph_embeddings = self.get_tokens_as_df(batch["input_ids"], ranges_over_batch)
+                            if "graph_embeddings" in load_fields:
+                                all_graph_embeddings.append(graph_embeddings.numpy())
+                            del graph_embeddings
+                            tokens["labels"] = batch["labels"].tolist()
+                            tokens["split"] = splits_
+                            all_tokens.append(tokens)
 
+
+
+                        # Concatenate all hidden states across batches
+                        all_tokens = pd.concat(all_tokens).reset_index()
+                        all_tokens.to_csv(PROMPT_SUB_TOKENS_PATH.format(self.kge_dimension, split, epoch), index = False)
+                        del all_tokens             
+                        if "attentions" in load_fields:
+                            all_attentions = np.concatenate(all_attentions)
+                            np.save(ATTENTIONS_PROMPT_PATH.format(self.kge_dimension, split, epoch), all_attentions)
+                            del all_attentions
+                        if "hidden_states" in load_fields:
+                            last_hidden_states = np.concatenate(last_hidden_states)
+                            np.save(LAST_HIDDEN_STATES_PROMPT_PATH.format(self.kge_dimension, split, epoch), last_hidden_states)
+                            del last_hidden_states
+                        if "graph_embeddings" in load_fields:
+                            all_graph_embeddings = np.concatenate(all_graph_embeddings)
+                            np.save(GRAPH_EMBEDDINGS_PROMPT_PATH.format(self.kge_dimension, split, epoch), all_graph_embeddings)
+                            del all_graph_embeddings
+
+                # all_tokens
+                all_tokens = []
+                for split in splits:
+                    for epoch in range(epochs):
+                        all_tokens.append(pd.read_csv(PROMPT_SUB_TOKENS_PATH.format(self.kge_dimension, split, epoch)))
+                all_tokens = pd.concat(all_tokens).reset_index()
+                all_tokens.to_csv(self.tokens_path, index = False)
+
+                # hidden states:
+                if "hidden_states" in load_fields:
+                    last_hidden_states = []
+                    for split in splits:
+                        for epoch in range(epochs):
+                            last_hidden_states.append(torch.from_numpy(np.load(LAST_HIDDEN_STATES_PROMPT_PATH.format(self.kge_dimension, split, epoch))))
+                    last_hidden_states = torch.cat(last_hidden_states)
+                    torch.save(last_hidden_states, self.hidden_states_path)
+                    all_tokens["hidden_states"] = last_hidden_states.unbind()
+                    del last_hidden_states
+
+                # attentions:
+                if "attentions" in load_fields:
+                    attentions = []
+                    for split in splits:
+                        for epoch in range(epochs):
+                            attentions.append(torch.from_numpy(np.load(ATTENTIONS_PROMPT_PATH.format(self.kge_dimension, split, epoch))))
+                    attentions = torch.cat(attentions)
+                    torch.save(attentions, self.attentions_path)
+                    all_tokens["attentions"] = attentions.unbind()
+                    del attentions
+
+                # graph embeddings:
+                if "graph_embeddings" in load_fields:
+                    graph_embeddings = []
+                    for split in splits:
+                        for epoch in range(epochs):
+                            graph_embeddings.append(torch.from_numpy(np.load(GRAPH_EMBEDDINGS_PROMPT_PATH.format(self.kge_dimension, split, epoch))))
+                    graph_embeddings = torch.cat(graph_embeddings)
+                    torch.save(graph_embeddings, self.graph_embeddings_path)
+                    all_tokens["graph_embeddings"] = graph_embeddings.unbind()
+                    del graph_embeddings
+        else:
             all_tokens = pd.read_csv(self.tokens_path)
-            all_tokens["hidden_states"] = torch.unbind(averaged_hidden_states)
-            all_tokens["attentions"] = torch.unbind(averaged_attentions)
-            all_tokens["graph_embeddings"] = torch.unbind(graph_embeddings)
+            if "hidden_states" in load_fields:
+                averaged_hidden_states = torch.load(self.hidden_states_path)
+                all_tokens["hidden_states"] = torch.unbind(averaged_hidden_states)
+                del averaged_hidden_states
+            if "attentions" in load_fields:
+                averaged_attentions = torch.load(self.attentions_path)
+                all_tokens["attentions"] = torch.unbind(averaged_attentions)
+                del averaged_attentions
+            if "graph_embeddings" in load_fields:
+                graph_embeddings = torch.load(self.graph_embeddings_path)
+                all_tokens["graph_embeddings"] = torch.unbind(graph_embeddings)
+                del graph_embeddings
         return all_tokens
 
     def get_tokens_as_df(self, input_ids, all_ranges_over_batch) -> pd.DataFrame:
@@ -1144,59 +1315,101 @@ class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
             pcas.append(joblib.load(pca_path))
         return pcas
     
-    def forward_dataset_and_save_outputs(self, dataset, splits = ["train", "test", "val"], batch_size = 64, epochs = 3, force_recompute = False) -> pd.DataFrame:
+    def forward_dataset_and_save_outputs(self, dataset, splits = ["train", "test","val"], batch_size = 64, epochs = 3, load_fields = ["attentions", "hidden_states"], force_recompute = False):
         if force_recompute or not os.path.exists(self.attentions_path) or not os.path.exists(self.hidden_states_path) or not os.path.exists(self.tokens_path):
             self.model.eval()
-            last_hidden_states = []
-            all_attentions = []
-            all_ranges_over_batch = []
-            input_ids =  []
-            labels = []
-            splits_ = []
-            for split in splits:
-                splits_.extend([split] * epochs * batch_size) #* len(dataset[split]))
-                data_collator = self._get_data_collator(split)
-                for epoch in range(epochs):
-                    print(f"Vanilla Forward Epoch {epoch} from {epochs}")
-                    data_loader = DataLoader(dataset=dataset[split], batch_size= batch_size, collate_fn = data_collator)
-                    for idx, batch in enumerate(data_loader):
-                    #if True:
-                    #    batch = next(iter(data_loader))
-                        with torch.no_grad():
+            Path(VANILLA_ATTENTIONS_DIR_PATH).mkdir(parents=True, exist_ok=True)
+            Path(VANILLA_HIDDEN_STATES_DIR_PATH).mkdir(parents=True, exist_ok=True)
+            Path(VANILLA_INPUT_IDS_DIR_PATH).mkdir(parents=True, exist_ok=True)
+            Path(VANILLA_RANGES_DIR_PATH).mkdir(parents=True, exist_ok=True)
+            Path(VANILLA_SUB_TOKENS_DIR_PATH).mkdir(parents=True, exist_ok=True)
+            with torch.no_grad():
+                for split in splits:
+                    data_collator = self._get_data_collator(split)
+                    for epoch in range(epochs):
+                        last_hidden_states = []
+                        all_attentions = []
+                        all_tokens = []
+                        print(f"Vanilla {split} Forward Epoch {epoch + 1} from {epochs}")
+                        data_loader = DataLoader(dataset=dataset[split], batch_size= batch_size, collate_fn = data_collator)
+                        for idx, batch in enumerate(data_loader):
+                        #if True:
+                        #    batch = next(iter(data_loader))
+                            splits_ = [split] *  len(batch["input_ids"])
                             outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], output_hidden_states=True, output_attentions = True)
-                            input_ids.append(batch["input_ids"])
-                            labels.extend(batch["labels"])
-                            hidden_states = outputs.hidden_states
-                            attentions = outputs.attentions
-                            last_hidden_states.append(hidden_states[-1].to("cpu"))
                             ranges_over_batch = self._get_ranges_over_batch(batch["input_ids"])
-                            all_ranges_over_batch.append(ranges_over_batch.to("cpu"))
-                            all_attentions.append(torch.stack([torch.sum(attention, dim=1).detach().to("cpu") for attention in attentions]))
-            # Concatenate all hidden states across batches
-            last_hidden_states = torch.cat(last_hidden_states)
-            all_ranges_over_batch = torch.cat(all_ranges_over_batch)
-            input_ids = torch.cat(input_ids)
-            labels = torch.stack(labels).tolist()
-            all_attentions = [layer.reshape(layer.shape[1], layer.shape[2], layer.shape[3], -1) for layer in all_attentions]
-            all_attentions = torch.cat(all_attentions)
-            averaged_hidden_states, averaged_attentions = avg_over_states(all_ranges_over_batch, last_hidden_states, all_attentions)
-            averaged_hidden_states = averaged_hidden_states.permute((1,0,2)).detach().to("cpu")
-            averaged_attentions = averaged_attentions.detach().to("cpu")
-            all_tokens = self.get_tokens_as_df(input_ids, all_ranges_over_batch)
-            all_tokens["labels"] = labels
-            all_tokens["split"] = splits_ 
-            all_tokens.to_csv(self.tokens_path, index = False)
-            all_tokens["hidden_states"] = torch.unbind(averaged_hidden_states)
-            all_tokens["attentions"] = torch.unbind(averaged_attentions)
-            torch.save(averaged_attentions, self.attentions_path)
-            torch.save(averaged_hidden_states, self.hidden_states_path)
-            #averaged_hidden_states =averaged_hidden_states.reshape(averaged_hidden_states.shape[1], averaged_hidden_states.shape[0], -1)
+                            if "attentions" in load_fields:
+                                attentions = outputs.attentions
+                                attentions = [torch.sum(layer, dim=1) for layer in attentions]
+                                attentions = torch.stack(attentions).permute(1,2,3,0)
+                                attentions = means_over_ranges_cross(ranges_over_batch, attentions)
+                                all_attentions.append(attentions.numpy())
+                                del attentions
+                            if "hidden_states" in load_fields:
+                                hidden_states = outputs.hidden_states[-1]
+                                hidden_states = avg_over_last_hidden_states(ranges_over_batch, hidden_states).permute((1,0,2))
+                                last_hidden_states.append(hidden_states.numpy())
+                                del hidden_states
+                            tokens = self.get_tokens_as_df(batch["input_ids"], ranges_over_batch)
+                            tokens["labels"] = batch["labels"].tolist()
+                            tokens["split"] = splits_
+                            all_tokens.append(tokens)
+
+
+
+                        # Concatenate all hidden states across batches
+                        all_tokens = pd.concat(all_tokens).reset_index()
+                        all_tokens.to_csv(VANILLA_SUB_TOKENS_PATH.format(split, epoch), index = False)
+                        del all_tokens
+                        if "attentions" in load_fields:
+                            all_attentions = np.concatenate(all_attentions)
+                            np.save(ATTENTIONS_VANILLA_PATH.format(split, epoch), all_attentions)
+                            del all_attentions
+                        if "hidden_states" in load_fields:
+                            last_hidden_states = np.concatenate(last_hidden_states)
+                            np.save(LAST_HIDDEN_STATES_VANILLA_PATH.format(split, epoch), last_hidden_states)
+                            del last_hidden_states
+
+                # all_tokens
+                all_tokens = []
+                for split in splits:
+                    for epoch in range(epochs):
+                        all_tokens.append(pd.read_csv(VANILLA_SUB_TOKENS_PATH.format(split, epoch)))
+                all_tokens = pd.concat(all_tokens).reset_index()
+                all_tokens.to_csv(self.tokens_path, index = False)
+
+                # hidden states:
+                if "hidden_states" in load_fields:
+                    last_hidden_states = []
+                    for split in splits:
+                        for epoch in range(epochs):
+                            last_hidden_states.append(torch.from_numpy(np.load(LAST_HIDDEN_STATES_VANILLA_PATH.format(split, epoch))))
+                    last_hidden_states = torch.cat(last_hidden_states)
+                    torch.save(last_hidden_states, self.hidden_states_path)
+                    all_tokens["hidden_states"] = last_hidden_states.unbind()
+                    del last_hidden_states
+
+                # attentions:
+                if "attentions" in load_fields:
+                    attentions = []
+                    for split in splits:
+                        for epoch in range(epochs):
+                            attentions.append(torch.from_numpy(np.load(ATTENTIONS_VANILLA_PATH.format(split, epoch))))
+                    attentions = torch.cat(attentions)
+                    torch.save(attentions, self.attentions_path)
+                    all_tokens["attentions"] = attentions.unbind()
+                    del attentions
+
         else:
-            averaged_hidden_states = torch.load(self.hidden_states_path)
-            averaged_attentions = torch.load(self.attentions_path)
             all_tokens = pd.read_csv(self.tokens_path)
-            all_tokens["hidden_states"] = torch.unbind(averaged_hidden_states)
-            all_tokens["attentions"] = torch.unbind(averaged_attentions)
+            if "hidden_states" in load_fields:
+                averaged_hidden_states = torch.load(self.hidden_states_path)
+                all_tokens["hidden_states"] = torch.unbind(averaged_hidden_states)
+                del averaged_hidden_states
+            if "attentions" in load_fields:
+                averaged_attentions = torch.load(self.attentions_path)
+                all_tokens["attentions"] = torch.unbind(averaged_attentions)
+                del averaged_attentions
         return all_tokens
     
     def get_tokens_as_df(self, input_ids, all_ranges_over_batch) -> pd.DataFrame:

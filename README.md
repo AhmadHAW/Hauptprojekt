@@ -88,7 +88,7 @@ To simplify matters, we now call the LLM with the inclusion of KGE in the prompt
 We have described how KGEs are generated and how we transfer them to the LLM in the training and inference process. Now let's take a look at how we want to measure and visualize the changes in the semantic understanding of the LLM.
 First, let's look at the general performance of the vanilla model, the prompt model and the embedding model. We check whether adding the KGEs leads to an improvement in accuracy. To do this, we look at the training process and then use the evaluation dataset to produce the confusion matrices on the models predictions.
 
-Then we calculate the positional encodings of all semantically meaningful passages in the prompt, such as user ID, movie ID, movie title, genres, user embedding and movie embedding.
+Then we calculate the positional encodings of all semantically meaningful passages in the prompt, such as user ID, movie title, genres, user embedding and movie embedding.
 With the help of these positional encodings, we produce two views, one view of the attentions and one view of the embeddings.
 
 We expect to observe a shift from the natural language content to the KGEs in the view on the attentions. We may also see a difference in attention for user groups that are strongly or weakly connected (have rated many/few movies).
@@ -99,10 +99,15 @@ In the view of the embeddings in the output layer, we can reduce the dimensions 
 A large part of the dependencies can be installed with ```pip install -r requirements.txt```. The other libraries torch-scatter and torch-sparse can then be installed with the commands:
 ```torch-scatter -f https://data.pyg.org/whl/torch-${TORCH}.html``` and ```torch-sparse -f https://data.pyg.org/whl/torch-${TORCH}.html```, whereby ```${TORCH}``` must be replaced with the current Torch version. It is important that the correct Torch version is installed and specified. For example, problems can occur when installing *Torch-Scatter* and *Torch-Sparse* if the installed Torch version supports Cuda without the host system doing so.
 ## Experiments
-![Embeddings Plot](/images/Hidden_States.png)
-![Vanilla Attentions](/images/Vanilla_Attentions.png) 
-![Prompt Attentions](/images/Prompt_Attentions.png) 
-![Embedding Attentions](/images/Embedding_Attentions.png) 
+Here we are plotting some of the experiment results, but we will not interpret them at this time. First We can see the Attentions over the two Layers. Then we can see the PCA reduced Embeddings of all models over the features: User, Title and Genre. Last we can see the PCA reduced Embeddings of the Prompt and Embedding Model of all features.
+Vanilla Model             |  Prompt Model             |  Embedding Model
+:-------------------------:|:-------------------------:|:-------------------------:
+![Vanilla Attentions](/images/Vanilla_Attentions.png)  |  ![Prompt Attentions](/images/Prompt_Attentions.png)|![Embedding Attentions](/images/Embedding_Attentions.png)
+![Vanilla Hidden States](/images/Vanilla_Hidden_States.png)  |  ![Prompt Hidden States](/images/Prompt_Hidden_States_user_title_genre.png)|![Embedding Hidden States](/images/Embedding_Hidden_States_user_title_genre.png)
+||![Prompt Hidden States](/images/Prompt_Hidden_States.png)|![Embedding Hidden States](/images/Embedding_Hidden_States.png)
+ 
+ 
+
 ## Sources
 [1] Jin, Bowen et al. “Large Language Models on Graphs: A Comprehensive Survey.” ArXiv abs/2312.02783 (2023): n. pag.
 [2] Cao, Jiahang et al. “Knowledge Graph Embedding: A Survey from the Perspective of Representation Spaces.” ACM Computing Surveys 56 (2022): 1 - 42.
