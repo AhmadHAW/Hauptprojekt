@@ -105,6 +105,16 @@ Vanilla Model             |  Prompt Model             |  Embedding Model
 ![Vanilla Attentions](/images/Vanilla_Attentions.png)  |  ![Prompt Attentions](/images/Prompt_Attentions.png)|![Embedding Attentions](/images/Embedding_Attentions.png)
 ![Vanilla Hidden States](/images/Vanilla_Hidden_States.png)  |  ![Prompt Hidden States](/images/Prompt_Hidden_States_user_title_genre.png)|![Embedding Hidden States](/images/Embedding_Hidden_States_user_title_genre.png)
 ||![Prompt Hidden States](/images/Prompt_Hidden_States.png)|![Embedding Hidden States](/images/Embedding_Hidden_States.png)
+
+Some more Confrontations
+First             |  Second             |
+:-------------------------:|:-------------------------:
+![Single User Hidden States](/images/Single_User_Hidden_States.png)  |  ![Single Single Title Hidden States](/images/Single_Title_Hidden_States.png)
+![Movie Hidden States True Only](/images/Movie_Hidden_States_True_Only.png)  |  ![Movie Hidden States False Only](/images/Movie_Hidden_States_False_Only.png)
+![Single User Hidden States True Only](/images/Single_User_Hidden_States_True_Only.png)  |  ![Single User Hidden States False Only](/images/Single_User_Hidden_States_False_Only.png)
+
+
+
  
  
 

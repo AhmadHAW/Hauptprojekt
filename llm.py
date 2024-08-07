@@ -908,6 +908,7 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
                 graph_embeddings = torch.load(self.graph_embeddings_path)
                 all_tokens["graph_embeddings"] = torch.unbind(graph_embeddings)
                 del graph_embeddings
+        all_tokens[all_tokens["split"].isin(splits)]
         return all_tokens
     
     def get_tokens_as_df(self, input_ids, all_ranges_over_batch) -> pd.DataFrame:
@@ -1161,6 +1162,7 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
                 graph_embeddings = torch.load(self.graph_embeddings_path)
                 all_tokens["graph_embeddings"] = torch.unbind(graph_embeddings)
                 del graph_embeddings
+        all_tokens[all_tokens["split"].isin(splits)]
         return all_tokens
 
     def get_tokens_as_df(self, input_ids, all_ranges_over_batch) -> pd.DataFrame:
@@ -1410,6 +1412,7 @@ class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
                 averaged_attentions = torch.load(self.attentions_path)
                 all_tokens["attentions"] = torch.unbind(averaged_attentions)
                 del averaged_attentions
+        all_tokens[all_tokens["split"].isin(splits)]
         return all_tokens
     
     def get_tokens_as_df(self, input_ids, all_ranges_over_batch) -> pd.DataFrame:
