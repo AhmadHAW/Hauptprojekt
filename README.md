@@ -128,9 +128,15 @@ First             |  Second             |
 
 ## Sources
 [1] Jin, Bowen et al. “Large Language Models on Graphs: A Comprehensive Survey.” ArXiv abs/2312.02783 (2023): n. pag.
+
 [2] Cao, Jiahang et al. “Knowledge Graph Embedding: A Survey from the Perspective of Representation Spaces.” ACM Computing Surveys 56 (2022): 1 - 42.
+
 [3] Lewis, Patrick et al. “Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks.” ArXiv abs/2005.11401 (2020): n. pag.
+
 [4] Wu, Lingfei et al. “Graph Neural Networks for Natural Language Processing: A Survey.” ArXiv abs/2106.06090 (2021): n. pag.
+
 [5] Khoshraftar, Shima and Aijun An. “A Survey on Graph Representation Learning Methods.” ACM Transactions on Intelligent Systems and Technology 15 (2022): 1 - 55.
+
 [6] Fey, Matthias and Jan Eric Lenssen. “Fast Graph Representation Learning with PyTorch Geometric.” ArXiv abs/1903.02428 (2019): n. pag.
+
 [7] Harper, F. Maxwell et al. “The MovieLens Datasets: History and Context.” ACM Trans. Interact. Intell. Syst. 5 (2016): 19:1-19:19.
