@@ -1,6 +1,6 @@
 import random as rd
 from typing import Optional, Union, Dict, Tuple, List
-from abc import ABC
+from abc import ABC, abstractmethod
 import os
 import json
 import ast
@@ -11,6 +11,7 @@ from movie_lens_loader import row_to_prompt_datapoint, row_to_adding_embedding_d
 import torch
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+from transformers.utils import ModelOutput
 import datasets
 import numpy as np
 import pandas as pd
@@ -127,7 +128,7 @@ def mean_over_ranges(tens: torch.Tensor, starts: torch.Tensor, ends: torch.Tenso
     '''
     # input: # ends: torch.tensor([2, 5, 6]) starts: tensor([0, 2, 4])
     # Compute the maximum length of the ranges
-    max_length = (ends - starts).max()
+    max_length = (ends - starts).max().item()
     range_diffs = (max_length - (ends-starts)).unsqueeze(1) # the amount of times, the range had to be padded 
     # Create a range tensor from 0 to max_length-1
     range_tensor = torch.arange(max_length).unsqueeze(0)
@@ -163,9 +164,59 @@ def avg_over_last_hidden_states(all_ranges_over_batch, last_hidden_states):
         starts = ranges_over_batch[:,0]
         ends = ranges_over_batch[:,1]
         averaged_hidden_state = mean_over_ranges(last_hidden_states, starts, ends)
-        #print(starts.shape, averaged_hidden_state.shape)
         averaged_hidden_states.append(averaged_hidden_state)
     return torch.stack(averaged_hidden_states)
+
+def sort_ranges(ranges_over_batch):
+    # Extract the second element (end of the current ranges)
+    end_elements = ranges_over_batch[:, :, 1]
+    # Create the new ranges by adding 1 to the end elements
+    new_ranges = torch.stack([end_elements, end_elements + 1], dim=-1)
+    # Concatenate the original ranges with the new ranges
+    ranges_over_batch = torch.cat((ranges_over_batch, new_ranges), dim=1)
+    # Step 1: Extract the last value of dimension 2
+    last_values = ranges_over_batch[:, :, -1]  # Shape (batch_size, num_elements)
+
+    # Step 2: Sort the indices based on these last values
+    # 'values' gives the sorted values (optional), 'indices' gives the indices to sort along dim 1
+    _, indices = torch.sort(last_values, dim=1, descending=False)
+
+    # Step 3: Apply the sorting indices to the original tensor
+    ranges_over_batch = torch.gather(ranges_over_batch, 1, indices.unsqueeze(-1).expand(-1, -1, ranges_over_batch.size(2)))
+    return ranges_over_batch
+
+def find_sep_in_tokens(tokens, sep_token_id):
+    return tokens == sep_token_id
+
+def get_ranges_over_batch(input_ids, sep_token_id):
+    mask = find_sep_in_tokens(input_ids, sep_token_id)
+    positions = mask.nonzero(as_tuple=True)
+    cols = positions[1]
+
+    # Step 3: Determine the number of True values per row
+    num_trues_per_row = mask.sum(dim=1)
+    max_trues_per_row = num_trues_per_row.max().item()
+
+    # Step 4: Create an empty tensor to hold the result
+    ranges_over_batch = -torch.ones((mask.size(0), max_trues_per_row), dtype=torch.long)
+
+    # Step 5: Use scatter to place column indices in the ranges_over_batch tensor
+    # Create an index tensor that assigns each column index to the correct position in ranges_over_batch tensor
+    row_indices = torch.arange(mask.size(0)).repeat_interleave(num_trues_per_row)
+    column_indices = torch.cat([torch.arange(n) for n in num_trues_per_row])
+
+    ranges_over_batch[row_indices, column_indices] = cols
+    ranges_over_batch = torch.stack([ranges_over_batch[:, :-1], ranges_over_batch[:, 1:]], dim=2)
+    # Create a tensor of zeros to represent the starting points
+    start_points = torch.zeros(ranges_over_batch.size(0), 1, 2, dtype=ranges_over_batch.dtype)
+
+    # Set the second column to be the first element of the first range
+    start_points[:, 0, 1] = ranges_over_batch[:, 0, 0]
+
+    # Concatenate the start_points tensor with the original ranges_over_batch tensor
+    ranges_over_batch = torch.cat((start_points, ranges_over_batch), dim=1)
+    ranges_over_batch[:,:,0] += 1
+    return ranges_over_batch
 
 class DataCollatorBase(DataCollatorForLanguageModeling, ABC):
     '''
@@ -174,7 +225,6 @@ class DataCollatorBase(DataCollatorForLanguageModeling, ABC):
     '''
     def __init__(self, tokenizer, df, false_ratio = 2.0):
         super().__init__(tokenizer=tokenizer, mlm=False)
-        assert false_ratio > 0
         self.false_ratio = false_ratio
         self.tokenizer = tokenizer
         self.df = df
@@ -185,13 +235,22 @@ class DataCollatorBase(DataCollatorForLanguageModeling, ABC):
             #Every datapoint has a chance to be replaced by a negative datapoint, based on the false_ratio.
             #The _transform_to_false_exmample methods have to be implemented by the inheriting class.
             #For the prompt classifier, every new datapoint also contains embeddings of the nodes.
-            if rd.uniform(0, 1) >=( 1 / (self.false_ratio + 1)):
+            #If the false ratio is -1 this step will be skipped (for validation)
+            if self.false_ratio != -1 and rd.uniform(0, 1) >=( 1 / (self.false_ratio + 1)):
                 new_feature = self._transform_to_false_example()
                 new_features.append(new_feature)
             else:
                 new_features.append(feature)
         # Convert features into batches
         return self._convert_features_into_batches(new_features)
+    
+    @abstractmethod
+    def _transform_to_false_example(self) -> Dict:
+        pass
+
+    @abstractmethod
+    def _convert_features_into_batches(self, features: List[Dict]) -> Dict:
+        pass
     
     def _find_non_existing_user_movie(self):
         while True:
@@ -208,10 +267,12 @@ class TextBasedDataCollator(DataCollatorBase, ABC):
         input_ids = torch.tensor([f["input_ids"] for f in features], dtype=torch.long)
         attention_mask = torch.tensor([f["attention_mask"] for f in features], dtype=torch.long)
         labels = torch.tensor([f["labels"] for f in features], dtype=torch.long)
+        ranges_over_batch = torch.tensor([f["ranges_over_batch"] for f in features], dtype=torch.long)
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
-            "labels": labels
+            "labels": labels,
+            "ranges_over_batch": ranges_over_batch
         }
 
 
@@ -227,6 +288,7 @@ class EmbeddingBasedDataCollator(DataCollatorBase):
         input_ids = torch.tensor([f["input_ids"] for f in features], dtype=torch.long)
         attention_mask = torch.tensor([f["attention_mask"] for f in features], dtype=torch.long)
         labels = torch.tensor([f["labels"] for f in features], dtype=torch.long)
+        ranges_over_batch = torch.tensor([f["ranges_over_batch"] for f in features], dtype=torch.long)
         for f in features:
             if isinstance(f["graph_embeddings"], list):
                 f["graph_embeddings"] = torch.stack([torch.tensor(f["graph_embeddings"][0]), torch.tensor(f["graph_embeddings"][1])])
@@ -237,22 +299,26 @@ class EmbeddingBasedDataCollator(DataCollatorBase):
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "labels": labels,
-            "graph_embeddings": graph_embeddings
+            "graph_embeddings": graph_embeddings,
+            "ranges_over_batch": ranges_over_batch
         }
     
-    def _transform_to_false_example(self):
+    def _transform_to_false_example(self) -> Dict:
         label = 0
         user_id, movie_id = self._find_non_existing_user_movie()
-        random_row = self.df[self.df["mappedMovieId"] == movie_id].iloc[0]
+        random_row = self.df[self.df["mappedMovieId"] == movie_id].sample(1).iloc[0]
         random_row["mappedUserId"] = user_id
         user_embedding, movie_embedding = self.get_embedding_cb(self.data, user_id, movie_id)
         random_row["prompt"] = row_to_adding_embedding_datapoint(random_row, self.tokenizer.sep_token, self.tokenizer.pad_token)
         tokenized = self.tokenizer(random_row["prompt"], padding="max_length", truncation=True)
+        ranges_over_batch = get_ranges_over_batch(torch.tensor(tokenized["input_ids"]).unsqueeze(0), self.tokenizer.sep_token_id)
+        ranges_over_batch = sort_ranges(ranges_over_batch).squeeze(0).to("cpu").detach().tolist()
         return {
             "input_ids": tokenized["input_ids"],
             "attention_mask": tokenized["attention_mask"],
             "labels": label,
             "graph_embeddings" : torch.stack([user_embedding, movie_embedding]),
+            "ranges_over_batch": ranges_over_batch
             }
     
 
@@ -267,20 +333,23 @@ class PromptEmbeddingDataCollator(TextBasedDataCollator):
         self.kge_dimension = kge_dimension
 
 
-    def _transform_to_false_example(self):
+    def _transform_to_false_example(self) -> Dict:
         label = 0
         user_id, movie_id = self._find_non_existing_user_movie()
-        random_row = self.df[self.df["mappedMovieId"] == movie_id].iloc[0]
+        random_row = self.df[self.df["mappedMovieId"] == movie_id].sample(1).iloc[0]
         random_row["mappedUserId"] = user_id
         user_embedding, movie_embedding = self.get_embedding_cb(self.data, user_id, movie_id)
         random_row["user_embedding"] = user_embedding.to("cpu").detach().tolist()
         random_row["movie_embedding"] = movie_embedding.to("cpu").detach().tolist()
         random_row["prompt"] = row_to_prompt_datapoint(random_row, self.kge_dimension, sep_token=self.tokenizer.sep_token)
         tokenized = self.tokenizer(random_row["prompt"], padding="max_length", truncation=True)
+        ranges_over_batch = get_ranges_over_batch(torch.tensor(tokenized["input_ids"]).unsqueeze(0), self.tokenizer.sep_token_id)
+        ranges_over_batch = sort_ranges(ranges_over_batch)
         return {
             "input_ids": tokenized["input_ids"],
             "attention_mask": tokenized["attention_mask"],
-            "labels": label
+            "labels": label,
+            "ranges_over_batch": ranges_over_batch.squeeze(0).to("cpu").detach().tolist()
             }
     
 class VanillaEmbeddingDataCollator(TextBasedDataCollator):
@@ -291,17 +360,20 @@ class VanillaEmbeddingDataCollator(TextBasedDataCollator):
         super().__init__(tokenizer=tokenizer,false_ratio = false_ratio, df = df)
 
 
-    def _transform_to_false_example(self):
+    def _transform_to_false_example(self) -> Dict:
         label = 0
         user_id, movie_id = self._find_non_existing_user_movie()
-        random_row = self.df[self.df["mappedMovieId"] == movie_id].iloc[0]
+        random_row = self.df[self.df["mappedMovieId"] == movie_id].sample(1).iloc[0]
         random_row["mappedUserId"] = user_id
         random_row["prompt"] = row_to_vanilla_datapoint(random_row, self.tokenizer.sep_token)
         tokenized = self.tokenizer(random_row["prompt"], padding="max_length", truncation=True)
+        ranges_over_batch = get_ranges_over_batch(torch.tensor(tokenized["input_ids"]).unsqueeze(0), self.tokenizer.sep_token_id)
+        ranges_over_batch = sort_ranges(ranges_over_batch)
         return {
             "input_ids": tokenized["input_ids"],
             "attention_mask": tokenized["attention_mask"],
-            "labels": label
+            "labels": label,
+            "ranges_over_batch": ranges_over_batch.squeeze(0).to("cpu").detach().tolist()
             }
     
 
@@ -339,20 +411,19 @@ class CustomTrainer(Trainer):
             and self.args.dataloader_persistent_workers
         ):
             return self.accelerator.prepare(self._eval_dataloaders[dataloader_key])
-
         eval_dataset = (
-            self.eval_dataset[eval_dataset]
+            self.eval_dataset[eval_dataset] # type: ignore
             if isinstance(eval_dataset, str)
             else eval_dataset
             if eval_dataset is not None
             else self.eval_dataset
-        )
+        ) # type: ignore
         data_collator = self.test_data_collator
 
         if is_datasets_available() and isinstance(eval_dataset, datasets.Dataset):
-            eval_dataset = self._remove_unused_columns(eval_dataset, description="evaluation")
+            eval_dataset = self._remove_unused_columns(eval_dataset, description="evaluation") # type: ignore
         else:
-            data_collator = self._get_collator_with_removed_columns(data_collator, description="evaluation")
+            data_collator = self._get_collator_with_removed_columns(data_collator, description="evaluation") # type: ignore
 
         dataloader_params = {
             "batch_size": self.args.eval_batch_size,
@@ -362,14 +433,14 @@ class CustomTrainer(Trainer):
             "persistent_workers": self.args.dataloader_persistent_workers,
         }
 
-        if not isinstance(eval_dataset, torch.utils.data.IterableDataset):
-            dataloader_params["sampler"] = self._get_eval_sampler(eval_dataset)
+        if not isinstance(eval_dataset, torch.utils.data.IterableDataset): # type: ignore
+            dataloader_params["sampler"] = self._get_eval_sampler(eval_dataset) # type: ignore
             dataloader_params["drop_last"] = self.args.dataloader_drop_last
             dataloader_params["prefetch_factor"] = self.args.dataloader_prefetch_factor
 
         # accelerator.free_memory() will destroy the references, so
         # we need to store the non-prepared version
-        eval_dataloader = DataLoader(eval_dataset, **dataloader_params)
+        eval_dataloader = DataLoader(eval_dataset, **dataloader_params) # type: ignore
         if self.args.dataloader_persistent_workers:
             if hasattr(self, "_eval_dataloaders"):
                 self._eval_dataloaders[dataloader_key] = eval_dataloader
@@ -378,7 +449,91 @@ class CustomTrainer(Trainer):
 
         return self.accelerator.prepare(eval_dataloader)
     
-class InsertEmbeddingBertForSequenceClassification(BertForSequenceClassification):
+class SequenceClassifierOutputOverRanges(SequenceClassifierOutput):
+    def __init__(self, loss=None, logits=None, hidden_states=None, attentions=None, ranges_over_batch=None):
+        super().__init__(loss=loss, logits=logits, hidden_states=hidden_states, attentions=attentions) # type: ignore
+        self.ranges_over_batch = ranges_over_batch
+
+    def to_tuple(self):
+        # Ensure that your custom field is included when converting to a tuple
+        return tuple(v for v in (self.loss, self.logits, self.hidden_states, self.attentions, self.ranges_over_batch) if v is not None)
+
+class BertForSequenceClassificationRanges(BertForSequenceClassification):
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        token_type_ids: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        head_mask: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        ranges_over_batch: Optional[torch.Tensor] = None,
+    ) -> Union[Tuple[torch.Tensor], SequenceClassifierOutputOverRanges]:
+        r"""
+        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
+            Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
+            config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
+            `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        outputs = self.bert(
+            input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        pooled_output = outputs[1]
+
+        pooled_output = self.dropout(pooled_output)
+        logits = self.classifier(pooled_output)
+
+        loss = None
+        if labels is not None:
+            if self.config.problem_type is None:
+                if self.num_labels == 1:
+                    self.config.problem_type = "regression"
+                elif self.num_labels > 1 and (labels.dtype == torch.long or labels.dtype == torch.int):
+                    self.config.problem_type = "single_label_classification"
+                else:
+                    self.config.problem_type = "multi_label_classification"
+
+            if self.config.problem_type == "regression":
+                loss_fct = MSELoss()
+                if self.num_labels == 1:
+                    loss = loss_fct(logits.squeeze(), labels.squeeze())
+                else:
+                    loss = loss_fct(logits, labels)
+            elif self.config.problem_type == "single_label_classification":
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+            elif self.config.problem_type == "multi_label_classification":
+                loss_fct = BCEWithLogitsLoss()
+                loss = loss_fct(logits, labels)
+        if not return_dict:
+            output = (logits,) + outputs[2:]
+            return ((loss,) + output) if loss is not None else output
+
+        return SequenceClassifierOutputOverRanges(
+            loss=loss,
+            logits=logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+            ranges_over_batch = ranges_over_batch
+        )
+
+class AddingEmbeddingBertForSequenceClassification(BertForSequenceClassification):
     
     def forward(
         self,
@@ -393,7 +548,8 @@ class InsertEmbeddingBertForSequenceClassification(BertForSequenceClassification
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         graph_embeddings: Optional[torch.Tensor] = None,
-    ) -> Union[Tuple[torch.Tensor], SequenceClassifierOutput]:
+        ranges_over_batch: Optional[torch.Tensor] = None,
+    ) -> Union[Tuple[torch.Tensor], SequenceClassifierOutputOverRanges]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
             Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
@@ -403,10 +559,11 @@ class InsertEmbeddingBertForSequenceClassification(BertForSequenceClassification
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         if inputs_embeds is None:
             inputs_embeds = self.bert.embeddings(input_ids)
+            assert isinstance(inputs_embeds, torch.Tensor)
         if graph_embeddings is not None and len(graph_embeddings) > 0:
             
             if attention_mask is not None:
-                mask = ((attention_mask.sum(dim = 1) -1).unsqueeze(1).repeat((1,2))-torch.tensor([3,1]).to(self.device)).unsqueeze(2).repeat((1,1,self.config.hidden_size))        
+                mask = ((attention_mask.to(self.device).sum(dim = 1) -1).unsqueeze(1).repeat((1,2))-torch.tensor([3,1])).unsqueeze(2).repeat((1,1,self.config.hidden_size))
                 inputs_embeds = inputs_embeds.to(self.device).scatter(1, mask.to(self.device), graph_embeddings.to(self.device))
         outputs = self.bert(
             attention_mask=attention_mask,
@@ -449,19 +606,24 @@ class InsertEmbeddingBertForSequenceClassification(BertForSequenceClassification
             output = (logits,) + outputs[2:]
             return ((loss,) + output) if loss is not None else output
 
-        return SequenceClassifierOutput(
+        return SequenceClassifierOutputOverRanges(
             loss=loss,
             logits=logits,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
+            ranges_over_batch = ranges_over_batch,
         )
 
-class ClassifierBase():
-    def __init__(self, df, semantic_datapoints, batch_size = 64, force_recompute = False) -> None:
+class ClassifierBase(ABC):
+    def __init__(self, df, semantic_datapoints, best_model_path, attentions_path, hidden_states_path, tokens_path, batch_size = 64, force_recompute = False) -> None:
         self.predictions = None
         self.df = df
         self.batch_size = batch_size
         self.semantic_datapoints = semantic_datapoints
+        self.best_model_path = best_model_path
+        self.attentions_path = attentions_path
+        self.hidden_states_path = hidden_states_path
+        self.tokens_path = tokens_path
         self.force_recompute = force_recompute
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
@@ -470,25 +632,19 @@ class ClassifierBase():
         predictions = np.argmax(predictions, axis=1)
         return METRIC.compute(predictions=predictions, references=labels)
     
+    @abstractmethod
+    def _set_up_trainer(self, dataset, tokenize = False, eval_data_collator = None, epochs = 3) -> Trainer:
+        pass
+
+    
     def train_model_on_data(self, dataset, epochs = 3):
         trainer = self._set_up_trainer(dataset, epochs = epochs)
 
         # Train the model
         trainer.train()
 
-        trainer.model.to(device = "cpu").save_pretrained(self.best_model_path)
-        trainer.model.to(device = self.device)
-
-    
-    def evaluate_model_on_data(self, dataset, split):
-        if split == "test":
-            trainer = self._set_up_trainer(dataset["test"])
-            test_results = trainer.evaluate(eval_dataset = dataset["test"])
-        else:
-            trainer = self._set_up_trainer(dataset["val"], self.eval_data_collator)
-            test_results = trainer.evaluate(eval_dataset = dataset["val"])
-
-        print(test_results)
+        trainer.model.to(device = "cpu").save_pretrained(self.best_model_path) # type: ignore
+        trainer.model.to(device = self.device) # type: ignore
 
     def plot_attentions(self, attentions, title):
         fig, ax = plt.subplots(figsize=(5, 5))
@@ -523,7 +679,7 @@ class ClassifierBase():
         # Normalize the weights to get thickness values
         max_weight = max(edge_weights.values())
         edge_thickness = [edge_weights[edge] / max_weight * weight_coef for edge in G.edges()]# Draw edges with varying thicknesses
-        nx.draw_networkx_edges(G, pos, edgelist=G.edges(), width=edge_thickness)
+        nx.draw_networkx_edges(G, pos, edgelist=G.edges(), width=edge_thickness) # type: ignore
         shift_to_left = 0.21
         label_pos = {node: (x - shift_to_left, y) for node, (x, y) in pos.items()}
         nx.draw_networkx_labels(G,label_pos,labels)
@@ -535,8 +691,16 @@ class ClassifierBase():
         plt.title(title)
         plt.show()
 
+    @abstractmethod
+    def save_pca(self, pca, label):
+        pass
+
+    @abstractmethod
+    def pcas_exists(self):
+        pass
     
-    
+    def load_pcas(self):
+        pass
 
     def init_pca(self, hidden_states, force_recompute = False):
         if self.pcas_exists() and not force_recompute:
@@ -552,70 +716,6 @@ class ClassifierBase():
                 pca.fit_transform(position_hidden_states)
                 self.save_pca(pca, label = label)
             return pcas
-
-
-    def _find_sep_in_tokens(self, tokens):
-        return tokens == self.tokenizer.sep_token_id
-    
-    def _get_ranges_over_batch(self, input_ids):
-        mask = self._find_sep_in_tokens(input_ids)
-        positions = mask.nonzero(as_tuple=True)
-        cols = positions[1]
-
-        # Step 3: Determine the number of True values per row
-        num_trues_per_row = mask.sum(dim=1)
-        max_trues_per_row = num_trues_per_row.max().item()
-
-        # Step 4: Create an empty tensor to hold the result
-        ranges_over_batch = -torch.ones((mask.size(0), max_trues_per_row), dtype=torch.long)
-
-        # Step 5: Use scatter to place column indices in the ranges_over_batch tensor
-        # Create an index tensor that assigns each column index to the correct position in ranges_over_batch tensor
-        row_indices = torch.arange(mask.size(0)).repeat_interleave(num_trues_per_row)
-        column_indices = torch.cat([torch.arange(n) for n in num_trues_per_row])
-
-        ranges_over_batch[row_indices, column_indices] = cols
-        ranges_over_batch = torch.stack([ranges_over_batch[:, :-1], ranges_over_batch[:, 1:]], dim=2)
-        # Create a tensor of zeros to represent the starting points
-        start_points = torch.zeros(ranges_over_batch.size(0), 1, 2, dtype=ranges_over_batch.dtype)
-
-        # Set the second column to be the first element of the first range
-        start_points[:, 0, 1] = ranges_over_batch[:, 0, 0]
-
-        # Concatenate the start_points tensor with the original ranges_over_batch tensor
-        ranges_over_batch = torch.cat((start_points, ranges_over_batch), dim=1)
-        ranges_over_batch[:,:,0] += 1
-        return ranges_over_batch
-    
-    def generate_semantic_attention_matrix(self, dataset, split = "val", batch_size = 64, epochs = 3, step_info_size = 10):
-        self.model.eval()
-        layers = self.model.config.num_hidden_layers
-        data_collator = self._get_data_collator(split)
-        result_matrix = torch.zeros((layers, len(self.semantic_datapoints), len(self.semantic_datapoints)))
-        for epoch in range(epochs):
-            data_loader = DataLoader(dataset=dataset[split], batch_size= batch_size, collate_fn = data_collator)
-            #batch = next(iter(data_loader))
-            for idx, batch in enumerate(data_loader):
-                combined_attentions = self._generate_attentions_for_batch(batch)
-                ranges_over_batch = self._get_ranges_over_batch()
-                # Initialize the result matrix
-                for layer in range(layers):
-                    for batch_, ranges in enumerate(ranges_over_batch):
-                        for idx, range_x in enumerate(ranges):
-                            from_range = torch.arange(range_x[0],range_x[1])
-                            for idy, range_y in enumerate(ranges):
-                                to_range = torch.arange(range_y[0], range_y[1])
-                                result_matrix[layer, idx, idy] += torch.sum(combined_attentions[layer, batch_, from_range][:, to_range])/(len(from_range)*len(to_range))
-                if idx > 0 and idx % step_info_size ==0:
-                    print(f"Epoch: {epoch}, Batch: {idx}/{len(data_loader)}")
-        normalized_tensor = result_matrix / result_matrix.sum(dim = (1,2), keepdim=True)
-        normalized_tensor_row = result_matrix / result_matrix.sum(dim=2, keepdim=True)
-        return normalized_tensor, normalized_tensor_row
-    
-    def _generate_attentions_for_batch(self, batch):
-        with torch.no_grad():
-            outputs = self.forward_batch(batch, output_attentions = True)
-            return torch.stack([torch.sum(attentions, dim=1).detach() for attentions in outputs.attentions])  # This will contain the attention weights for each layer and head
     
     def _plot_training_loss_and_accuracy(self, path_to_trainer_state, model_type):
         with open(path_to_trainer_state, 'r') as f:
@@ -670,54 +770,59 @@ class ClassifierBase():
         
 
 class ClassifierOriginalArchitectureBase(ClassifierBase):
-    def __init__(self, df, semantic_datapoints, model_name = "google/bert_uncased_L-2_H-128_A-2", batch_size = 64, model_max_length = 256, force_recompute = False) -> None:
-        super().__init__( df = df, semantic_datapoints = semantic_datapoints, batch_size = batch_size, force_recompute = force_recompute)
+    def __init__(self, df, semantic_datapoints, best_model_path, attentions_path, hidden_states_path, tokens_path, model_name = "google/bert_uncased_L-2_H-128_A-2", batch_size = 64, model_max_length = 256, force_recompute = False) -> None:
+        super().__init__( df = df, semantic_datapoints = semantic_datapoints, best_model_path = best_model_path, attentions_path = attentions_path, hidden_states_path = hidden_states_path, tokens_path = tokens_path, batch_size = batch_size, force_recompute = force_recompute)
         self.model_name = model_name
         
         # Initialize the model and tokenizer
         if os.path.exists(self.best_model_path) and not self.force_recompute:
-            self.model = BertForSequenceClassification.from_pretrained(self.best_model_path, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID)
+            self.model = BertForSequenceClassificationRanges.from_pretrained(self.best_model_path, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID)
         else:
-            self.model = BertForSequenceClassification.from_pretrained(self.model_name, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID)
+            self.model = BertForSequenceClassificationRanges.from_pretrained(self.model_name, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID)
 
         
         self.tokenizer = BertTokenizer.from_pretrained(self.model_name, model_max_length=model_max_length)
 
     def tokenize_function(self, example, return_pt = False):
+        tokenized =  self.tokenizer(example["prompt"], padding="max_length", truncation=True, return_tensors = "pt")
+        ranges_over_batch = get_ranges_over_batch(tokenized["input_ids"], self.tokenizer.sep_token_id)
+        ranges_over_batch = sort_ranges(ranges_over_batch)
         if return_pt:
-            tokenized =  self.tokenizer(example["prompt"], padding="max_length", truncation=True, return_tensors = "pt")
+            result = {
+                "input_ids": tokenized["input_ids"],
+                "attention_mask": tokenized["attention_mask"],
+                "labels": example["labels"],
+                "ranges_over_batch": ranges_over_batch}
         else:
-            tokenized =  self.tokenizer(example["prompt"], padding="max_length", truncation=True)
-        result = {
-            "input_ids": tokenized["input_ids"],
-            "attention_mask": tokenized["attention_mask"],
-            "labels": example["labels"]}
+            result = {
+                "input_ids": tokenized["input_ids"].detach().to("cpu").tolist(),
+                "attention_mask": tokenized["attention_mask"].detach().to("cpu").tolist(),
+                "labels": example["labels"],
+                "ranges_over_batch": ranges_over_batch.detach().to("cpu").tolist()}
         return result
         
-    def forward_batch(self, batch, output_attentions = False, output_hidden_states = False):
-        return self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], output_attentions=output_attentions, output_hidden_states = output_hidden_states)
         
 class AddingEmbeddingsBertClassifierBase(ClassifierBase):
-    def __init__(self, movie_lens_loader, get_embedding_cb, model_name = "google/bert_uncased_L-2_H-128_A-2", kge_dimension = 128, batch_size = 64,model_max_length = 256, force_recompute = False) -> None:
-        super().__init__(df = movie_lens_loader.llm_df, semantic_datapoints = EMBEDDING_BASED_SEMANTIC_TOKENS, batch_size = batch_size, force_recompute = force_recompute)
+    def __init__(self, movie_lens_loader, get_embedding_cb, model_name = "google/bert_uncased_L-2_H-128_A-2", kge_dimension = 128, batch_size = 64,model_max_length = 256, false_ratio = 2.0, force_recompute = False) -> None:
         self.kge_dimension = kge_dimension
-        self.best_model_path = LLM_ADDING_BEST_MODEL_PATH.format(self.kge_dimension)
+        best_model_path = LLM_ADDING_BEST_MODEL_PATH.format(self.kge_dimension)
         self.model_name = model_name
-        self.attentions_path = ADDING_ATTENTIONS_PATH.format(self.kge_dimension)
-        self.hidden_states_path = ADDING_HIDDEN_STATES_PATH.format(self.kge_dimension)
+        attentions_path = ADDING_ATTENTIONS_PATH.format(self.kge_dimension)
+        hidden_states_path = ADDING_HIDDEN_STATES_PATH.format(self.kge_dimension)
         self.graph_embeddings_path = ADDING_GRAPH_EMBEDDINGS_PATH.format(self.kge_dimension)
-        self.tokens_path = ADDING_TOKENS_PATH.format(self.kge_dimension)
+        tokens_path = ADDING_TOKENS_PATH.format(self.kge_dimension)
+        super().__init__(df = movie_lens_loader.llm_df, semantic_datapoints = EMBEDDING_BASED_SEMANTIC_TOKENS, best_model_path = best_model_path, attentions_path = attentions_path, hidden_states_path = hidden_states_path, tokens_path = tokens_path, batch_size = batch_size, force_recompute = force_recompute)
         
         # Initialize the model and tokenizer
         if os.path.exists(self.best_model_path) and not self.force_recompute:
-            self.model = InsertEmbeddingBertForSequenceClassification.from_pretrained(self.best_model_path, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID)
+            self.model = AddingEmbeddingBertForSequenceClassification.from_pretrained(self.best_model_path, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID)
         else:
-            self.model = InsertEmbeddingBertForSequenceClassification.from_pretrained(self.model_name, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID)
+            self.model = AddingEmbeddingBertForSequenceClassification.from_pretrained(self.model_name, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID)
 
         self.tokenizer = BertTokenizer.from_pretrained(self.model_name, model_max_length=model_max_length)
-        self.train_data_collator = EmbeddingBasedDataCollator(self.tokenizer, self.device, movie_lens_loader.llm_df, movie_lens_loader.gnn_train_data, get_embedding_cb, kge_dimension=self.kge_dimension)
-        self.test_data_collator = EmbeddingBasedDataCollator(self.tokenizer, self.device, movie_lens_loader.llm_df, movie_lens_loader.gnn_test_data, get_embedding_cb, kge_dimension=self.kge_dimension)
-        self.eval_data_collator = EmbeddingBasedDataCollator(self.tokenizer, self.device, movie_lens_loader.llm_df, movie_lens_loader.gnn_val_data, get_embedding_cb, kge_dimension=self.kge_dimension)
+        self.train_data_collator = EmbeddingBasedDataCollator(self.tokenizer, self.device, movie_lens_loader.llm_df, movie_lens_loader.gnn_train_data, get_embedding_cb, kge_dimension=self.kge_dimension, false_ratio = false_ratio)
+        self.test_data_collator = EmbeddingBasedDataCollator(self.tokenizer, self.device, movie_lens_loader.llm_df, movie_lens_loader.gnn_test_data, get_embedding_cb, kge_dimension=self.kge_dimension, false_ratio = false_ratio)
+        self.eval_data_collator = EmbeddingBasedDataCollator(self.tokenizer, self.device, movie_lens_loader.llm_df, movie_lens_loader.gnn_val_data, get_embedding_cb, kge_dimension=self.kge_dimension, false_ratio = false_ratio)
 
     def _set_up_trainer(self, dataset, tokenize = False, eval_data_collator = None, epochs = 3):
         if tokenize:
@@ -751,15 +856,23 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
         )
     
     def tokenize_function(self, example, return_pt = False):
+        tokenized =  self.tokenizer(example["prompt"], padding="max_length", truncation=True, return_tensors = "pt")
+        ranges_over_batch = get_ranges_over_batch(tokenized["input_ids"], self.tokenizer.sep_token_id)
+        ranges_over_batch = sort_ranges(ranges_over_batch)
         if return_pt:
-            tokenized =  self.tokenizer(example["prompt"], padding="max_length", truncation=True, return_tensors = "pt")
+            result = {
+                "input_ids": tokenized["input_ids"],
+                "attention_mask": tokenized["attention_mask"],
+                "labels": example["labels"],
+                "ranges_over_batch": ranges_over_batch,
+                "graph_embeddings": example["graph_embeddings"]}
         else:
-            tokenized =  self.tokenizer(example["prompt"], padding="max_length", truncation=True)
-        result = {
-            "input_ids": tokenized["input_ids"],
-            "attention_mask": tokenized["attention_mask"],
-            "labels": example["labels"],
-            "graph_embeddings": example["graph_embeddings"]}
+            result = {
+                "input_ids": tokenized["input_ids"].detach().to("cpu").tolist(),
+                "attention_mask": tokenized["attention_mask"].detach().to("cpu").tolist(),
+                "labels": example["labels"],
+                "ranges_over_batch": ranges_over_batch.detach().to("cpu").tolist(),
+                "graph_embeddings": example["graph_embeddings"]}
         return result
     def plot_confusion_matrix(self, split, dataset, tokenize = False, force_recompute = False):
         if split == "test":
@@ -776,11 +889,11 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
         preds = np.argmax(self.predictions.predictions, axis=-1)
         labels = self.predictions.label_ids
         # Compute confusion matrix
-        cm = confusion_matrix(labels, preds)
+        cm = confusion_matrix(labels, preds) # type: ignore
 
         # Display confusion matrix
         disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["Negative", "Positive"])
-        disp.plot(cmap=plt.cm.Blues)
+        disp.plot(cmap=plt.cm.Blues) # type: ignore
         plt.show()
 
     def _get_data_collator(self, split):
@@ -792,6 +905,7 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
 
     def forward_dataset_and_save_outputs(self, dataset, splits = ["train", "test","val"], batch_size = 64, epochs = 3, load_fields = ["attentions", "hidden_states", "graph_embeddings"], force_recompute = False):
         if force_recompute or not os.path.exists(self.attentions_path) or not os.path.exists(self.hidden_states_path) or not os.path.exists(self.tokens_path) or not os.path.exists(self.graph_embeddings_path):
+            assert isinstance(self.model, AddingEmbeddingBertForSequenceClassification)
             self.model.eval()
             Path(ADDING_ATTENTIONS_DIR_PATH.format(self.kge_dimension)).mkdir(parents=True, exist_ok=True)
             Path(ADDING_HIDDEN_STATES_DIR_PATH.format(self.kge_dimension)).mkdir(parents=True, exist_ok=True)
@@ -814,7 +928,7 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
                         #    batch = next(iter(data_loader))
                             splits_ = [split] *  len(batch["input_ids"])
                             outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], graph_embeddings = batch["graph_embeddings"], output_hidden_states=True, output_attentions = True)
-                            ranges_over_batch = self._get_ranges_over_batch(batch["input_ids"])
+                            ranges_over_batch = outputs.ranges_over_batch
                             if "attentions" in load_fields:
                                 attentions = outputs.attentions
                                 attentions = [torch.sum(layer, dim=1) for layer in attentions]
@@ -965,25 +1079,21 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
             pcas.append(joblib.load(pca_path))
         return pcas
         
-    def forward_batch(self, batch, output_attentions = False, output_hidden_states = False):
-        return self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], graph_embeddings = batch["graph_embeddings"], output_attentions=output_attentions, output_hidden_states = output_hidden_states)
-
-
     
     
 class PromptBertClassifier(ClassifierOriginalArchitectureBase):
-    def __init__(self, movie_lens_loader, get_embedding_cb, model_name = "google/bert_uncased_L-2_H-128_A-2", kge_dimension = 4, batch_size = 64,model_max_length = 256, force_recompute = False) -> None:
+    def __init__(self, movie_lens_loader, get_embedding_cb, model_name = "google/bert_uncased_L-2_H-128_A-2", kge_dimension = 4, batch_size = 64,model_max_length = 256, false_ratio = 2.0, force_recompute = False) -> None:
         assert kge_dimension <= 16
         self.kge_dimension = kge_dimension
-        self.best_model_path = LLM_PROMPT_BEST_MODEL_PATH.format(self.kge_dimension)
-        self.attentions_path = PROMPT_ATTENTIONS_PATH.format(self.kge_dimension)
-        self.hidden_states_path = PROMPT_HIDDEN_STATES_PATH.format(self.kge_dimension)
+        best_model_path = LLM_PROMPT_BEST_MODEL_PATH.format(self.kge_dimension)
+        attentions_path = PROMPT_ATTENTIONS_PATH.format(self.kge_dimension)
+        hidden_states_path = PROMPT_HIDDEN_STATES_PATH.format(self.kge_dimension)
         self.graph_embeddings_path = PROMPT_GRAPH_EMBEDDINGS_PATH.format(self.kge_dimension)
-        self.tokens_path = PROMPT_TOKENS_PATH.format(self.kge_dimension)
-        super().__init__(df = movie_lens_loader.llm_df, semantic_datapoints=EMBEDDING_BASED_SEMANTIC_TOKENS, model_name=model_name, force_recompute=force_recompute, batch_size = batch_size,model_max_length = model_max_length)
-        self.train_data_collator = PromptEmbeddingDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_train_data, get_embedding_cb, kge_dimension = kge_dimension)
-        self.test_data_collator = PromptEmbeddingDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_test_data, get_embedding_cb, kge_dimension = kge_dimension)
-        self.eval_data_collator = PromptEmbeddingDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_val_data, get_embedding_cb, kge_dimension = kge_dimension)
+        tokens_path = PROMPT_TOKENS_PATH.format(self.kge_dimension)
+        super().__init__(df = movie_lens_loader.llm_df, semantic_datapoints=EMBEDDING_BASED_SEMANTIC_TOKENS, model_name=model_name, best_model_path = best_model_path, attentions_path = attentions_path, hidden_states_path = hidden_states_path, tokens_path = tokens_path, force_recompute=force_recompute, batch_size = batch_size,model_max_length = model_max_length)
+        self.train_data_collator = PromptEmbeddingDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_train_data, get_embedding_cb, kge_dimension = kge_dimension, false_ratio = false_ratio)
+        self.test_data_collator = PromptEmbeddingDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_test_data, get_embedding_cb, kge_dimension = kge_dimension, false_ratio = false_ratio)
+        self.eval_data_collator = PromptEmbeddingDataCollator(self.tokenizer, movie_lens_loader.llm_df, movie_lens_loader.gnn_val_data, get_embedding_cb, kge_dimension = kge_dimension, false_ratio = false_ratio)
 
     
     
@@ -1033,11 +1143,11 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
         preds = np.argmax(self.predictions.predictions, axis=-1)
         labels = self.predictions.label_ids
         # Compute confusion matrix
-        cm = confusion_matrix(labels, preds)
+        cm = confusion_matrix(labels, preds) # type: ignore
 
         # Display confusion matrix
         disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["Negative", "Positive"])
-        disp.plot(cmap=plt.cm.Blues)
+        disp.plot(cmap=plt.cm.Blues) # type: ignore
         plt.show()
 
     def plot_training_loss_and_accuracy(self, kge_dimension = 4):
@@ -1046,6 +1156,7 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
 
     def forward_dataset_and_save_outputs(self, dataset, splits = ["train", "test","val"], batch_size = 64, epochs = 3, load_fields = ["attentions", "hidden_states", "graph_embeddings"], force_recompute = False):
         if force_recompute or not os.path.exists(self.attentions_path) or not os.path.exists(self.hidden_states_path) or not os.path.exists(self.tokens_path) or not os.path.exists(self.graph_embeddings_path):
+            assert isinstance(self.model, BertForSequenceClassificationRanges)
             self.model.eval()
             Path(PROMPT_ATTENTIONS_DIR_PATH.format(self.kge_dimension)).mkdir(parents=True, exist_ok=True)
             Path(PROMPT_HIDDEN_STATES_DIR_PATH.format(self.kge_dimension)).mkdir(parents=True, exist_ok=True)
@@ -1068,7 +1179,7 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
                         #    batch = next(iter(data_loader))
                             splits_ = [split] *  len(batch["input_ids"])
                             outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], output_hidden_states=True, output_attentions = True)
-                            ranges_over_batch = self._get_ranges_over_batch(batch["input_ids"])
+                            ranges_over_batch = outputs.ranges_over_batch
                             if "attentions" in load_fields:
                                 attentions = outputs.attentions
                                 attentions = [torch.sum(layer, dim=1) for layer in attentions]
@@ -1165,7 +1276,7 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
         all_tokens[all_tokens["split"].isin(splits)]
         return all_tokens
 
-    def get_tokens_as_df(self, input_ids, all_ranges_over_batch) -> pd.DataFrame:
+    def get_tokens_as_df(self, input_ids, all_ranges_over_batch) -> Tuple[pd.DataFrame, torch.Tensor]:
         user_ids = []
         titles = []
         genres = []
@@ -1236,13 +1347,9 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
 
 
 class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
-    def __init__(self, df, model_name = "google/bert_uncased_L-2_H-128_A-2", batch_size = 64,model_max_length = 256, force_recompute = False) -> None:
-        self.best_model_path = LLM_VANILLA_BEST_MODEL_PATH
-        self.attentions_path = VANILLA_ATTENTIONS_PATH
-        self.hidden_states_path = VANILLA_HIDDEN_STATES_PATH
-        self.tokens_path = VANILLA_TOKENS_PATH
-        super().__init__(df = df, semantic_datapoints=ALL_SEMANTIC_TOKENS, model_name=model_name, batch_size = batch_size, model_max_length = model_max_length, force_recompute=force_recompute)
-        self.data_collator = VanillaEmbeddingDataCollator(self.tokenizer, df)
+    def __init__(self, df, model_name = "google/bert_uncased_L-2_H-128_A-2", batch_size = 64,model_max_length = 256, false_ratio = 2.0, force_recompute = False) -> None:
+        super().__init__(df = df, semantic_datapoints=ALL_SEMANTIC_TOKENS, model_name=model_name, best_model_path = LLM_VANILLA_BEST_MODEL_PATH, attentions_path = VANILLA_ATTENTIONS_PATH, hidden_states_path = VANILLA_HIDDEN_STATES_PATH, tokens_path = VANILLA_TOKENS_PATH, batch_size = batch_size, model_max_length = model_max_length, force_recompute=force_recompute)
+        self.data_collator = VanillaEmbeddingDataCollator(self.tokenizer, df, false_ratio = false_ratio)
     
     def _set_up_trainer(self, dataset, tokenize = False, epochs = 3):
         if tokenize:
@@ -1262,7 +1369,7 @@ class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
             eval_strategy="epoch",
             load_best_model_at_end=True
         )
-
+        assert isinstance(self.model, BertForSequenceClassificationRanges)
         # Initialize the Trainer
         return Trainer(
             model=self.model,
@@ -1270,7 +1377,7 @@ class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
             train_dataset=tokenized_dataset["train"],
             eval_dataset=tokenized_dataset["test"],
             data_collator=self.data_collator,
-            compute_metrics=self._compute_metrics,
+            compute_metrics=self._compute_metrics,  # type: ignore
         )
     
     def plot_confusion_matrix(self, split, dataset, tokenize = False, force_recompute = False):
@@ -1287,11 +1394,11 @@ class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
         preds = np.argmax(self.predictions.predictions, axis=-1)
         labels = self.predictions.label_ids
         # Compute confusion matrix
-        cm = confusion_matrix(labels, preds)
+        cm = confusion_matrix(labels, preds) # type: ignore
 
         # Display confusion matrix
         disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["Negative", "Positive"])
-        disp.plot(cmap=plt.cm.Blues)
+        disp.plot(cmap=plt.cm.Blues) # type: ignore
         plt.show()
 
     def plot_training_loss_and_accuracy(self):
@@ -1319,6 +1426,7 @@ class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
     
     def forward_dataset_and_save_outputs(self, dataset, splits = ["train", "test","val"], batch_size = 64, epochs = 3, load_fields = ["attentions", "hidden_states"], force_recompute = False):
         if force_recompute or not os.path.exists(self.attentions_path) or not os.path.exists(self.hidden_states_path) or not os.path.exists(self.tokens_path):
+            assert isinstance(self.model, BertForSequenceClassificationRanges)
             self.model.eval()
             Path(VANILLA_ATTENTIONS_DIR_PATH).mkdir(parents=True, exist_ok=True)
             Path(VANILLA_HIDDEN_STATES_DIR_PATH).mkdir(parents=True, exist_ok=True)
@@ -1339,7 +1447,7 @@ class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
                         #    batch = next(iter(data_loader))
                             splits_ = [split] *  len(batch["input_ids"])
                             outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], output_hidden_states=True, output_attentions = True)
-                            ranges_over_batch = self._get_ranges_over_batch(batch["input_ids"])
+                            ranges_over_batch = outputs.ranges_over_batch
                             if "attentions" in load_fields:
                                 attentions = outputs.attentions
                                 attentions = [torch.sum(layer, dim=1) for layer in attentions]

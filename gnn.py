@@ -2,7 +2,7 @@ import os
 import joblib
 from typing import Optional, Tuple
 
-from pandas import DataFrame
+from pandas import DataFrame, Series
 import torch
 from torch import Tensor
 import torch.nn.functional as F
@@ -223,15 +223,17 @@ class GNNTrainer():
         For that a subgraph of the neighbohood is generated and then applied to the GNN. Afterwards only the embeddings of
         given user and movie nodes are returned.
         '''
-        sampled_data = self.__link_neighbor_sampling(data, user_id, movie_id).to(self.device)
+        sampled_data = self.__link_neighbor_sampling(data, user_id, movie_id)
+        assert isinstance(sampled_data, HeteroData)
+        sampled_data.to(self.device) # type: ignore
         embeddings = self.model.forward_without_classifier(sampled_data)
         user_node_id_index = (sampled_data['user'].n_id == user_id).nonzero(as_tuple=True)[0].item()
         movie_node_id_index = (sampled_data['movie'].n_id == movie_id).nonzero(as_tuple=True)[0].item()
-        user_embedding = embeddings["user"][user_node_id_index]
-        movie_embedding = embeddings["movie"][movie_node_id_index]
+        user_embedding = embeddings["user"][user_node_id_index] # type: ignore
+        movie_embedding = embeddings["movie"][movie_node_id_index] # type: ignore
         return user_embedding, movie_embedding
     
-    def __get_saved_embeddings(self, df) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __get_saved_embeddings(self, df) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         user_path = f"{GNN_PATH}/user_embedding_{self.kge_dimension}.pt"
         if not os.path.exists(user_path):
             return None, None
@@ -245,17 +247,6 @@ class GNNTrainer():
         if len(movie_embeddings) < len(df):
             return None, None
         return user_embeddings, movie_embeddings
-        
-        if not f"user_embedding_{self.kge_dimension}" in df.columns:
-            return False
-        if not ((df[f"user_embedding_{self.kge_dimension}"] != "") | (df[f"user_embedding_{self.kge_dimension}"].notna())).all():
-            return False
-        if not f"movie_embedding_{self.kge_dimension}" in df.columns:
-            return False
-        if not ((df[f"movie_embedding_{self.kge_dimension}"] != "") | (df[f"movie_embedding_{self.kge_dimension}"].notna())).all():
-            return False
-
-        return True
 
     
     def get_embeddings(self, movie_lens_loader: MovieLensLoader, force_recompute: bool = False):
@@ -269,7 +260,7 @@ class GNNTrainer():
                                     Whether to force reloading and recomputing datasets and values.
                                     Default False -> Loads and computes only if missing.
         '''
-        def __get_embedding(row, movie_lens_loader: MovieLensLoader):
+        def __get_embedding(row, movie_lens_loader: MovieLensLoader) -> Series:
             split = row["split"]
             data = movie_lens_loader.gnn_train_data if split == "train" else movie_lens_loader.gnn_val_data if split == "val" else movie_lens_loader.gnn_test_data if split == "test" else movie_lens_loader.gnn_train_data
             user_id = row["mappedUserId"]

@@ -1,6 +1,6 @@
 import os
-from typing import List, Tuple, Callable, Optional, Dict, Union
-import ast
+from typing import List, Tuple, Callable, Optional, Dict, Union, Set
+import shutil
 
 import torch
 from torch_geometric.data import download_url, extract_zip
@@ -9,12 +9,13 @@ import torch_geometric.transforms as T
 import pandas as pd
 import datasets
 from datasets import Dataset, DatasetDict
+import numpy as np
 
 def row_to_adding_embedding_datapoint(row, sep_token, pad_token):
     user_id = row["mappedUserId"]
     title = row["title"]
     genres = row["genres"]
-    prompt = f"user: {user_id}{sep_token}title: {title}{sep_token}genres: {genres}{sep_token}{pad_token}{sep_token}{pad_token}"
+    prompt = f"{user_id}{sep_token}{title}{sep_token}{genres}{sep_token}{pad_token}{sep_token}{pad_token}"
     return prompt
 
 def transform_embeddings_to_string(embeddings: torch.Tensor, float_numbers: int = 16):
@@ -26,14 +27,14 @@ def row_to_prompt_datapoint(row, kge_dimension, sep_token):
     genres = row["genres"]
     user_embedding = row[f"user_embedding_{kge_dimension}"]
     movie_embedding = row[f"movie_embedding_{kge_dimension}"]
-    prompt = f"user: {user_id}{sep_token}title: {title}{sep_token}genres: {genres}{sep_token}user embedding: {transform_embeddings_to_string(user_embedding)}{sep_token}movie embedding: {transform_embeddings_to_string(movie_embedding)}"
+    prompt = f"{user_id}{sep_token}{title}{sep_token}{genres}{sep_token}{transform_embeddings_to_string(user_embedding)}{sep_token}{transform_embeddings_to_string(movie_embedding)}"
     return prompt
 
 def row_to_vanilla_datapoint(row, sep_token):
     user_id = row["mappedUserId"]
     title = row["title"]
     genres = row["genres"]
-    prompt = f"user: {user_id}{sep_token}title: {title}{sep_token}genres: {genres}"
+    prompt = f"{user_id}{sep_token}{title}{sep_token}{genres}"
     return prompt
 
 ROOT = "./data"                                                     #The root path where models and datasets are saved at.
@@ -59,6 +60,9 @@ LLM_VANILLA_BEST_MODEL_PATH = f"{LLM_VANILLA_TRAINING_PATH}/best"   #The path wh
 LLM_PROMPT_DATASET_PATH = f"{LLM_MODEL_DIMENSION_PATH}/prompt_dataset"                      #The path where the huggingface prompt dataset (tokenized) is saved at.
 LLM_ADDING_DATASET_PATH = f"{LLM_MODEL_DIMENSION_PATH}/adding_dataset"                      #The path where the huggingface prompt dataset (tokenized) is saved at.
 LLM_VANILLA_DATASET_PATH = f"{LLM_PATH}/vanilla_dataset"                    #The path where the huggingface vanilla dataset (tokenized) is saved at.
+LLM_PROMPT_FIXED_DATASET_PATH = f"{LLM_MODEL_DIMENSION_PATH}/prompt_fixed_dataset"                      #The path where the huggingface prompt dataset (tokenized) is saved at.
+LLM_ADDING_FIXED_DATASET_PATH = f"{LLM_MODEL_DIMENSION_PATH}/adding_fixed_dataset"                      #The path where the huggingface prompt dataset (tokenized) is saved at.
+LLM_VANILLA_FIXED_DATASET_PATH = f"{LLM_PATH}/vanilla_fixed_dataset"                    #The path where the huggingface vanilla dataset (tokenized) is saved at.
 
 PCA_PATH = f"{ROOT}/pca"
 
@@ -109,7 +113,7 @@ class MovieLensLoader():
         '''Returns True, if GNN_TRAIN_DATASET_PATH, GNN_TEST_DATASET_PATH, GNN_VAL_DATASET_PATH, LLM_DATASET_PATH are files.'''
         return os.path.isfile(GNN_TRAIN_DATASET_PATH) and os.path.isfile(GNN_TEST_DATASET_PATH) and os.path.isfile(GNN_VAL_DATASET_PATH) and os.path.isfile(LLM_DATASET_PATH)
 
-    def __create_dirs(self, kge_dimensions: int) -> None:
+    def __create_dirs(self, kge_dimensions: List[int]) -> None:
         '''
         Create dir system if not exist
         '''
@@ -130,7 +134,7 @@ class MovieLensLoader():
 
 
 
-    def __download_dataset(self) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    def __download_dataset(self) -> Tuple[pd.DataFrame, pd.DataFrame, torch.Tensor, pd.DataFrame]:
         '''Downloads the https://files.grouplens.org/datasets/movielens/ml-latest-small.zip dataset and
         extracts the content into ROOT//ml-latest-small/'''
         movies_path = f'{ROOT}/ml-latest-small/movies.csv'
@@ -179,10 +183,12 @@ class MovieLensLoader():
         # following PyG semantics:
         self.edge_index_user_to_movie = torch.stack([ratings_user_id, ratings_movie_id], dim=0)
         assert self.edge_index_user_to_movie.size() == (2, 100836)
-        return ratings_df.merge(self.unique_user_id, on="userId").merge(self.unique_llm_movie_id, on="movieId")[["mappedUserId", "mappedMovieId", "title", "genres"]]
+        df = ratings_df.merge(self.unique_user_id, on="userId").merge(self.unique_llm_movie_id, on="movieId")[["mappedUserId", "mappedMovieId", "title", "genres"]]
+        df["labels"] = 1
+        return df
 
 
-    def __generate_hetero_data(self, movies_df:pd.DataFrame, movie_feat:pd.DataFrame) -> HeteroData:
+    def __generate_hetero_data(self, movies_df:pd.DataFrame, movie_feat:torch.Tensor) -> HeteroData:
         '''(from Tutorial)
             With this, we are ready to initialize our `HeteroData` object and pass the necessary information to it.
             Note that we also pass in a `node_id` vector to each node type in order to reconstruct the original node indices from sampled subgraphs.
@@ -329,13 +335,13 @@ class MovieLensLoader():
         })
 
 
-    def generate_prompt_embedding_dataset(self, tokenize_function:Callable = None, kge_dimension:int = 4, sep_token:str = "[SEP]", force_recompute: bool = False) -> DatasetDict:
+    def generate_prompt_embedding_dataset(self, tokenize_function:Optional[Callable] = None, kge_dimension:int = 4, sep_token:str = "[SEP]", suffix = "", force_recompute: bool = False) -> Union[DatasetDict, Dataset]:
         '''
         Generates the dataset for training the prompt model,
         by passing the tokenizer.tokenize function and
         the embedding dimension of the target prompt model.
         '''
-        llm_prompt_dataset_path= LLM_PROMPT_DATASET_PATH.format(kge_dimension)
+        llm_prompt_dataset_path= LLM_PROMPT_DATASET_PATH.format(kge_dimension) + suffix
         if os.path.exists(llm_prompt_dataset_path) and not force_recompute:
             dataset = datasets.load_from_disk(llm_prompt_dataset_path)
         else:
@@ -344,12 +350,12 @@ class MovieLensLoader():
             assert self.llm_df[f"user_embedding_{kge_dimension}"].notna().all()
             assert self.llm_df[f"movie_embedding_{kge_dimension}"].notna().all()
             llm_df = self.llm_df.copy(deep = True)
-            llm_df["labels"] = 1
             llm_df["prompt"] = self.llm_df.apply(lambda row: row_to_prompt_datapoint(row, kge_dimension, sep_token=sep_token), axis=1)
             dataset = self.__dataset_from_df(llm_df)
             if tokenize_function:
                 dataset = dataset.map(tokenize_function, batched = True)
             dataset.save_to_disk(llm_prompt_dataset_path)
+        
         return dataset
     
     def __generate_embeddings(self, row, kge_dimension) -> torch.Tensor:
@@ -358,13 +364,13 @@ class MovieLensLoader():
         embeddings = torch.tensor([user_embeddings, movie_embeddings])
         return embeddings
     
-    def generate_adding_embedding_dataset(self, sep_token, pad_token, tokenize_function:Callable = None, kge_dimension:int = 4, force_recompute: bool = False) -> DatasetDict:
+    def generate_adding_embedding_dataset(self, sep_token, pad_token, tokenize_function:Optional[Callable] = None, kge_dimension:int = 4, suffix = "", force_recompute: bool = False) -> Union[DatasetDict, Dataset]:
         '''
         Generates the dataset for training the adding model,
         by passing the tokenizer.tokenize function and
         the embedding dimension of the target adding model.
         '''
-        llm_adding_dataset_path= LLM_ADDING_DATASET_PATH.format(kge_dimension)
+        llm_adding_dataset_path= LLM_ADDING_DATASET_PATH.format(kge_dimension) + suffix
         if os.path.exists(llm_adding_dataset_path) and not force_recompute:
             dataset = datasets.load_from_disk(llm_adding_dataset_path)
         else:
@@ -373,9 +379,8 @@ class MovieLensLoader():
             assert self.llm_df[f"user_embedding_{kge_dimension}"].notna().all()
             assert self.llm_df[f"movie_embedding_{kge_dimension}"].notna().all()
             llm_df = self.llm_df.copy(deep = True)
-            llm_df["labels"] = 1
             llm_df["prompt"] = llm_df.apply(lambda row: row_to_adding_embedding_datapoint(row, sep_token, pad_token), axis=1)
-            llm_df["graph_embeddings"] = llm_df.apply(lambda row: self.__generate_embeddings(row, kge_dimension), axis = 1)
+            llm_df["graph_embeddings"] = llm_df.apply(lambda row: self.__generate_embeddings(row, kge_dimension), axis = 1) # type: ignore
             llm_df["graph_embeddings"] = llm_df["graph_embeddings"].apply(lambda embeddings: embeddings.detach().to("cpu").tolist())
             dataset = self.__dataset_from_df(llm_df)
             if tokenize_function:
@@ -383,22 +388,52 @@ class MovieLensLoader():
             dataset.save_to_disk(llm_adding_dataset_path)
         return dataset
     
-    def generate_vanilla_dataset(self, tokenize_function: Callable = None, sep_token = "[SEP]", force_recompute: bool = False) -> DatasetDict:
+    def generate_vanilla_dataset(self, tokenize_function: Optional[Callable] = None, sep_token = "[SEP]", suffix = "", force_recompute: bool = False) -> Union[DatasetDict, Dataset]:
         '''
         Generates the dataset for training the vanilla model,
         by passing the tokenizer.tokenize function.
         '''
         if os.path.exists(LLM_VANILLA_DATASET_PATH) and not force_recompute:
-            dataset = datasets.load_from_disk(LLM_VANILLA_DATASET_PATH)
+            dataset = datasets.load_from_disk(LLM_VANILLA_DATASET_PATH + suffix)
         else:
             llm_df = self.llm_df.copy(deep = True)
-            llm_df["labels"] = 1
             llm_df["prompt"] = self.llm_df.apply(lambda row: row_to_vanilla_datapoint(row, sep_token=sep_token), axis=1)
             dataset = self.__dataset_from_df(llm_df)
             if tokenize_function:
                 dataset = dataset.map(tokenize_function, batched = True)
-            dataset.save_to_disk(LLM_VANILLA_DATASET_PATH)
+            dataset.save_to_disk(LLM_VANILLA_DATASET_PATH + suffix)
         return dataset
+    
+    def add_false_edges(self, false_ratio: float = 2.0, sep_token = "[SEP]"):
+        if 0 not in self.llm_df["labels"].unique():
+            def _find_non_existing_user_movie(df: pd.DataFrame, already_added_pairs: Set):
+                while True:
+                    user_id = np.random.choice(df["mappedUserId"].unique())
+                    movie_id = np.random.choice(df["mappedMovieId"].unique())
+                    if not ((df["mappedUserId"] == user_id) & (df["mappedMovieId"] == movie_id)).any() and (user_id, movie_id) not in already_added_pairs:
+                        return user_id, movie_id
+            
+            df = self.llm_df.copy()
+            df["labels"] = 1
+            already_added_pairs = set()
+            new_rows = []
+            split_proportions = [int(len(df[df["split"] == "train"]) * false_ratio), int(len(df[df["split"] == "test"]) * false_ratio), int(len(df[df["split"] == "val"]) * false_ratio)]
+            for split_proportion, split in zip(split_proportions, ["train", "test", "val"]):
+                print(f"Adding {split_proportion} false edges for {split}.")
+                for idx in range(split_proportion):
+                    user_id, movie_id = _find_non_existing_user_movie(df, already_added_pairs)
+                    movie_row = df[df["mappedMovieId"] == movie_id].sample(1).iloc[0]
+                    movie_row["mappedUserId"] = user_id
+                    movie_row["labels"] = 0
+                    movie_row["split"] = split
+                    already_added_pairs.add((user_id, movie_id))
+                    new_rows.append(movie_row)                        
+            df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
+            df["prompt"] = df.apply(lambda row: row_to_vanilla_datapoint(row, sep_token=sep_token), axis=1)
+            self.replace_llm_df(df)
+        return self.llm_df
+                
+
     
     def sample_datapoints(self, existing, vanilla_classifier, prompt_classifier, embedding_classifier,prompt_getting_embedding_cb, embedding_getting_embedding_cb, singular_title = False, singular_user = False, split: str = "val", sep_token = "[SEP]", pad_token = "[PAD]"):
         df = self.llm_df[self.llm_df["split"] == split]
@@ -436,147 +471,6 @@ class MovieLensLoader():
         graph_embeddings = torch.stack((random_row[f"user_embedding_{embedding_classifier.kge_dimension}"], random_row[f"movie_embedding_{embedding_classifier.kge_dimension}"]))
         result_embedding = {"prompt": prompt_embedding, "labels": labels, "graph_embeddings": graph_embeddings.unsqueeze(dim = 0)}
         return vanilla_classifier.tokenize_function(result_vanilla, return_pt = True), prompt_classifier.tokenize_function(result_prompt, return_pt = True), embedding_classifier.tokenize_function(result_embedding, return_pt = True), random_row
-
-
-
-    def sample_prompt_datapoint(self, get_embedding_cb: Callable, split: str = "val", existing: bool = True, tokenize_function: Optional[Callable] = None, sep_token = "[SEP]", kge_dimension: int = 4)-> Dict[str, Union[str, int, torch.Tensor]]:
-        '''
-        Samples one datapoint of the prompt model dataset.
-        Parameters
-        __________
-        get_embedding_cb:           Callable
-                                    The callback function from the gnn_trainer that takes user and movie id and generates its embedding.
-        split:                      str
-                                    The split of the original dataset where to look for existing edges
-                                    Default val
-        existing:                   bool
-                                    Flag if the sample edge is supposed to exist in the original dataset.
-                                    Default True
-        tokenize_function:          Optional[Callable]
-                                    The callback function from the EncoderOnlyClassifier, that allows to encode the prompt to its input ids, if given
-        kge_dimension:  int
-                                    The kge_dimension of the gnn the sample is taking its embeddings from.
-        Returns
-        __________
-        data_sample:                 Dict[str, Union[str, int, torch.Tensor]]
-                                    A sample in the form {"prompt": <prompt>, "labels": <label>} if no tokenize_function was passed else
-                                    {"input_ids": <input_ids>, "attention_mask": <attention_mask>, "labels": <label>}                         
-        '''
-        df = self.llm_df[self.llm_df["split"] == split]
-        if existing:
-            random_row = df.sample(1).iloc[0]
-        else:
-            assert get_embedding_cb
-            dataset = self.gnn_train_data if split == "train" else self.gnn_val_data if split == "val" else self.gnn_test_data if split == "test" else self.data
-            existing = True
-            while existing:
-                user_id = df["mappedUserId"].sample(1).iloc[0]
-                random_row = df.sample(1).iloc[0]
-                movie_id = random_row["mappedMovieId"]
-                existing = ((self.llm_df["mappedMovieId"] == movie_id) & (self.llm_df["mappedUserId"] == user_id)).any()
-                if not existing:
-                    random_row = random_row.copy(deep= True)
-                    random_row["mappedUserId"] = user_id
-                    user_embedding, movie_embedding = get_embedding_cb(dataset, user_id, movie_id)
-                    random_row["user_embedding"] = user_embedding
-                    random_row["movie_embedding"] = movie_embedding
-        prompt = row_to_prompt_datapoint(random_row, kge_dimension, sep_token=sep_token)
-        labels = 1 if existing else 0
-        result = {"prompt": prompt, "labels": labels}
-        if tokenize_function:
-            return tokenize_function(result, return_pt = True)
-        else:
-            return result
-        
-    def sample_addin_datapoint(self, get_embedding_cb: Callable, sep_token: str, pad_token: str, kge_dimension: int = 4, split: str = "val", existing: bool = True, tokenize_function: Optional[Callable] = None)-> Dict[str, Union[str, int, torch.Tensor]]:
-        '''
-        Samples one datapoint of the addin model dataset.
-        Parameters
-        __________
-        get_embedding_cb:           Callable
-                                    The callback function from the gnn_trainer that takes user and movie id and generates its embedding.
-        split:                      str
-                                    The split of the original dataset where to look for existing edges
-                                    Default val
-        existing:                   bool
-                                    Flag if the sample edge is supposed to exist in the original dataset.
-                                    Default True
-        tokenize_function:          Optional[Callable]
-                                    The callback function from the EncoderOnlyClassifier, that allows to encode the addin to its input ids, if given
-        kge_dimension:  int
-                                    The kge_dimension of the gnn the sample is taking its embeddings from.
-        Returns
-        __________
-        data_sample:                 Dict[str, Union[str, int, torch.Tensor]]
-                                    A sample in the form {"prompt": <prompt>, "labels": <label>} if no tokenize_function was passed else
-                                    {"input_ids": <input_ids>, "attention_mask": <attention_mask>, "labels": <label>}                         
-        '''
-        df = self.llm_df[self.llm_df["split"] == split]
-        if existing:
-            random_row = df.sample(1).iloc[0]
-        else:
-            assert get_embedding_cb
-            dataset = self.gnn_train_data if split == "train" else self.gnn_val_data if split == "val" else self.gnn_test_data if split == "test" else self.data
-            existing = True
-            while existing:
-                user_id = df["mappedUserId"].sample(1).iloc[0]
-                random_row = df.sample(1).iloc[0]
-                movie_id = random_row["mappedMovieId"]
-                existing = ((self.llm_df["mappedMovieId"] == movie_id) & (self.llm_df["mappedUserId"] == user_id)).any()
-                if not existing:
-                    random_row = random_row.copy(deep= True)
-                    random_row["mappedUserId"] = user_id
-                    user_embedding, movie_embedding = get_embedding_cb(dataset, user_id, movie_id)
-                    random_row[f"user_embedding_{kge_dimension}"] = user_embedding
-                    random_row[f"movie_embedding_{kge_dimension}"] = movie_embedding
-        prompt = row_to_adding_embedding_datapoint(random_row, sep_token, pad_token)
-        labels = 1 if existing else 0
-        result = {"prompt": prompt, "labels": labels}
-        embeddings = str([random_row[f"user_embedding_{kge_dimension}"], random_row[f"movie_embedding_{kge_dimension}"]])
-        if tokenize_function:
-            return tokenize_function(result, return_pt = True), embeddings
-        else:
-            return result, embeddings
-        
-    def sample_vanilla_datapoint(self, split = "val", existing = True, tokenize_function = None, sep_token = "[SEP]"):
-        '''
-        Samples one datapoint of the vanilla model dataset.
-        Parameters
-        __________
-        split:                      str
-                                    The split of the original dataset where to look for existing edges
-                                    Default val
-        existing:                   bool
-                                    Flag if the sample edge is supposed to exist in the original dataset.
-                                    Default True
-        tokenize_function:          Optional[Callable]
-                                    The callback function from the EncoderOnlyClassifier, that allows to encode the prompt to its input ids, if given
-        Returns
-        __________
-        data_sample:                 Dict[str, Union[str, int, torch.Tensor]]
-                                    A sample in the form {"prompt": <prompt>, "labels": <label>} if no tokenize_function was passed else
-                                    {"input_ids": <input_ids>, "attention_mask": <attention_mask>, "labels": <label>}                         
-        '''
-        df = self.llm_df[self.llm_df["split"] == split]
-        if existing:
-            random_row = df.sample(1).iloc[0]
-        else:
-            existing = True
-            while existing:
-                user_id = df["mappedUserId"].sample(1).iloc[0]
-                random_row = df.sample(1).iloc[0]
-                movie_id = random_row["mappedMovieId"]
-                existing = ((self.llm_df["mappedMovieId"] == movie_id) & (self.llm_df["mappedUserId"] == user_id)).any()
-                if not existing:
-                    random_row = random_row.copy(deep= True)
-                    random_row["mappedUserId"] = user_id
-        prompt = row_to_vanilla_datapoint(random_row, sep_token=sep_token)
-        labels = 1 if existing else 0
-        result = {"prompt": prompt, "labels": labels}
-        if tokenize_function:
-            return tokenize_function(result, return_pt = True)
-        else:
-            return result
         
     def replace_llm_df(self, df: pd.DataFrame):
         '''
