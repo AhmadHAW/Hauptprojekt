@@ -110,8 +110,8 @@ ADDING_SUB_TOKENS_PATH = f"{ADDING_SUB_TOKENS_DIR_PATH}{TOKENS_ENDING}"
 
 
 
-ALL_SEMANTIC_TOKENS = ["user_id", "title", "genres"]
-EMBEDDING_BASED_SEMANTIC_TOKENS = ALL_SEMANTIC_TOKENS + ["user embedding", "movie embedding"]
+ALL_SEMANTIC_TOKENS = ["cls", "user_id", "sep1", "title", "sep2", "genres", "sep3"]
+EMBEDDING_BASED_SEMANTIC_TOKENS = ALL_SEMANTIC_TOKENS + ["user embedding", "sep4", "movie embedding", "sep5"]
 
 
 def mean_over_ranges(tens: torch.Tensor, starts: torch.Tensor, ends: torch.Tensor) -> torch.Tensor:
@@ -168,10 +168,15 @@ def avg_over_last_hidden_states(all_ranges_over_batch, last_hidden_states):
     return torch.stack(averaged_hidden_states)
 
 def sort_ranges(ranges_over_batch):
-    # Extract the second element (end of the current ranges)
+    # Extract the second element (end of the current ranges excluded the starting cps token)
     end_elements = ranges_over_batch[:, :, 1]
     # Create the new ranges by adding 1 to the end elements
     new_ranges = torch.stack([end_elements, end_elements + 1], dim=-1)
+    #add the cls positions to it
+    cls_positions = torch.tensor([0, 1])
+    cls_positions = cls_positions.unsqueeze(0).unsqueeze(0)  # Shape (1, 1, 2)
+    cls_positions = cls_positions.expand(new_ranges.size(0), 1, -1)  # Shape (batch_size, 1, 2)
+    new_ranges = torch.cat((new_ranges, cls_positions), dim=1)
     # Concatenate the original ranges with the new ranges
     ranges_over_batch = torch.cat((ranges_over_batch, new_ranges), dim=1)
     # Step 1: Extract the last value of dimension 2
@@ -206,16 +211,14 @@ def get_ranges_over_batch(input_ids, sep_token_id):
     column_indices = torch.cat([torch.arange(n) for n in num_trues_per_row])
 
     ranges_over_batch[row_indices, column_indices] = cols
-    ranges_over_batch = torch.stack([ranges_over_batch[:, :-1], ranges_over_batch[:, 1:]], dim=2)
+    ranges_over_batch = torch.stack([ranges_over_batch[:, :-1]+1, ranges_over_batch[:, 1:]], dim=2)
     # Create a tensor of zeros to represent the starting points
-    start_points = torch.zeros(ranges_over_batch.size(0), 1, 2, dtype=ranges_over_batch.dtype)
+    second_points = torch.ones(ranges_over_batch.size(0), 1, 2, dtype=ranges_over_batch.dtype)
 
     # Set the second column to be the first element of the first range
-    start_points[:, 0, 1] = ranges_over_batch[:, 0, 0]
-
+    second_points[:, 0, 1] = ranges_over_batch[:, 0, 0]-1
     # Concatenate the start_points tensor with the original ranges_over_batch tensor
-    ranges_over_batch = torch.cat((start_points, ranges_over_batch), dim=1)
-    ranges_over_batch[:,:,0] += 1
+    ranges_over_batch = torch.cat((second_points, ranges_over_batch), dim=1)
     return ranges_over_batch
 
 class DataCollatorBase(DataCollatorForLanguageModeling, ABC):
@@ -927,8 +930,8 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
                         #if True:
                         #    batch = next(iter(data_loader))
                             splits_ = [split] *  len(batch["input_ids"])
-                            outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], graph_embeddings = batch["graph_embeddings"], output_hidden_states=True, output_attentions = True)
-                            ranges_over_batch = outputs.ranges_over_batch
+                            outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], graph_embeddings = batch["graph_embeddings"], ranges_over_batch = batch["ranges_over_batch"], output_hidden_states="hidde_states" in load_fields, output_attentions = "attentions" in load_fields)
+                            ranges_over_batch = batch["ranges_over_batch"]
                             if "attentions" in load_fields:
                                 attentions = outputs.attentions
                                 attentions = [torch.sum(layer, dim=1) for layer in attentions]
@@ -941,7 +944,7 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
                                 hidden_states = avg_over_last_hidden_states(ranges_over_batch, hidden_states).permute((1,0,2))
                                 last_hidden_states.append(hidden_states.numpy())
                                 del hidden_states
-                            tokens = self.get_tokens_as_df(batch["input_ids"], ranges_over_batch)
+                            tokens = self.get_tokens_as_df(batch["input_ids"], ranges_over_batch[:, [1,3,5]])
                             if "graph_embeddings" in load_fields:
                                 all_graph_embeddings.append(batch["graph_embeddings"].numpy())
                             tokens["labels"] = batch["labels"].tolist()
@@ -1047,13 +1050,8 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
                                     #                        -                     -    positions were padded
             #result = result.unsqueeze(dim = 2).repeat(1,1, input_ids.shape[2])
             gather = input_ids.gather(dim = 1, index = result)
-            decoded = self.tokenizer.batch_decode(gather, skip_special_tokens = True)
-            if pos == 0:
-                semantic_tokens.extend([decode[len("user : "):] for decode in decoded])
-            if pos == 1:
-                semantic_tokens.extend([decode[len("title : "):] for decode in decoded])
-            if pos == 2:
-                semantic_tokens.extend([decode[len("genres : "):] for decode in decoded])
+            decoded = self.tokenizer.batch_decode(gather, skip_special_tokens = False)
+            semantic_tokens.extend([decode.replace(" [CLS]", "") for decode in decoded])
         all_semantic_tokens[0] = [int(id) for id in all_semantic_tokens[0]]
         all_semantic_tokens[2] = [ast.literal_eval(string_list) for string_list in all_semantic_tokens[2]]
         data = {"user_id": all_semantic_tokens[0], "title": all_semantic_tokens[1], "genres": all_semantic_tokens[2]}
@@ -1178,8 +1176,8 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
                         #if True:
                         #    batch = next(iter(data_loader))
                             splits_ = [split] *  len(batch["input_ids"])
-                            outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], output_hidden_states=True, output_attentions = True)
-                            ranges_over_batch = outputs.ranges_over_batch
+                            outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], ranges_over_batch = batch["ranges_over_batch"], output_hidden_states="hidde_states" in load_fields, output_attentions = "attentions" in load_fields)
+                            ranges_over_batch = batch["ranges_over_batch"]
                             if "attentions" in load_fields:
                                 attentions = outputs.attentions
                                 attentions = [torch.sum(layer, dim=1) for layer in attentions]
@@ -1192,7 +1190,7 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
                                 hidden_states = avg_over_last_hidden_states(ranges_over_batch, hidden_states).permute((1,0,2))
                                 last_hidden_states.append(hidden_states.numpy())
                                 del hidden_states
-                            tokens, graph_embeddings = self.get_tokens_as_df(batch["input_ids"], ranges_over_batch)
+                            tokens, graph_embeddings = self.get_tokens_as_df(batch["input_ids"], ranges_over_batch[:,[1,3,5,7,9]])
                             if "graph_embeddings" in load_fields:
                                 all_graph_embeddings.append(graph_embeddings.numpy())
                             del graph_embeddings
@@ -1280,9 +1278,7 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
         user_ids = []
         titles = []
         genres = []
-        user_embeddings = []
-        movie_embeddings = []
-        all_semantic_tokens = [user_ids, titles, genres, user_embeddings, movie_embeddings]
+        all_semantic_tokens = [user_ids, titles, genres]
         ends = all_ranges_over_batch[:,:,1]
         starts = all_ranges_over_batch[:,:,0]
         # input: # ends: torch.tensor([2, 5, 6]) starts: tensor([0, 2, 4])
@@ -1300,17 +1296,8 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
                                     #                        -                     -    positions were padded
             #result = result.unsqueeze(dim = 2).repeat(1,1, input_ids.shape[2])
             gather = input_ids.gather(dim = 1, index = result)
-            decoded = self.tokenizer.batch_decode(gather, skip_special_tokens = True)
-            if pos == 0:
-                semantic_tokens.extend([decode[len("user : "):] for decode in decoded])
-            if pos == 1:
-                semantic_tokens.extend([decode[len("title : "):] for decode in decoded])
-            if pos == 2:
-                semantic_tokens.extend([decode[len("genres : "):] for decode in decoded])
-            if pos == 3:
-                semantic_tokens.extend([decode[len("user_embeddings :"):] for decode in decoded])
-            if pos == 4:
-                semantic_tokens.extend([decode[len("movie_embeddings :"):] for decode in decoded])
+            decoded = self.tokenizer.batch_decode(gather, skip_special_tokens = False)
+            semantic_tokens.extend([decode.replace(" [CLS]", "") for decode in decoded])
         all_semantic_tokens[0] = [int(id) for id in all_semantic_tokens[0]]
         all_semantic_tokens[2] = [ast.literal_eval(string_list) for string_list in all_semantic_tokens[2]]
 
@@ -1433,6 +1420,8 @@ class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
             Path(VANILLA_INPUT_IDS_DIR_PATH).mkdir(parents=True, exist_ok=True)
             Path(VANILLA_RANGES_DIR_PATH).mkdir(parents=True, exist_ok=True)
             Path(VANILLA_SUB_TOKENS_DIR_PATH).mkdir(parents=True, exist_ok=True)
+            add_hidden_states = "hidden_states" in load_fields
+            add_attentions = "attentions" in load_fields
             with torch.no_grad():
                 for split in splits:
                     data_collator = self._get_data_collator(split)
@@ -1445,9 +1434,10 @@ class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
                         for idx, batch in enumerate(data_loader):
                         #if True:
                         #    batch = next(iter(data_loader))
-                            splits_ = [split] *  len(batch["input_ids"])
-                            outputs = self.model(input_ids = batch["input_ids"], attention_mask = batch["attention_mask"], output_hidden_states=True, output_attentions = True)
-                            ranges_over_batch = outputs.ranges_over_batch
+                            input_ids = batch["input_ids"]
+                            splits_ = [split] *  len(input_ids)
+                            outputs = self.model(input_ids = input_ids, attention_mask = batch["attention_mask"], ranges_over_batch = batch["ranges_over_batch"], output_hidden_states=add_hidden_states, output_attentions = add_attentions)
+                            ranges_over_batch = batch["ranges_over_batch"]
                             if "attentions" in load_fields:
                                 attentions = outputs.attentions
                                 attentions = [torch.sum(layer, dim=1) for layer in attentions]
@@ -1460,7 +1450,7 @@ class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
                                 hidden_states = avg_over_last_hidden_states(ranges_over_batch, hidden_states).permute((1,0,2))
                                 last_hidden_states.append(hidden_states.numpy())
                                 del hidden_states
-                            tokens = self.get_tokens_as_df(batch["input_ids"], ranges_over_batch)
+                            tokens = self.get_tokens_as_df(input_ids, ranges_over_batch[:, [1,3,5]])
                             tokens["labels"] = batch["labels"].tolist()
                             tokens["split"] = splits_
                             all_tokens.append(tokens)
@@ -1545,13 +1535,8 @@ class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
                                     #                        -                     -    positions were padded
             #result = result.unsqueeze(dim = 2).repeat(1,1, input_ids.shape[2])
             gather = input_ids.gather(dim = 1, index = result)
-            decoded = self.tokenizer.batch_decode(gather, skip_special_tokens = True)
-            if pos == 0:
-                semantic_tokens.extend([decode[len("user : "):] for decode in decoded])
-            if pos == 1:
-                semantic_tokens.extend([decode[len("title : "):] for decode in decoded])
-            if pos == 2:
-                semantic_tokens.extend([decode[len("genres : "):] for decode in decoded])
+            decoded = self.tokenizer.batch_decode(gather, skip_special_tokens = False)
+            semantic_tokens.extend([decode.replace(" [CLS]", "") for decode in decoded])
         all_semantic_tokens[0] = [int(id) for id in all_semantic_tokens[0]]
         all_semantic_tokens[2] = [ast.literal_eval(string_list) for string_list in all_semantic_tokens[2]]
         data = {"user_id": all_semantic_tokens[0], "title": all_semantic_tokens[1], "genres": all_semantic_tokens[2]}

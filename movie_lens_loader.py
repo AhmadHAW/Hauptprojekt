@@ -393,15 +393,16 @@ class MovieLensLoader():
         Generates the dataset for training the vanilla model,
         by passing the tokenizer.tokenize function.
         '''
-        if os.path.exists(LLM_VANILLA_DATASET_PATH) and not force_recompute:
-            dataset = datasets.load_from_disk(LLM_VANILLA_DATASET_PATH + suffix)
+        filepath = LLM_VANILLA_DATASET_PATH + suffix
+        if os.path.exists(filepath) and not force_recompute:
+            dataset = datasets.load_from_disk(filepath)
         else:
             llm_df = self.llm_df.copy(deep = True)
             llm_df["prompt"] = self.llm_df.apply(lambda row: row_to_vanilla_datapoint(row, sep_token=sep_token), axis=1)
             dataset = self.__dataset_from_df(llm_df)
             if tokenize_function:
                 dataset = dataset.map(tokenize_function, batched = True)
-            dataset.save_to_disk(LLM_VANILLA_DATASET_PATH + suffix)
+            dataset.save_to_disk(filepath)
         return dataset
     
     def add_false_edges(self, false_ratio: float = 2.0, sep_token = "[SEP]"):
