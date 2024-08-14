@@ -976,8 +976,8 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
                             np.save(ATTENTIONS_ADDING_PATH.format(self.kge_dimension, split, epoch), all_attentions)
                             del all_attentions
                         if "hidden_states" in load_fields:
-                            all_hidden_states = np.concatenate(all_hidden_states)
-                            np.save(HIDDEN_STATES_ADDING_PATH.format(self.kge_dimension, split, epoch), all_hidden_states)
+                            all_hidden_states = np.concatenate(all_hidden_states, axis = 1)
+                            np.save(HIDDEN_STATES_ADDING_PATH.format(self.kge_dimension, split, epoch),np.transpose(all_hidden_states, (1, 0, 2, 3)))
                             del all_hidden_states
                         if "graph_embeddings" in load_fields:
                             all_graph_embeddings = np.concatenate(all_graph_embeddings)
@@ -997,7 +997,7 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
                     all_hidden_states = []
                     for split in splits:
                         for epoch in range(epochs):
-                            all_hidden_states.append(np.load(HIDDEN_STATES_ADDING_PATH.format(split, epoch)))
+                            all_hidden_states.append(np.load(HIDDEN_STATES_ADDING_PATH.format(self.kge_dimension, split, epoch)))
                     all_hidden_states = np.concatenate(all_hidden_states)
                     np.save(self.hidden_states_path, all_hidden_states)
                     all_hidden_states = torch.from_numpy(all_hidden_states)
@@ -1009,7 +1009,7 @@ class AddingEmbeddingsBertClassifierBase(ClassifierBase):
                     attentions = []
                     for split in splits:
                         for epoch in range(epochs):
-                            attentions.append(np.load(ATTENTIONS_ADDING_PATH.format(split, epoch)))
+                            attentions.append(np.load(ATTENTIONS_ADDING_PATH.format(self.kge_dimension, split, epoch)))
                     attentions = np.concatenate(attentions)
                     np.save(self.attentions_path, attentions)
                     attentions = torch.from_numpy(attentions)
@@ -1229,8 +1229,8 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
                             np.save(ATTENTIONS_PROMPT_PATH.format(self.kge_dimension, split, epoch), all_attentions)
                             del all_attentions
                         if "hidden_states" in load_fields:
-                            all_hidden_states = np.concatenate(all_hidden_states)
-                            np.save(HIDDEN_STATES_PROMPT_PATH.format(self.kge_dimension, split, epoch), all_hidden_states)
+                            all_hidden_states = np.concatenate(all_hidden_states, axis = 1)
+                            np.save(HIDDEN_STATES_PROMPT_PATH.format(self.kge_dimension, split, epoch),np.transpose(all_hidden_states, (1, 0, 2, 3)))
                             del all_hidden_states
                         if "graph_embeddings" in load_fields:
                             all_graph_embeddings = np.concatenate(all_graph_embeddings)
@@ -1250,7 +1250,7 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
                     all_hidden_states = []
                     for split in splits:
                         for epoch in range(epochs):
-                            all_hidden_states.append(np.load(HIDDEN_STATES_PROMPT_PATH.format(split, epoch)))
+                            all_hidden_states.append(np.load(HIDDEN_STATES_PROMPT_PATH.format(self.kge_dimension, split, epoch)))
                     all_hidden_states = np.concatenate(all_hidden_states)
                     np.save(self.hidden_states_path, all_hidden_states)
                     all_hidden_states = torch.from_numpy(all_hidden_states)
@@ -1262,7 +1262,7 @@ class PromptBertClassifier(ClassifierOriginalArchitectureBase):
                     attentions = []
                     for split in splits:
                         for epoch in range(epochs):
-                            attentions.append(np.load(ATTENTIONS_PROMPT_PATH.format(split, epoch)))
+                            attentions.append(np.load(ATTENTIONS_PROMPT_PATH.format(self.kge_dimension, split, epoch)))
                     attentions = np.concatenate(attentions)
                     np.save(self.attentions_path, attentions)
                     attentions = torch.from_numpy(attentions)
@@ -1488,8 +1488,8 @@ class VanillaBertClassifier(ClassifierOriginalArchitectureBase):
                             np.save(ATTENTIONS_VANILLA_PATH.format(split, epoch), all_attentions)
                             del all_attentions
                         if "hidden_states" in load_fields:
-                            all_hidden_states = np.concatenate(all_hidden_states)
-                            np.save(HIDDEN_STATES_VANILLA_PATH.format(split, epoch), all_hidden_states)
+                            all_hidden_states = np.concatenate(all_hidden_states, axis = 1)
+                            np.save(HIDDEN_STATES_VANILLA_PATH.format(split, epoch),np.transpose(all_hidden_states, (1, 0, 2, 3)))
                             del all_hidden_states
 
                 # all_tokens
