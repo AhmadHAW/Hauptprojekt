@@ -14,7 +14,7 @@ import tqdm
 from sklearn.metrics import roc_auc_score
 from sklearn.decomposition import PCA
 
-from movie_lens_loader import MovieLensLoader, GNN_PATH
+from dataset_preprocess import MovieLensLoader, GNN_PATH
 
 GNN_MODEL_PATH = f"{GNN_PATH}/model_{{}}.pth"
 
@@ -33,20 +33,23 @@ class GNN(torch.nn.Module):
         x = self.conv2(x, edge_index)
         return x
 
+
 class Classifier(torch.nn.Module):
     # Our final classifier applies the dot-product between source and destination
     # node embeddings to derive edge-level predictions:
-    def forward(self, x_user: Tensor, x_movie: Tensor, edge_label_index: Tensor) -> Tensor:
+    def forward(
+        self, x_source: Tensor, x_target: Tensor, edge_label_index: Tensor
+    ) -> Tensor:
         # Convert node embeddings to edge-level representations:
-        edge_feat_user = x_user[edge_label_index[0]]
-        edge_feat_movie = x_movie[edge_label_index[1]]
+        edge_feat_source = x_source[edge_label_index[0]]
+        edge_feat_target = x_target[edge_label_index[1]]
 
         # Apply dot-product to get a prediction per supervision edge:
-        return (edge_feat_user * edge_feat_movie).sum(dim=-1)
+        return (edge_feat_source * edge_feat_target).sum(dim=-1)
 
 
 class Model(torch.nn.Module):
-    '''
+    """
     From Tutorial:
     We are now ready to create our heterogeneous GNN.
     The GNN is responsible for learning enriched node representations from the surrounding subgraphs,
@@ -57,18 +60,19 @@ class Model(torch.nn.Module):
     In addition, we define a final link-level classifier, which simply takes both node embeddings of the link we are trying to predict,
     and applies a dot-product on them.
 
-    As users do not have any node-level information,
+    As sources do not have any node-level information,
     we choose to learn their features jointly via a torch.nn.Embedding layer.
-    In order to improve the expressiveness of movie features, we do the same for movie nodes,
+    In order to improve the expressiveness of target features, we do the same for target nodes,
     and simply add their shallow embeddings to the pre-defined genre features.
-    '''
-    def __init__(self, hidden_channels, output_channels, data, force_recompute = False):
+    """
+
+    def __init__(self, hidden_channels, output_channels, data, force_recompute=False):
         super().__init__()
         # Since the dataset does not come with rich features, we also learn two
-        # embedding matrices for users and movies:
-        self.movie_lin = torch.nn.Linear(20, hidden_channels)
-        self.user_emb = torch.nn.Embedding(data["user"].num_nodes, hidden_channels)
-        self.movie_emb = torch.nn.Embedding(data["movie"].num_nodes, hidden_channels)
+        # embedding matrices for sources and targets:
+        self.target_lin = torch.nn.Linear(20, hidden_channels)
+        self.source_emb = torch.nn.Embedding(data["source"].num_nodes, hidden_channels)
+        self.target_emb = torch.nn.Embedding(data["target"].num_nodes, hidden_channels)
         # Instantiate homogeneous GNN:
         self.gnn = GNN(hidden_channels, output_channels)
         # Convert GNN model into a heterogeneous variant:
@@ -79,8 +83,9 @@ class Model(torch.nn.Module):
 
     def forward(self, data: HeteroData) -> Tensor:
         x_dict = {
-          "user": self.user_emb(data["user"].node_id),
-          "movie": self.movie_lin(data["movie"].x) + self.movie_emb(data["movie"].node_id),
+            "source": self.source_emb(data["source"].node_id),
+            "target": self.target_lin(data["target"].x)
+            + self.target_emb(data["target"].node_id),
         }
 
         # `x_dict` holds feature matrices of all node types
@@ -88,34 +93,46 @@ class Model(torch.nn.Module):
         x_dict = self.gnn(x_dict, data.edge_index_dict)
 
         pred = self.classifier(
-            x_dict["user"],
-            x_dict["movie"],
-            data["user", "rates", "movie"].edge_label_index,
+            x_dict["source"],
+            x_dict["target"],
+            data["source", "edge", "target"].edge_label_index,
         )
 
         return pred
-    
+
     def forward_without_classifier(self, data: HeteroData) -> Tensor:
         x_dict = {
-          "user": self.user_emb(data["user"].node_id),
-          "movie": self.movie_lin(data["movie"].x) + self.movie_emb(data["movie"].node_id),
+            "source": self.source_emb(data["source"].node_id),
+            "target": self.target_lin(data["target"].x)
+            + self.target_emb(data["target"].node_id),
         }
 
         # `x_dict` holds feature matrices of all node types
         # `edge_index_dict` holds all edge indices of all edge types
         return self.gnn(x_dict, data.edge_index_dict)
-    
-class GNNTrainer():
-    '''
+
+
+class GNNTrainer:
+    """
     The GNNTrainer manages and trains a GNN model. A GNN model consists of an encoder and classifier.
     An encoder is a Grap Convolutional Network (GCN) with a 2-layer GNN computation graph and a single ReLU activation function in between.
     A classifier applies the dot-product between source and destination node embeddings to derive edge-level predictions.
     In addition to training, validating and saving the model,
     the GNNTrainer provides a callback function for generating embeddings for given edges.
     Among other things, this function can help to generate non-existent edges on the fly.
-    '''
-    def __init__(self, data: HeteroData, force_recompute: bool = False, kge_dimension: Optional[int] = None, hidden_channels: int = 64) -> None:
-        '''
+    """
+
+    def __init__(
+        self,
+        data: HeteroData,
+        gnn_train_data: HeteroData,
+        gnn_val_data: HeteroData,
+        gnn_test_data: HeteroData,
+        force_recompute: bool = False,
+        kge_dimension: Optional[int] = None,
+        hidden_channels: int = 64,
+    ) -> None:
+        """
         The constructor of the GNNTrainer initializes the model in the corresponding dimensions, the optimizer for the training and data set splits.
         Parameters
         __________
@@ -127,28 +144,33 @@ class GNNTrainer():
         kge_dimension:    int
                                 output dimension of the gnn.
                                 Default 4
-        '''
+        """
         data = data.clone()
         if not kge_dimension:
             kge_dimension = hidden_channels
         self.model_path = GNN_MODEL_PATH.format(kge_dimension)
-        self.model = Model(hidden_channels=hidden_channels, output_channels = kge_dimension, data=data, force_recompute = force_recompute)
-        #load if there is a trained model and not force_recompute
+        self.model = Model(
+            hidden_channels=hidden_channels,
+            output_channels=kge_dimension,
+            data=data,
+            force_recompute=force_recompute,
+        )
+        # load if there is a trained model and not force_recompute
         if os.path.isfile(self.model_path) and not force_recompute:
             print("loading pretrained model")
             self.model.load_state_dict(torch.load(self.model_path))
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Device: '{self.device}'")
         self.model.to(self.device)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
-        self.gnn_train_data = data["train"]
-        self.gnn_val_data = data["val"]
-        self.gnn_test_data = data["test"]
+        self.gnn_train_data = gnn_train_data
+        self.gnn_val_data = gnn_val_data
+        self.gnn_test_data = gnn_test_data
         self.kge_dimension = kge_dimension
         self.force_recompute = force_recompute
 
     def train_model(self, data, epochs):
-        '''
+        """
         From Tutorial
         We are now ready to create a mini-batch loader that will generate subgraphs that can be used as input into our GNN.
         While this step is not strictly necessary for small-scale graphs,
@@ -160,14 +182,14 @@ class GNNTrainer():
         We move the model to the desired device, and initialize an optimizer that takes care of adjusting model parameters
         via stochastic gradient descent.
 
-        The training loop then iterates over our mini-batches, applies the forward computation of the model,
+        The training loop then iteedge over our mini-batches, applies the forward computation of the model,
         computes the loss from ground-truth labels and obtained predictions (here we make use of binary cross entropy),
         and adjusts model parameters via back-propagation and stochastic gradient descent.
-        '''
+        """
 
         # Define seed edges:
-        edge_label_index = data["user", "rates", "movie"].edge_label_index
-        edge_label = data["user", "rates", "movie"].edge_label
+        edge_label_index = data["source", "edge", "target"].edge_label_index
+        edge_label = data["source", "edge", "target"].edge_label
 
         # In the first hop, we sample at most 20 neighbors.
         # In the second hop, we sample at most 10 neighbors.
@@ -177,7 +199,7 @@ class GNNTrainer():
             data=data,
             num_neighbors=[20, 10],
             neg_sampling_ratio=2.0,
-            edge_label_index=(("user", "rates", "movie"), edge_label_index),
+            edge_label_index=(("source", "edge", "target"), edge_label_index),
             edge_label=edge_label,
             batch_size=128,
             shuffle=True,
@@ -188,9 +210,9 @@ class GNNTrainer():
                 self.optimizer.zero_grad()
                 # Move `sampled_data` to the respective `device`
                 sampled_data.to(self.device)
-                #Run `forward` pass of the model
+                # Run `forward` pass of the model
                 pred = self.model(sampled_data)
-                ground_truth = sampled_data["user", "rates", "movie"].edge_label
+                ground_truth = sampled_data["source", "edge", "target"].edge_label
                 # Apply binary cross entropy
                 loss = F.binary_cross_entropy_with_logits(pred, ground_truth)
 
@@ -199,101 +221,108 @@ class GNNTrainer():
                 total_loss += float(loss) * pred.numel()
                 total_examples += pred.numel()
             print(f"Epoch: {epoch:03d}, Loss: {total_loss / total_examples:.4f}")
-        torch.save(self.model.to(device = "cpu").state_dict(), self.model_path)
+        torch.save(self.model.to(device="cpu").state_dict(), self.model_path)
         self.model.to(self.device)
 
-    def __link_neighbor_sampling(self, data, user_id, movie_id):
-        edge_label_index = torch.tensor([[user_id], [movie_id]])
+    def __link_neighbor_sampling(self, data, source_id, target_id):
+        edge_label_index = torch.tensor([[source_id], [target_id]])
         edge_label = torch.tensor([1])
 
         loader = LinkNeighborLoader(
             data=data,
             num_neighbors=[20, 10],
-            edge_label_index=(("user", "rates", "movie"), edge_label_index),
+            edge_label_index=(("source", "edge", "target"), edge_label_index),
             edge_label=edge_label,
             batch_size=1,
             shuffle=False,
         )
         for sampled_data in tqdm.tqdm(loader, disable=True):
             return sampled_data
-        
-    def get_embedding(self, data: HeteroData, user_id: int, movie_id:int):
-        '''
-        This method is used as a callback function and produces the KGE from given user node and movie node.
-        For that a subgraph of the neighbohood is generated and then applied to the GNN. Afterwards only the embeddings of
-        given user and movie nodes are returned.
-        '''
-        sampled_data = self.__link_neighbor_sampling(data, user_id, movie_id)
-        assert isinstance(sampled_data, HeteroData)
-        sampled_data.to(self.device) # type: ignore
-        embeddings = self.model.forward_without_classifier(sampled_data)
-        user_node_id_index = (sampled_data['user'].n_id == user_id).nonzero(as_tuple=True)[0].item()
-        movie_node_id_index = (sampled_data['movie'].n_id == movie_id).nonzero(as_tuple=True)[0].item()
-        user_embedding = embeddings["user"][user_node_id_index] # type: ignore
-        movie_embedding = embeddings["movie"][movie_node_id_index] # type: ignore
-        return user_embedding, movie_embedding
-    
-    def __get_saved_embeddings(self, df) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
-        user_path = f"{GNN_PATH}/user_embedding_{self.kge_dimension}.pt"
-        if not os.path.exists(user_path):
-            return None, None
-        user_embeddings = torch.load(user_path)
-        if len(user_embeddings) < len(df):
-            return None, None
-        movie_path = f"{GNN_PATH}/movie_embedding_{self.kge_dimension}.pt"
-        if not os.path.exists(movie_path):
-            return None, None
-        movie_embeddings = torch.load(movie_path)
-        if len(movie_embeddings) < len(df):
-            return None, None
-        return user_embeddings, movie_embeddings
 
-    
-    def get_embeddings(self, movie_lens_loader: MovieLensLoader, force_recompute: bool = False):
-        '''
-        This method passes all edges (user - movie) to the GNN to produce user and movie embeddings.
+    def get_embedding(self, data: HeteroData, source_id: int, target_id: int):
+        """
+        This method is used as a callback function and produces the KGE from given source node and target node.
+        For that a subgraph of the neighbohood is generated and then applied to the GNN. Afterwards only the embeddings of
+        given source and target nodes are returned.
+        """
+        sampled_data = self.__link_neighbor_sampling(data, source_id, target_id)
+        assert isinstance(sampled_data, HeteroData)
+        assert sampled_data is not None
+        sampled_data.to(self.device)  # type: ignore
+        embeddings = self.model.forward_without_classifier(sampled_data)
+        source_node_id_index = (
+            (sampled_data["source"].n_id == source_id).nonzero(as_tuple=True)[0].item()
+        )
+        target_node_id_index = (
+            (sampled_data["target"].n_id == target_id).nonzero(as_tuple=True)[0].item()
+        )
+        source_embedding = embeddings["source"][source_node_id_index]  # type: ignore
+        target_embedding = embeddings["target"][target_node_id_index]  # type: ignore
+        return source_embedding, target_embedding
+
+    def __get_embedding(self, row: Series) -> Series:
+        split = row["split"]
+        data = (
+            self.gnn_train_data
+            if split == "train"
+            else self.gnn_val_data
+            if split == "val"
+            else self.gnn_test_data
+            if split == "test"
+            else self.gnn_train_data
+        )
+        source_id = row["source_id"]
+        target_id = row["target_id"]
+        source_embedding, target_embedding = self.get_embedding(
+            data, source_id, target_id
+        )
+        row = Series(
+            {
+                "source_embedding": source_embedding.to("cpu").detach().tolist(),
+                "target_embedding": target_embedding.to("cpu").detach().tolist(),
+            }
+        )
+        return row
+
+    def get_saved_embeddings(self, model: str) -> Optional[DataFrame]:
+        source_path = f"{GNN_PATH}/{model}_source_embedding.pt"
+        if not os.path.exists(source_path):
+            return None
+        source_embeddings = torch.load(source_path)
+        target_path = f"{GNN_PATH}/{model}_target_embedding.pt"
+        if not os.path.exists(target_path):
+            return None
+        target_embeddings = torch.load(target_path)
+        row = DataFrame(
+            {
+                "source_embedding": source_embeddings.to("cpu").detach().tolist(),
+                "target_embedding": target_embeddings.to("cpu").detach().tolist(),
+            }
+        )
+        return row
+
+    def generate_embeddings(self, llm_df: DataFrame, force_recompute: bool = False):
+        """
+        This method passes all edges (source - target) to the GNN to produce source and target embeddings.
         Parameters
         __________
-        movie_lens_loader:          MovieLensLoader
-                                    See movieLensLoader in movie_lens_loader.py
-        force_recompute:            bool
-                                    Whether to force reloading and recomputing datasets and values.
-                                    Default False -> Loads and computes only if missing.
-        '''
-        def __get_embedding(row, movie_lens_loader: MovieLensLoader) -> Series:
-            split = row["split"]
-            data = movie_lens_loader.gnn_train_data if split == "train" else movie_lens_loader.gnn_val_data if split == "val" else movie_lens_loader.gnn_test_data if split == "test" else movie_lens_loader.gnn_train_data
-            user_id = row["mappedUserId"]
-            movie_id = row["mappedMovieId"]
-            user_embedding, movie_embedding = self.get_embedding(data, user_id, movie_id)
-            row[f"user_embedding_{self.kge_dimension}"] = user_embedding.to("cpu").detach().tolist()
-            row[f"movie_embedding_{self.kge_dimension}"] = movie_embedding.to("cpu").detach().tolist()
-            return row
-        df = movie_lens_loader.llm_df
-        user_embeddings, movie_embeddings = self.__get_saved_embeddings(df)
-        if user_embeddings is None or movie_embeddings is None or force_recompute:
-            #produce the embeddings for all edges
-            print(f"Computing embeddings for embedding dimension {self.kge_dimension}.")
-            df = movie_lens_loader.llm_df.apply(lambda row: __get_embedding(row, movie_lens_loader), axis = 1)
-            #save new embeddings      
-            movie_lens_loader.replace_llm_df(df)
-        else:
-            df[f"user_embedding_{self.kge_dimension}"] = user_embeddings.to("cpu").detach().tolist()
-            df[f"movie_embedding_{self.kge_dimension}"] = movie_embeddings.to("cpu").detach().tolist()
-            movie_lens_loader.replace_llm_df(df)
+        llm_df:         DataFrame
+                        The dataframe of the dataset with all NL features
+        """
 
-        
-        
+        # produce the embeddings for all edges
+        print(f"Computing embeddings for embedding dimension {self.kge_dimension}.")
+        return llm_df.apply(self.__get_embedding, axis=1)
 
     def validate_model(self, data):
         # Define the validation seed edges:
-        edge_label_index = data["user", "rates", "movie"].edge_label_index
-        edge_label = data["user", "rates", "movie"].edge_label
+        edge_label_index = data["source", "edge", "target"].edge_label_index
+        edge_label = data["source", "edge", "target"].edge_label
 
         val_loader = LinkNeighborLoader(
             data=data,
             num_neighbors=[20, 10],
-            edge_label_index=(("user", "rates", "movie"), edge_label_index),
+            edge_label_index=(("source", "edge", "target"), edge_label_index),
             edge_label=edge_label,
             batch_size=3 * 128,
             shuffle=False,
@@ -304,7 +333,9 @@ class GNNTrainer():
             with torch.no_grad():
                 sampled_data = sampled_data.to(self.device)
                 preds.append(self.model(sampled_data))
-                ground_truths.append(sampled_data["user", "rates", "movie"].edge_label)
+                ground_truths.append(
+                    sampled_data["source", "edge", "target"].edge_label
+                )
 
         pred = torch.cat(preds, dim=0).cpu().numpy()
         ground_truth = torch.cat(ground_truths, dim=0).cpu().numpy()
@@ -313,4 +344,4 @@ class GNNTrainer():
         print(f"Validation AUC: {auc:.4f}")
 
     def save_model(self):
-        torch.save(self.model.to(device = "cpu").gnn.state_dict(), self.model_path)
+        torch.save(self.model.to(device="cpu").gnn.state_dict(), self.model_path)

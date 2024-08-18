@@ -1,0 +1,22 @@
+jupyter
+numpy
+matplotlib
+transformers
+scikit-learn
+datasets
+pandas
+evaluate
+seaborn
+accelerate
+networkx
+ipykernel
+torch
+torchvision
+torchaudio
+-f https://data.pyg.org/whl/torch-2.4.0+cu121.html
+torch-scatter
+torch-sparse
+torch_cluster
+torch_spline_conv
+torch_geometric
+pyg-lib
