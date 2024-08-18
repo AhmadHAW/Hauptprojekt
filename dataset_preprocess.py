@@ -59,30 +59,29 @@ LLM_SOURCE_DF_PATH = (
 LLM_TARGET_DF_PATH = (
     f"{LLM_PATH}/target.csv"  # The path where the LLM targets dataset is saved at.
 )
-LLM_MODEL_DIMENSION_PATH = f"{LLM_PATH}/{{}}"
 PROMPT_KGE_DIMENSION = 4
-EMBEDDING_KGE_DIMENSION = 128
+ATTENTION_KGE_DIMENSION = 128
 LLM_PROMPT_PATH = f"{LLM_PATH}/prompt"
-LLM_EMBEDDING_PATH = f"{LLM_PATH}/embedding"
+LLM_ATTENTION_PATH = f"{LLM_PATH}/embedding"
 LLM_VANILLA_PATH = f"{LLM_PATH}/vanilla"
 LLM_PROMPT_TRAINING_PATH = f"{LLM_PROMPT_PATH}/training"  # The path where the LLM training outputs are saved at.
-LLM_EMBEDDING_TRAINING_PATH = f"{LLM_EMBEDDING_PATH}/training"  # The path where the LLM training outputs are saved at.
+LLM_ATTENTION_TRAINING_PATH = f"{LLM_ATTENTION_PATH}/training"  # The path where the LLM training outputs are saved at.
 LLM_VANILLA_TRAINING_PATH = f"{LLM_VANILLA_PATH}/training"  # The path where the LLM training outputs are saved at.
 LLM_PROMPT_BEST_MODEL_PATH = f"{LLM_PROMPT_TRAINING_PATH}/best"  # The path where the best trained LLM model is saved at.
-LLM_EMBEDDING_BEST_MODEL_PATH = f"{LLM_EMBEDDING_TRAINING_PATH}/best"  # The path where the best trained LLM model is saved at.
+LLM_ATTENTION_BEST_MODEL_PATH = f"{LLM_ATTENTION_TRAINING_PATH}/best"  # The path where the best trained LLM model is saved at.
 LLM_VANILLA_BEST_MODEL_PATH = f"{LLM_VANILLA_TRAINING_PATH}/best"  # The path where the best trained LLM model is saved at.
-LLM_PROMPT_DATASET_PATH = f"{LLM_MODEL_DIMENSION_PATH}/prompt_dataset"  # The path where the huggingface prompt dataset (tokenized) is saved at.
-LLM_EMBEDDING_DATASET_PATH = f"{LLM_MODEL_DIMENSION_PATH}/adding_dataset"  # The path where the huggingface prompt dataset (tokenized) is saved at.
+LLM_PROMPT_DATASET_PATH = f"{LLM_PATH}/prompt_dataset"  # The path where the huggingface prompt dataset (tokenized) is saved at.
+LLM_ATTENTION_DATASET_PATH = f"{LLM_PATH}/attention_dataset"  # The path where the huggingface prompt dataset (tokenized) is saved at.
 LLM_VANILLA_DATASET_PATH = f"{LLM_PATH}/vanilla_dataset"  # The path where the huggingface vanilla dataset (tokenized) is saved at.
-LLM_PROMPT_FIXED_DATASET_PATH = f"{LLM_MODEL_DIMENSION_PATH}/prompt_fixed_dataset"  # The path where the huggingface prompt dataset (tokenized) is saved at.
-LLM_EMBEDDING_FIXED_DATASET_PATH = f"{LLM_MODEL_DIMENSION_PATH}/adding_fixed_dataset"  # The path where the huggingface prompt dataset (tokenized) is saved at.
+LLM_PROMPT_FIXED_DATASET_PATH = f"{LLM_PATH}/prompt_fixed_dataset"  # The path where the huggingface prompt dataset (tokenized) is saved at.
+LLM_ATTENTION_FIXED_DATASET_PATH = f"{LLM_PATH}/attention_fixed_dataset"  # The path where the huggingface prompt dataset (tokenized) is saved at.
 LLM_VANILLA_FIXED_DATASET_PATH = f"{LLM_PATH}/vanilla_fixed_dataset"  # The path where the huggingface vanilla dataset (tokenized) is saved at.
 
 PCA_PATH = f"{ROOT}/pca"
 
 DIRS_TO_INIT = [
     LLM_PROMPT_PATH,
-    LLM_EMBEDDING_PATH,
+    LLM_ATTENTION_PATH,
     GNN_PATH,
     LLM_VANILLA_PATH,
     PCA_PATH,
@@ -91,7 +90,7 @@ DIRS_TO_INIT = [
 PROMPT_COLUMNS = ["source_id", "title", "genres"]
 
 
-def row_to_adding_embedding_datapoint(
+def row_to_attention_datapoint(
     row: pd.Series,
     sep_token: str = "[SEP]",
     pad_token: str = "[PAD]",
@@ -326,12 +325,12 @@ class KGLoader(ABC):
         if save:
             self.save_llm_df()
 
-    def append_embedding_graph_embeddings(
+    def append_attention_graph_embeddings(
         self, graph_embeddings: pd.DataFrame, save: bool = True
     ):
         assert len(self.llm_df) == len(graph_embeddings)
-        self.llm_df["embedding_source_embedding"] = graph_embeddings["source_embedding"]
-        self.llm_df["embedding_target_embedding"] = graph_embeddings["target_embedding"]
+        self.llm_df["attention_source_embedding"] = graph_embeddings["source_embedding"]
+        self.llm_df["attention_target_embedding"] = graph_embeddings["target_embedding"]
         if save:
             self.save_llm_df()
 
@@ -575,12 +574,12 @@ class MovieLensLoader(KGLoader):
         return dataset
 
     def __generate_embeddings(self, row) -> torch.Tensor:
-        source_embeddings = row["embedding_source_embedding"]
-        target_embeddings = row["embedding_target_embedding"]
+        source_embeddings = row["attention_source_embedding"]
+        target_embeddings = row["attention_target_embedding"]
         embeddings = torch.tensor([source_embeddings, target_embeddings])
         return embeddings
 
-    def generate_embedding_dataset(
+    def generate_attention_embedding_dataset(
         self,
         sep_token,
         pad_token,
@@ -593,19 +592,17 @@ class MovieLensLoader(KGLoader):
         by passing the tokenizer.tokenize function and
         the embedding dimension of the target adding model.
         """
-        llm_adding_dataset_path = LLM_EMBEDDING_DATASET_PATH + suffix
+        llm_adding_dataset_path = LLM_ATTENTION_DATASET_PATH + suffix
         if os.path.exists(llm_adding_dataset_path) and not force_recompute:
             dataset = datasets.load_from_disk(llm_adding_dataset_path)
         else:
-            assert "embedding_source_embedding" in self.llm_df
-            assert "embedding_target_embedding" in self.llm_df
-            assert self.llm_df["embedding_source_embedding"].notna().all()
-            assert self.llm_df["embedding_target_embedding"].notna().all()
+            assert "attention_source_embedding" in self.llm_df
+            assert "attention_target_embedding" in self.llm_df
+            assert self.llm_df["attention_source_embedding"].notna().all()
+            assert self.llm_df["attention_target_embedding"].notna().all()
             llm_df = self.llm_df.copy(deep=True)
             llm_df["prompt"] = llm_df.apply(
-                lambda row: row_to_adding_embedding_datapoint(
-                    row, sep_token, pad_token
-                ),
+                lambda row: row_to_attention_datapoint(row, sep_token, pad_token),
                 axis=1,
             )
             llm_df["graph_embeddings"] = llm_df.apply(
@@ -652,7 +649,7 @@ class MovieLensLoader(KGLoader):
         self,
         row: pd.Series,
         get_prompt_embedding_cb: Callable,
-        get_embedding_embedding_cb: Callable,
+        get_attention_embedding_cb: Callable,
     ) -> pd.Series:
         split = row["split"]
         source_id = row["source_id"]
@@ -671,18 +668,18 @@ class MovieLensLoader(KGLoader):
         )
         row["prompt_source_embedding"] = prompt_source_embedding.detach().tolist()
         row["prompt_target_embedding"] = prompt_target_embedding.detach().tolist()
-        embedding_source_embedding, embedding_target_embedding = (
-            get_embedding_embedding_cb(data, source_id, target_id)
+        attention_source_embedding, attention_target_embedding = (
+            get_attention_embedding_cb(data, source_id, target_id)
         )
-        row["embedding_source_embedding"] = embedding_source_embedding.detach().tolist()
-        row["embedding_target_embedding"] = embedding_target_embedding.detach().tolist()
+        row["attention_source_embedding"] = attention_source_embedding.detach().tolist()
+        row["attention_target_embedding"] = attention_target_embedding.detach().tolist()
         return row
 
     def add_false_edges(
         self,
         false_ratio: float = 2.0,
         prompt_get_embedding_cb: Optional[Callable] = None,
-        embedding_get_embedding_cb: Optional[Callable] = None,
+        attention_get_embedding_cb: Optional[Callable] = None,
         sep_token="[SEP]",
     ):
         if 0 not in self.llm_df["labels"].unique():
@@ -721,11 +718,11 @@ class MovieLensLoader(KGLoader):
                     random_row["target_id"] = target_id
                     random_row["labels"] = 0
                     random_row["split"] = split
-                    if prompt_get_embedding_cb and embedding_get_embedding_cb:
+                    if prompt_get_embedding_cb and attention_get_embedding_cb:
                         random_row = self.add_graph_embeddings(
                             random_row,
                             prompt_get_embedding_cb,
-                            embedding_get_embedding_cb,
+                            attention_get_embedding_cb,
                         )
             df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
             df["prompt"] = df.apply(
@@ -733,98 +730,6 @@ class MovieLensLoader(KGLoader):
             )
             self.replace_llm_df(df)
         return self.llm_df
-
-    def sample_datapoints(
-        self,
-        existing,
-        vanilla_classifier,
-        prompt_classifier,
-        embedding_classifier,
-        prompt_getting_embedding_cb,
-        embedding_getting_embedding_cb,
-        singular_title=False,
-        singular_user=False,
-        split: str = "val",
-        sep_token="[SEP]",
-        pad_token="[PAD]",
-    ):
-        df = self.llm_df[self.llm_df["split"] == split]
-        if singular_user:
-            df = df[df["mappedUserId"] == df.sample(1).iloc[0]["mappedUserId"]]
-        elif singular_title:
-            df = df[df["mappedMovieId"] == df.sample(1).iloc[0]["mappedMovieId"]]
-        if existing:
-            random_row = df.sample(1).iloc[0]
-            random_row["graph_embeddings"] = self.__generate_embeddings(random_row)
-            print(random_row[f"user_embedding_{prompt_classifier.kge_dimension}"])
-        else:
-            dataset = (
-                self.gnn_train_data
-                if split == "train"
-                else self.gnn_val_data
-                if split == "val"
-                else self.gnn_test_data
-                if split == "test"
-                else self.data
-            )
-            existing = True
-            while existing:
-                user_id = df["mappedUserId"].sample(1).iloc[0]
-                random_row = self.llm_df.sample(1).iloc[0]
-                movie_id = random_row["mappedMovieId"]
-                existing = (
-                    (self.llm_df["mappedMovieId"] == movie_id)
-                    & (self.llm_df["mappedUserId"] == user_id)
-                ).any()
-                if not existing:
-                    random_row = random_row.copy(deep=True)
-                    random_row["mappedUserId"] = user_id
-                    user_embedding_prompt, movie_embedding_prompt = (
-                        prompt_getting_embedding_cb(dataset, user_id, movie_id)
-                    )
-                    random_row[f"user_embedding_{prompt_classifier.kge_dimension}"] = (
-                        user_embedding_prompt
-                    )
-                    random_row[f"movie_embedding_{prompt_classifier.kge_dimension}"] = (
-                        movie_embedding_prompt
-                    )
-                    user_embedding_embedding, movie_embedding_embedding = (
-                        embedding_getting_embedding_cb(dataset, user_id, movie_id)
-                    )
-                    random_row[
-                        f"user_embedding_{embedding_classifier.kge_dimension}"
-                    ] = user_embedding_embedding
-                    random_row[
-                        f"movie_embedding_{embedding_classifier.kge_dimension}"
-                    ] = movie_embedding_embedding
-        prompt_vanilla = row_to_vanilla_datapoint(random_row, sep_token=sep_token)
-        prompt_prompt = row_to_prompt_datapoint(
-            random_row,
-            sep_token=sep_token,
-        )
-        prompt_embedding = row_to_adding_embedding_datapoint(
-            random_row, sep_token=sep_token, pad_token=pad_token
-        )
-        labels = 1 if existing else 0
-        result_vanilla = {"prompt": prompt_vanilla, "labels": labels}
-        result_prompt = {"prompt": prompt_prompt, "labels": labels}
-        graph_embeddings = torch.stack(
-            (
-                random_row[f"user_embedding_{embedding_classifier.kge_dimension}"],
-                random_row[f"movie_embedding_{embedding_classifier.kge_dimension}"],
-            )
-        )
-        result_embedding = {
-            "prompt": prompt_embedding,
-            "labels": labels,
-            "graph_embeddings": graph_embeddings.unsqueeze(dim=0),
-        }
-        return (
-            vanilla_classifier.tokenize_function(result_vanilla, return_pt=True),
-            prompt_classifier.tokenize_function(result_prompt, return_pt=True),
-            embedding_classifier.tokenize_function(result_embedding, return_pt=True),
-            random_row,
-        )
 
     def replace_llm_df(self, df: pd.DataFrame):
         """

@@ -8,17 +8,17 @@ from pathlib import Path
 
 from dataset_preprocess import (
     LLM_PROMPT_TRAINING_PATH,
-    LLM_EMBEDDING_TRAINING_PATH,
+    LLM_ATTENTION_TRAINING_PATH,
     LLM_VANILLA_TRAINING_PATH,
     LLM_PROMPT_BEST_MODEL_PATH,
-    LLM_EMBEDDING_BEST_MODEL_PATH,
+    LLM_ATTENTION_BEST_MODEL_PATH,
     LLM_VANILLA_BEST_MODEL_PATH,
     LLM_VANILLA_PATH,
     LLM_PROMPT_PATH,
-    LLM_EMBEDDING_PATH,
+    LLM_ATTENTION_PATH,
     row_to_vanilla_datapoint,
     row_to_prompt_datapoint,
-    row_to_adding_embedding_datapoint,
+    row_to_attention_datapoint,
     _find_non_existing_source_target,
 )
 
@@ -51,14 +51,14 @@ import joblib
 ID2LABEL = {0: "FALSE", 1: "TRUE"}
 LABEL2ID = {"FALSE": 0, "TRUE": 1}
 PROMPT_LOG_PATH = f"{LLM_PROMPT_TRAINING_PATH}/logs"
-EMBEDDING_LOG_PATH = f"{LLM_EMBEDDING_TRAINING_PATH}/logs"
+EMBEDDING_LOG_PATH = f"{LLM_ATTENTION_TRAINING_PATH}/logs"
 VANILLA_LOG_PATH = f"{LLM_VANILLA_TRAINING_PATH}/logs"
 
 PROMPT_TRAINING_STATE_PATH = (
     f"{LLM_PROMPT_TRAINING_PATH}/checkpoint-4420/trainer_state.json"
 )
 EMBEDDING_TRAINING_STATE_PATH = (
-    f"{LLM_EMBEDDING_TRAINING_PATH}/checkpoint-4420/trainer_state.json"
+    f"{LLM_ATTENTION_TRAINING_PATH}/checkpoint-4420/trainer_state.json"
 )
 VANILLA_TRAINING_STATE_PATH = (
     f"{LLM_VANILLA_TRAINING_PATH}/checkpoint-4420/trainer_state.json"
@@ -66,15 +66,15 @@ VANILLA_TRAINING_STATE_PATH = (
 
 VANILLA_ATTENTIONS_PATH = f"{LLM_VANILLA_PATH}/attentions.npy"
 PROMPT_ATTENTIONS_PATH = f"{LLM_PROMPT_PATH}/attentions.npy"
-EMBEDDING_ATTENTIONS_PATH = f"{LLM_EMBEDDING_PATH}/attentions.npy"
+EMBEDDING_ATTENTIONS_PATH = f"{LLM_ATTENTION_PATH}/attentions.npy"
 VANILLA_HIDDEN_STATES_PATH = f"{LLM_VANILLA_PATH}/hidden_states.npy"
 PROMPT_HIDDEN_STATES_PATH = f"{LLM_PROMPT_PATH}/hidden_states.npy"
-EMBEDDING_HIDDEN_STATES_PATH = f"{LLM_EMBEDDING_PATH}/hidden_states.npy"
+EMBEDDING_HIDDEN_STATES_PATH = f"{LLM_ATTENTION_PATH}/hidden_states.npy"
 PROMPT_GRAPH_EMBEDDINGS_PATH = f"{LLM_PROMPT_PATH}/graph_embeddings.npy"
-EMBEDDING_GRAPH_EMBEDDINGS_PATH = f"{LLM_EMBEDDING_PATH}/graph_embeddings.npy"
+EMBEDDING_GRAPH_EMBEDDINGS_PATH = f"{LLM_ATTENTION_PATH}/graph_embeddings.npy"
 VANILLA_TOKENS_PATH = f"{LLM_VANILLA_PATH}/tokens.csv"
 PROMPT_TOKENS_PATH = f"{LLM_PROMPT_PATH}/tokens.csv"
-EMBEDDING_TOKENS_PATH = f"{LLM_EMBEDDING_PATH}/tokens.csv"
+EMBEDDING_TOKENS_PATH = f"{LLM_ATTENTION_PATH}/tokens.csv"
 
 SPLIT_EPOCH_ENDING = f"/split_{{}}_epoch_{{}}.npy"
 TOKENS_ENDING = f"/tokens_{{}}_{{}}.csv"
@@ -112,24 +112,24 @@ GRAPH_EMBEDDINGS_PROMPT_PATH = f"{PROMPT_GRAPH_EMBEDDINGS_DIR_PATH}{SPLIT_EPOCH_
 PROMPT_SUB_TOKENS_DIR_PATH = f"{LLM_PROMPT_PATH}/tokens"
 PROMPT_SUB_TOKENS_PATH = f"{PROMPT_SUB_TOKENS_DIR_PATH}{TOKENS_ENDING}"
 
-EMBEDDING_HIDDEN_STATES_DIR_PATH = f"{LLM_EMBEDDING_PATH}/hidden_states"
+EMBEDDING_HIDDEN_STATES_DIR_PATH = f"{LLM_ATTENTION_PATH}/hidden_states"
 HIDDEN_STATES_EMBEDDING_PATH = f"{EMBEDDING_HIDDEN_STATES_DIR_PATH}{SPLIT_EPOCH_ENDING}"
 
-EMBEDDING_RANGES_DIR_PATH = f"{LLM_EMBEDDING_PATH}/ranges"
+EMBEDDING_RANGES_DIR_PATH = f"{LLM_ATTENTION_PATH}/ranges"
 RANGES_EMBEDDING_PATH = f"{EMBEDDING_RANGES_DIR_PATH}{SPLIT_EPOCH_ENDING}"
 
-EMBEDDING_ATTENTIONS_DIR_PATH = f"{LLM_EMBEDDING_PATH}/attentions"
+EMBEDDING_ATTENTIONS_DIR_PATH = f"{LLM_ATTENTION_PATH}/attentions"
 ATTENTIONS_EMBEDDING_PATH = f"{EMBEDDING_ATTENTIONS_DIR_PATH}{SPLIT_EPOCH_ENDING}"
 
-EMBEDDING_INPUT_IDS_DIR_PATH = f"{LLM_EMBEDDING_PATH}/input_ids"
+EMBEDDING_INPUT_IDS_DIR_PATH = f"{LLM_ATTENTION_PATH}/input_ids"
 INPUT_IDS_EMBEDDING_PATH = f"{EMBEDDING_INPUT_IDS_DIR_PATH}{SPLIT_EPOCH_ENDING}"
 
-EMBEDDING_GRAPH_EMBEDDINGS_DIR_PATH = f"{LLM_EMBEDDING_PATH}/graph_embeddings"
+EMBEDDING_GRAPH_EMBEDDINGS_DIR_PATH = f"{LLM_ATTENTION_PATH}/graph_embeddings"
 GRAPH_EMBEDDINGS_EMBEDDING_PATH = (
     f"{EMBEDDING_GRAPH_EMBEDDINGS_DIR_PATH}{SPLIT_EPOCH_ENDING}"
 )
 
-EMBEDDING_SUB_TOKENS_DIR_PATH = f"{LLM_EMBEDDING_PATH}/tokens"
+EMBEDDING_SUB_TOKENS_DIR_PATH = f"{LLM_ATTENTION_PATH}/tokens"
 EMBEDDING_SUB_TOKENS_PATH = f"{EMBEDDING_SUB_TOKENS_DIR_PATH}{TOKENS_ENDING}"
 
 MODEL_NAME = "google/bert_uncased_L-2_H-128_A-2"
@@ -262,12 +262,12 @@ def get_ranges_over_batch(input_ids: torch.Tensor, sep_token_id: int) -> torch.T
     num_trues_per_row = mask.sum(dim=1)
     max_trues_per_row = num_trues_per_row.max().item()
     # Step 4: Create an empty tensor to hold the result
-    ranges_over_batch = -torch.ones((mask.size(0), max_trues_per_row), dtype=torch.long)
+    ranges_over_batch = -torch.ones((mask.size(0), max_trues_per_row), dtype=torch.long)  # type: ignore
 
     # Step 5: Use scatter to place column indices in the ranges_over_batch tensor
     # Create an index tensor that assigns each column index to the correct position in ranges_over_batch tensor
     row_indices = torch.arange(mask.size(0)).repeat_interleave(num_trues_per_row)
-    column_indices = torch.cat([torch.arange(n) for n in num_trues_per_row])
+    column_indices = torch.cat([torch.arange(n) for n in num_trues_per_row])  # type: ignore
 
     ranges_over_batch[row_indices, column_indices] = cols
     ranges_over_batch = torch.stack(
@@ -408,7 +408,7 @@ class EmbeddingBasedDataCollator(DataCollatorBase):
         source_embedding, target_embedding = self.get_embedding_cb(
             self.data, source_id, target_id
         )
-        random_row["prompt"] = row_to_adding_embedding_datapoint(
+        random_row["prompt"] = row_to_attention_datapoint(
             random_row, self.tokenizer.sep_token, self.tokenizer.pad_token
         )
         tokenized = self.tokenizer(
@@ -1010,7 +1010,7 @@ class BertClassifierOriginalArchitectureBase(ClassifierBase):
         return result
 
 
-class EmbeddingsBertClassifierBase(ClassifierBase):
+class AttentionBertClassifierBase(ClassifierBase):
     def __init__(
         self,
         loader,
@@ -1019,7 +1019,7 @@ class EmbeddingsBertClassifierBase(ClassifierBase):
         false_ratio=2.0,
         force_recompute=False,
     ) -> None:
-        best_model_path = LLM_EMBEDDING_BEST_MODEL_PATH
+        best_model_path = LLM_ATTENTION_BEST_MODEL_PATH
         attentions_path = EMBEDDING_ATTENTIONS_PATH
         hidden_states_path = EMBEDDING_HIDDEN_STATES_PATH
         self.graph_embeddings_path = EMBEDDING_GRAPH_EMBEDDINGS_PATH
@@ -1091,7 +1091,7 @@ class EmbeddingsBertClassifierBase(ClassifierBase):
         else:
             tokenized_dataset = dataset
         training_args = TrainingArguments(
-            output_dir=LLM_EMBEDDING_TRAINING_PATH,
+            output_dir=LLM_ATTENTION_TRAINING_PATH,
             num_train_epochs=epochs,
             per_device_train_batch_size=batch_size,
             per_device_eval_batch_size=batch_size,
@@ -1306,7 +1306,9 @@ class EmbeddingsBertClassifierBase(ClassifierBase):
                             )
                             del all_attentions
                         if "hidden_states" in load_fields:
-                            all_hidden_states = np.concatenate(all_hidden_states)
+                            all_hidden_states = np.concatenate(
+                                all_hidden_states, axis=1
+                            )
                             np.save(
                                 HIDDEN_STATES_EMBEDDING_PATH.format(split, epoch),
                                 all_hidden_states,
@@ -1340,9 +1342,11 @@ class EmbeddingsBertClassifierBase(ClassifierBase):
                                     HIDDEN_STATES_EMBEDDING_PATH.format(split, epoch)
                                 )
                             )
-                    all_hidden_states = np.concatenate(all_hidden_states)
+                    all_hidden_states = np.concatenate(all_hidden_states, axis=1)
                     np.save(self.hidden_states_path, all_hidden_states)
-                    all_hidden_states = torch.from_numpy(all_hidden_states)
+                    all_hidden_states = torch.from_numpy(all_hidden_states).permute(
+                        (1, 0, 2, 3)
+                    )
                     all_tokens["hidden_states"] = all_hidden_states.unbind()
                     del all_hidden_states
 
@@ -1671,7 +1675,9 @@ class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
                             )
                             del all_attentions
                         if "hidden_states" in load_fields:
-                            all_hidden_states = np.concatenate(all_hidden_states)
+                            all_hidden_states = np.concatenate(
+                                all_hidden_states, axis=1
+                            )
                             np.save(
                                 HIDDEN_STATES_PROMPT_PATH.format(split, epoch),
                                 all_hidden_states,
@@ -1703,9 +1709,11 @@ class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
                             all_hidden_states.append(
                                 np.load(HIDDEN_STATES_PROMPT_PATH.format(split, epoch))
                             )
-                    all_hidden_states = np.concatenate(all_hidden_states)
+                    all_hidden_states = np.concatenate(all_hidden_states, axis=1)
                     np.save(self.hidden_states_path, all_hidden_states)
-                    all_hidden_states = torch.from_numpy(all_hidden_states)
+                    all_hidden_states = torch.from_numpy(all_hidden_states).permute(
+                        (1, 0, 2, 3)
+                    )
                     all_tokens["hidden_states"] = all_hidden_states.unbind()
                     del all_hidden_states
 
@@ -2005,7 +2013,9 @@ class VanillaBertClassifier(BertClassifierOriginalArchitectureBase):
                             )
                             del all_attentions
                         if "hidden_states" in load_fields:
-                            all_hidden_states = np.concatenate(all_hidden_states)
+                            all_hidden_states = np.concatenate(
+                                all_hidden_states, axis=1
+                            )
                             np.save(
                                 HIDDEN_STATES_VANILLA_PATH.format(split, epoch),
                                 all_hidden_states,
@@ -2030,9 +2040,11 @@ class VanillaBertClassifier(BertClassifierOriginalArchitectureBase):
                             all_hidden_states.append(
                                 np.load(HIDDEN_STATES_VANILLA_PATH.format(split, epoch))
                             )
-                    all_hidden_states = np.concatenate(all_hidden_states)
+                    all_hidden_states = np.concatenate(all_hidden_states, axis=1)
                     np.save(self.hidden_states_path, all_hidden_states)
-                    all_hidden_states = torch.from_numpy(all_hidden_states)
+                    all_hidden_states = torch.from_numpy(all_hidden_states).permute(
+                        (1, 0, 2, 3)
+                    )
                     all_tokens["hidden_states"] = all_hidden_states.unbind()
                     del all_hidden_states
 

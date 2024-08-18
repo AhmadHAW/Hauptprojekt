@@ -169,7 +169,7 @@ class GNNTrainer:
         self.kge_dimension = kge_dimension
         self.force_recompute = force_recompute
 
-    def train_model(self, data, epochs):
+    def train_model(self, data, epochs, batch_size=64):
         """
         From Tutorial
         We are now ready to create a mini-batch loader that will generate subgraphs that can be used as input into our GNN.
@@ -201,7 +201,7 @@ class GNNTrainer:
             neg_sampling_ratio=2.0,
             edge_label_index=(("source", "edge", "target"), edge_label_index),
             edge_label=edge_label,
-            batch_size=128,
+            batch_size=batch_size,
             shuffle=True,
         )
         for epoch in range(1, epochs + 1):
