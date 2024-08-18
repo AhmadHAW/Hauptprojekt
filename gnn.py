@@ -301,7 +301,9 @@ class GNNTrainer:
         )
         return row
 
-    def generate_embeddings(self, llm_df: DataFrame, force_recompute: bool = False):
+    def generate_embeddings(
+        self, llm_df: DataFrame, force_recompute: bool = False
+    ) -> DataFrame:
         """
         This method passes all edges (source - target) to the GNN to produce source and target embeddings.
         Parameters
