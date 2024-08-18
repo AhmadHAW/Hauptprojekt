@@ -1,7 +1,6 @@
 import os
 from typing import List, Tuple, Callable, Optional, Dict, Union, Set, Union
-from pathlib import Path
-from abc import ABC, abstractmethod
+from abc import ABC
 
 import torch
 from torch_geometric.data import download_url, extract_zip
@@ -10,27 +9,13 @@ import torch_geometric.transforms as T
 import pandas as pd
 import datasets
 from datasets import Dataset, DatasetDict
-import numpy as np
 
-
-def transform_embeddings_to_string(embeddings: torch.Tensor, float_numbers: int = 16):
-    return str([format(embedding, f".{float_numbers}f") for embedding in embeddings])
-
-
-def _find_non_existing_source_target(
-    df: pd.DataFrame, already_added_pairs: Optional[Set[Tuple[int, int]]] = None
-) -> Tuple[int, int]:
-    while True:
-        source_id = np.random.choice(df["source_id"].unique())
-        target_id = np.random.choice(df["target_id"].unique())
-        if not ((df["source_id"] == source_id) & (df["target_id"] == target_id)).any():
-            if (
-                already_added_pairs is None
-                or (source_id, target_id) not in already_added_pairs
-            ):
-                if already_added_pairs is not None:
-                    already_added_pairs.add((source_id, target_id))
-                return source_id, target_id
+from utils import (
+    row_to_attention_datapoint,
+    row_to_prompt_datapoint,
+    row_to_vanilla_datapoint,
+    _find_non_existing_source_target,
+)
 
 
 ROOT = "./data"  # The root path where models and datasets are saved at.
@@ -86,33 +71,6 @@ DIRS_TO_INIT = [
     LLM_VANILLA_PATH,
     PCA_PATH,
 ]
-
-PROMPT_COLUMNS = ["source_id", "title", "genres"]
-
-
-def row_to_attention_datapoint(
-    row: pd.Series,
-    sep_token: str = "[SEP]",
-    pad_token: str = "[PAD]",
-) -> str:
-    prompt = row_to_vanilla_datapoint(row, sep_token)
-    prompt = f"{prompt}{pad_token}{sep_token}{pad_token}"
-    return prompt
-
-
-def row_to_prompt_datapoint(row: pd.Series, sep_token: str = "[SEP]") -> str:
-    prompt = row_to_vanilla_datapoint(row, sep_token)
-    prompt_source_embedding = row["prompt_source_embedding"]
-    prompt_target_embedding = row["prompt_target_embedding"]
-    prompt = f"{prompt}{transform_embeddings_to_string(prompt_source_embedding)}{sep_token}{transform_embeddings_to_string(prompt_target_embedding)}"
-    return prompt
-
-
-def row_to_vanilla_datapoint(row: pd.Series, sep_token: str) -> str:
-    prompt = ""
-    for prompt_column in PROMPT_COLUMNS:
-        prompt += f"{row[prompt_column]}{sep_token}"
-    return prompt
 
 
 class KGLoader(ABC):

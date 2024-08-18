@@ -6,6 +6,25 @@ import json
 import ast
 from pathlib import Path
 
+import torch
+from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+import datasets
+import numpy as np
+import pandas as pd
+import evaluate
+from torch.utils.data import DataLoader, Dataset
+from transformers import (
+    BertForSequenceClassification,
+    BertTokenizer,
+    DataCollatorForLanguageModeling,
+    Trainer,
+    TrainingArguments,
+)
+from transformers.modeling_outputs import SequenceClassifierOutput
+from transformers.utils import is_datasets_available
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+import matplotlib.pyplot as plt
+
 from dataset_preprocess import (
     LLM_PROMPT_TRAINING_PATH,
     LLM_ATTENTION_TRAINING_PATH,
@@ -16,37 +35,13 @@ from dataset_preprocess import (
     LLM_VANILLA_PATH,
     LLM_PROMPT_PATH,
     LLM_ATTENTION_PATH,
+)
+from utils import (
     row_to_vanilla_datapoint,
     row_to_prompt_datapoint,
     row_to_attention_datapoint,
     _find_non_existing_source_target,
 )
-
-import torch
-from torch import nn
-from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
-from transformers.utils import ModelOutput
-import datasets
-import numpy as np
-import pandas as pd
-import evaluate
-from torch.utils.data import DataLoader, Dataset
-from transformers import (
-    BertForSequenceClassification,
-    BertModel,
-    BertTokenizer,
-    DataCollatorForLanguageModeling,
-    Trainer,
-    TrainingArguments,
-)
-from transformers.modeling_outputs import SequenceClassifierOutput
-from transformers.utils import is_datasets_available
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
-import matplotlib.pyplot as plt
-import seaborn as sns
-import networkx as nx
-from sklearn.decomposition import PCA
-import joblib
 
 ID2LABEL = {0: "FALSE", 1: "TRUE"}
 LABEL2ID = {"FALSE": 0, "TRUE": 1}
