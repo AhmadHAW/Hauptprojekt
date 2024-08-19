@@ -1,9 +1,8 @@
 import random as rd
-from typing import Optional, Union, Dict, Tuple, List
+from typing import Optional, Union, Dict, Tuple, List, Callable
 from abc import ABC, abstractmethod
 import os
 import json
-import ast
 from pathlib import Path
 
 import torch
@@ -25,7 +24,7 @@ from transformers.utils import is_datasets_available
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 import matplotlib.pyplot as plt
 
-from dataset_preprocess import (
+from dataset_manager import (
     LLM_PROMPT_TRAINING_PATH,
     LLM_ATTENTION_TRAINING_PATH,
     LLM_VANILLA_TRAINING_PATH,
@@ -37,10 +36,11 @@ from dataset_preprocess import (
     LLM_ATTENTION_PATH,
 )
 from utils import (
+    find_non_existing_source_target,
+    mean_over_ranges,
     row_to_vanilla_datapoint,
     row_to_prompt_datapoint,
     row_to_attention_datapoint,
-    _find_non_existing_source_target,
 )
 
 ID2LABEL = {0: "FALSE", 1: "TRUE"}
@@ -137,86 +137,54 @@ EMBEDDING_BASED_SEMANTIC_TOKENS = ALL_SEMANTIC_TOKENS + [
 ]
 
 
-def mean_over_ranges(
-    tens: torch.Tensor, starts: torch.Tensor, ends: torch.Tensor
+def get_semantic_positional_encoding(
+    input_ids: torch.Tensor, sep_token_id: int
 ) -> torch.Tensor:
-    """
-    This operation allows to produce a mean over ranges of different sizes in torch tensor manner only.
-    We use padding positions to calculate an average and then remove the padded positions afterwards.
-    This code was based on ChatGPT suggestions and works on the assumption:
-    Let S be the sum of the padded list of numbers.
-    Let n be the number of elements in the padded list.
-    Let μ be the average of the padded list of numbers.
-    Let r be the difference between the actual range lengths and the max range length
-    Let x be the number that is at the padding position.
-    μ' = ((μ * n)-(r * x)) / (n - r)
-    """
-    # input: # ends: torch.tensor([2, 5, 6]) starts: tensor([0, 2, 4])
-    # Compute the maximum length of the ranges
-    max_length = (ends - starts).max().item()
-    range_diffs = (max_length - (ends - starts)).unsqueeze(
-        1
-    )  # the amount of times, the range had to be padded
-    # Create a range tensor from 0 to max_length-1
-    range_tensor = torch.arange(max_length).unsqueeze(0)
+    mask = input_ids == sep_token_id
+    positions = mask.nonzero(as_tuple=True)
+    cols = positions[1]
 
-    # Compute the ranges using broadcasting and masking
-    ranges = starts.unsqueeze(1) + range_tensor
-    mask = ranges < ends.unsqueeze(1)
-
-    # Apply the mask
-    result = (
-        ranges * mask
-    )  # result: tensor([[0, 1, 0], [2, 3, 4], [4, 5, 0]]) here padding index is 0
-    #                        -                     -    positions were padded
-    result = result.unsqueeze(dim=2).repeat(1, 1, tens.shape[2])
-    gather = tens.gather(dim=1, index=result)
-    means = torch.mean(
-        gather, dim=1
-    )  # The mean was computed with the padding positions. We will remove the values from the mean now,
-    values_to_remove = range_diffs * tens[:, 0]  # the summed value at padded position
-    actual_means = (means * max_length - values_to_remove) / (
-        max_length - range_diffs
-    )  # the actual mean without padding positions
-    return actual_means
-
-
-def means_over_ranges_cross(
-    all_ranges_over_batch: torch.Tensor, all_attentions: torch.Tensor
-) -> torch.Tensor:
-    all_attentios_avgs = torch.zeros(
-        all_ranges_over_batch.shape[0],
-        all_ranges_over_batch.shape[1],
-        all_ranges_over_batch.shape[1],
-        all_attentions.shape[-1],
+    # Step 3: Determine the number of True values per row
+    num_trues_per_row = mask.sum(dim=1)
+    max_trues_per_row = num_trues_per_row.max().item()
+    # Step 4: Create an empty tensor to hold the result
+    semantic_positional_encoding = -torch.ones(
+        (mask.size(0), max_trues_per_row),  # type: ignore
+        dtype=torch.long,
     )
-    for batch, (batch_range, batch_attention) in enumerate(
-        zip(all_ranges_over_batch, all_attentions)
-    ):
-        for from_, delimiter_from in enumerate(batch_range):
-            for to_, delimiter_to in enumerate(batch_range):
-                batch_attention_sliced = batch_attention[
-                    delimiter_from[0] : delimiter_from[1]
-                ][:, delimiter_to[0] : delimiter_to[1]]
-                attention_avg = torch.mean(batch_attention_sliced, dim=(0, 1))
-                all_attentios_avgs[batch, from_, to_] = attention_avg
-    return all_attentios_avgs
+
+    # Step 5: Use scatter to place column indices in the semantic_positional_encoding tensor
+    # Create an index tensor that assigns each column index to the correct position in semantic_positional_encoding tensor
+    row_indices = torch.arange(mask.size(0)).repeat_interleave(num_trues_per_row)
+    column_indices = torch.cat([torch.arange(n) for n in num_trues_per_row])  # type: ignore
+
+    semantic_positional_encoding[row_indices, column_indices] = cols
+    semantic_positional_encoding = torch.stack(
+        [
+            semantic_positional_encoding[:, :-1] + 1,
+            semantic_positional_encoding[:, 1:],
+        ],
+        dim=2,
+    )
+    # Create a tensor of zeros to represent the starting points
+    second_points = torch.ones(
+        semantic_positional_encoding.size(0),
+        1,
+        2,
+        dtype=semantic_positional_encoding.dtype,
+    )
+    # Set the second column to be the first element of the first range
+    second_points[:, 0, 1] = semantic_positional_encoding[:, 0, 0] - 1
+    # Concatenate the start_points tensor with the original semantic_positional_encoding tensor
+    semantic_positional_encoding = torch.cat(
+        (second_points, semantic_positional_encoding), dim=1
+    )
+    return semantic_positional_encoding
 
 
-def avg_over_hidden_states(all_ranges_over_batch, last_hidden_states):
-    averaged_hidden_states = []
-    for position in range(all_ranges_over_batch.shape[1]):
-        ranges_over_batch = all_ranges_over_batch[:, position]
-        starts = ranges_over_batch[:, 0]
-        ends = ranges_over_batch[:, 1]
-        averaged_hidden_state = mean_over_ranges(last_hidden_states, starts, ends)
-        averaged_hidden_states.append(averaged_hidden_state)
-    return torch.stack(averaged_hidden_states)
-
-
-def sort_ranges(ranges_over_batch):
+def sort_ranges(semantic_positional_encoding: torch.Tensor):
     # Extract the second element (end of the current ranges excluded the starting cps token)
-    end_elements = ranges_over_batch[:, :, 1]
+    end_elements = semantic_positional_encoding[:, :, 1]
     # Create the new ranges by adding 1 to the end elements
     new_ranges = torch.stack([end_elements, end_elements + 1], dim=-1)
     # add the cls positions to it
@@ -227,56 +195,25 @@ def sort_ranges(ranges_over_batch):
     )  # Shape (batch_size, 1, 2)
     new_ranges = torch.cat((new_ranges, cls_positions), dim=1)
     # Concatenate the original ranges with the new ranges
-    ranges_over_batch = torch.cat((ranges_over_batch, new_ranges), dim=1)
+    semantic_positional_encoding = torch.cat(
+        (semantic_positional_encoding, new_ranges), dim=1
+    )
     # Step 1: Extract the last value of dimension 2
-    last_values = ranges_over_batch[:, :, -1]  # Shape (batch_size, num_elements)
+    last_values = semantic_positional_encoding[
+        :, :, -1
+    ]  # Shape (batch_size, num_elements)
 
     # Step 2: Sort the indices based on these last values
     # 'values' gives the sorted values (optional), 'indices' gives the indices to sort along dim 1
     _, indices = torch.sort(last_values, dim=1, descending=False)
 
     # Step 3: Apply the sorting indices to the original tensor
-    ranges_over_batch = torch.gather(
-        ranges_over_batch,
+    semantic_positional_encoding = torch.gather(
+        semantic_positional_encoding,
         1,
-        indices.unsqueeze(-1).expand(-1, -1, ranges_over_batch.size(2)),
+        indices.unsqueeze(-1).expand(-1, -1, semantic_positional_encoding.size(2)),
     )
-    return ranges_over_batch
-
-
-def find_sep_in_tokens(tokens, sep_token_id) -> torch.Tensor:
-    return tokens == sep_token_id
-
-
-def get_ranges_over_batch(input_ids: torch.Tensor, sep_token_id: int) -> torch.Tensor:
-    mask = find_sep_in_tokens(input_ids, sep_token_id)
-    positions = mask.nonzero(as_tuple=True)
-    cols = positions[1]
-
-    # Step 3: Determine the number of True values per row
-    num_trues_per_row = mask.sum(dim=1)
-    max_trues_per_row = num_trues_per_row.max().item()
-    # Step 4: Create an empty tensor to hold the result
-    ranges_over_batch = -torch.ones((mask.size(0), max_trues_per_row), dtype=torch.long)  # type: ignore
-
-    # Step 5: Use scatter to place column indices in the ranges_over_batch tensor
-    # Create an index tensor that assigns each column index to the correct position in ranges_over_batch tensor
-    row_indices = torch.arange(mask.size(0)).repeat_interleave(num_trues_per_row)
-    column_indices = torch.cat([torch.arange(n) for n in num_trues_per_row])  # type: ignore
-
-    ranges_over_batch[row_indices, column_indices] = cols
-    ranges_over_batch = torch.stack(
-        [ranges_over_batch[:, :-1] + 1, ranges_over_batch[:, 1:]], dim=2
-    )
-    # Create a tensor of zeros to represent the starting points
-    second_points = torch.ones(
-        ranges_over_batch.size(0), 1, 2, dtype=ranges_over_batch.dtype
-    )
-    # Set the second column to be the first element of the first range
-    second_points[:, 0, 1] = ranges_over_batch[:, 0, 0] - 1
-    # Concatenate the start_points tensor with the original ranges_over_batch tensor
-    ranges_over_batch = torch.cat((second_points, ranges_over_batch), dim=1)
-    return ranges_over_batch
+    return semantic_positional_encoding
 
 
 class DataCollatorBase(DataCollatorForLanguageModeling, ABC):
@@ -329,14 +266,14 @@ class TextBasedDataCollator(DataCollatorBase, ABC):
             [f["attention_mask"] for f in features], dtype=torch.long
         )
         labels = torch.tensor([f["labels"] for f in features], dtype=torch.long)
-        ranges_over_batch = torch.tensor(
-            [f["ranges_over_batch"] for f in features], dtype=torch.long
+        semantic_positional_encoding = torch.tensor(
+            [f["semantic_positional_encoding"] for f in features], dtype=torch.long
         )
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "labels": labels,
-            "ranges_over_batch": ranges_over_batch,
+            "semantic_positional_encoding": semantic_positional_encoding,
         }
 
 
@@ -363,8 +300,8 @@ class EmbeddingBasedDataCollator(DataCollatorBase):
             [f["attention_mask"] for f in features], dtype=torch.long
         )
         labels = torch.tensor([f["labels"] for f in features], dtype=torch.long)
-        ranges_over_batch = torch.tensor(
-            [f["ranges_over_batch"] for f in features], dtype=torch.long
+        semantic_positional_encoding = torch.tensor(
+            [f["semantic_positional_encoding"] for f in features], dtype=torch.long
         )
         for f in features:
             if isinstance(f["graph_embeddings"], list):
@@ -379,12 +316,12 @@ class EmbeddingBasedDataCollator(DataCollatorBase):
             "attention_mask": attention_mask,
             "labels": labels,
             "graph_embeddings": graph_embeddings,
-            "ranges_over_batch": ranges_over_batch,
+            "semantic_positional_encoding": semantic_positional_encoding,
         }
 
     def _transform_to_false_example(self) -> Dict:
         label = 0
-        source_id, target_id = _find_non_existing_source_target(self.df)
+        source_id, target_id = find_non_existing_source_target(self.df)
 
         random_source: pd.DataFrame = (
             self.source_df[self.source_df["id"] == source_id]
@@ -411,19 +348,23 @@ class EmbeddingBasedDataCollator(DataCollatorBase):
         )
         sep_token_id = self.tokenizer.sep_token_id
         assert sep_token_id
-        ranges_over_batch = get_ranges_over_batch(
+        semantic_positional_encoding = get_semantic_positional_encoding(
             torch.tensor(tokenized["input_ids"]).unsqueeze(0),
             sep_token_id,
         )
-        ranges_over_batch = (
-            sort_ranges(ranges_over_batch).squeeze(0).to("cpu").detach().tolist()
+        semantic_positional_encoding = (
+            sort_ranges(semantic_positional_encoding)
+            .squeeze(0)
+            .to("cpu")
+            .detach()
+            .tolist()
         )
         return {
             "input_ids": tokenized["input_ids"],
             "attention_mask": tokenized["attention_mask"],
             "labels": label,
             "graph_embeddings": torch.stack([source_embedding, target_embedding]),
-            "ranges_over_batch": ranges_over_batch,
+            "semantic_positional_encoding": semantic_positional_encoding,
         }
 
 
@@ -448,7 +389,7 @@ class PromptEmbeddingDataCollator(TextBasedDataCollator):
 
     def _transform_to_false_example(self) -> Dict:
         label = 0
-        source_id, target_id = _find_non_existing_source_target(self.df)
+        source_id, target_id = find_non_existing_source_target(self.df)
 
         random_source: pd.DataFrame = (
             self.source_df[self.source_df["id"] == source_id]
@@ -476,16 +417,16 @@ class PromptEmbeddingDataCollator(TextBasedDataCollator):
         )
         sep_token_id = self.tokenizer.sep_token_id
         assert sep_token_id
-        ranges_over_batch = get_ranges_over_batch(
+        semantic_positional_encoding = get_semantic_positional_encoding(
             torch.tensor(tokenized["input_ids"]).unsqueeze(0),
             sep_token_id,
         )
-        ranges_over_batch = sort_ranges(ranges_over_batch)
+        semantic_positional_encoding = sort_ranges(semantic_positional_encoding)
         return {
             "input_ids": tokenized["input_ids"],
             "attention_mask": tokenized["attention_mask"],
             "labels": label,
-            "ranges_over_batch": ranges_over_batch.squeeze(0)
+            "semantic_positional_encoding": semantic_positional_encoding.squeeze(0)
             .to("cpu")
             .detach()
             .tolist(),
@@ -494,7 +435,7 @@ class PromptEmbeddingDataCollator(TextBasedDataCollator):
 
 class VanillaEmbeddingDataCollator(TextBasedDataCollator):
     """
-    The vanilla data collator does only generate false edges with the prompt, title, user_id and genres.
+    The vanilla data collator does only generate false edges without KGEs.
     """
 
     def __init__(self, tokenizer, df, source_df, target_df, false_ratio=2.0):
@@ -502,7 +443,7 @@ class VanillaEmbeddingDataCollator(TextBasedDataCollator):
 
     def _transform_to_false_example(self) -> Dict:
         label = 0
-        source_id, target_id = _find_non_existing_source_target(self.df)
+        source_id, target_id = find_non_existing_source_target(self.df)
         random_source: pd.DataFrame = (
             self.source_df[self.source_df["id"] == source_id]
             .sample(1)
@@ -524,16 +465,16 @@ class VanillaEmbeddingDataCollator(TextBasedDataCollator):
         )
         sep_token_id = self.tokenizer.sep_token_id
         assert sep_token_id
-        ranges_over_batch = get_ranges_over_batch(
+        semantic_positional_encoding = get_semantic_positional_encoding(
             torch.tensor(tokenized["input_ids"]).unsqueeze(0),
             sep_token_id,
         )
-        ranges_over_batch = sort_ranges(ranges_over_batch)
+        semantic_positional_encoding = sort_ranges(semantic_positional_encoding)
         return {
             "input_ids": tokenized["input_ids"],
             "attention_mask": tokenized["attention_mask"],
             "labels": label,
-            "ranges_over_batch": ranges_over_batch.squeeze(0)
+            "semantic_positional_encoding": semantic_positional_encoding.squeeze(0)
             .to("cpu")
             .detach()
             .tolist(),
@@ -628,12 +569,12 @@ class SequenceClassifierOutputOverRanges(SequenceClassifierOutput):
         loss: Optional[torch.FloatTensor] = None,
         hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None,
         attentions: Optional[Tuple[torch.FloatTensor, ...]] = None,
-        ranges_over_batch: Optional[torch.Tensor] = None,
+        semantic_positional_encoding: Optional[torch.Tensor] = None,
     ):
         super().__init__(
             loss=loss, logits=logits, hidden_states=hidden_states, attentions=attentions
         )  # type: ignore
-        self.ranges_over_batch = ranges_over_batch
+        self.semantic_positional_encoding = semantic_positional_encoding
 
     def to_tuple(self):
         # Ensure that your custom field is included when converting to a tuple
@@ -644,7 +585,7 @@ class SequenceClassifierOutputOverRanges(SequenceClassifierOutput):
                 self.logits,
                 self.hidden_states,
                 self.attentions,
-                self.ranges_over_batch,
+                self.semantic_positional_encoding,
             )
             if v is not None
         )
@@ -663,7 +604,7 @@ class BertForSequenceClassificationRanges(BertForSequenceClassification):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        ranges_over_batch: Optional[torch.Tensor] = None,
+        semantic_positional_encoding: Optional[torch.Tensor] = None,
     ) -> Union[Tuple[torch.Tensor], SequenceClassifierOutputOverRanges]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
@@ -725,7 +666,7 @@ class BertForSequenceClassificationRanges(BertForSequenceClassification):
             logits=logits,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-            ranges_over_batch=ranges_over_batch,
+            semantic_positional_encoding=semantic_positional_encoding,
         )
 
 
@@ -743,7 +684,7 @@ class EmbeddingBertForSequenceClassification(BertForSequenceClassification):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         graph_embeddings: Optional[torch.Tensor] = None,
-        ranges_over_batch: Optional[torch.Tensor] = None,
+        semantic_positional_encoding: Optional[torch.Tensor] = None,
     ) -> Union[Tuple[torch.Tensor], SequenceClassifierOutputOverRanges]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
@@ -820,7 +761,7 @@ class EmbeddingBertForSequenceClassification(BertForSequenceClassification):
             logits=logits,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-            ranges_over_batch=ranges_over_batch,
+            semantic_positional_encoding=semantic_positional_encoding,
         )
 
 
@@ -937,6 +878,43 @@ class ClassifierBase(ABC):
         plt.legend()
         plt.show()
 
+    def _avg_over_hidden_states(
+        self,
+        all_semantic_positional_encoding: torch.Tensor,
+        last_hidden_states: torch.Tensor,
+    ):
+        averaged_hidden_states = []
+        for position in range(all_semantic_positional_encoding.shape[1]):
+            semantic_positional_encoding = all_semantic_positional_encoding[:, position]
+            starts = semantic_positional_encoding[:, 0]
+            ends = semantic_positional_encoding[:, 1]
+            averaged_hidden_state = mean_over_ranges(last_hidden_states, starts, ends)
+            averaged_hidden_states.append(averaged_hidden_state)
+        return torch.stack(averaged_hidden_states)
+
+    def _means_over_ranges_cross(
+        self,
+        all_semantic_positional_encoding: torch.Tensor,
+        all_attentions: torch.Tensor,
+    ) -> torch.Tensor:
+        all_attentios_avgs = torch.zeros(
+            all_semantic_positional_encoding.shape[0],
+            all_semantic_positional_encoding.shape[1],
+            all_semantic_positional_encoding.shape[1],
+            all_attentions.shape[-1],
+        )
+        for batch, (batch_range, batch_attention) in enumerate(
+            zip(all_semantic_positional_encoding, all_attentions)
+        ):
+            for from_, delimiter_from in enumerate(batch_range):
+                for to_, delimiter_to in enumerate(batch_range):
+                    batch_attention_sliced = batch_attention[
+                        delimiter_from[0] : delimiter_from[1]
+                    ][:, delimiter_to[0] : delimiter_to[1]]
+                    attention_avg = torch.mean(batch_attention_sliced, dim=(0, 1))
+                    all_attentios_avgs[batch, from_, to_] = attention_avg
+        return all_attentios_avgs
+
 
 class BertClassifierOriginalArchitectureBase(ClassifierBase):
     def __init__(
@@ -981,16 +959,16 @@ class BertClassifierOriginalArchitectureBase(ClassifierBase):
             truncation=True,
             return_tensors="pt",
         )
-        ranges_over_batch = get_ranges_over_batch(
+        semantic_positional_encoding = get_semantic_positional_encoding(
             tokenized["input_ids"], self.tokenizer.sep_token_id
         )
-        ranges_over_batch = sort_ranges(ranges_over_batch)
+        semantic_positional_encoding = sort_ranges(semantic_positional_encoding)
         if return_pt:
             result = {
                 "input_ids": tokenized["input_ids"],
                 "attention_mask": tokenized["attention_mask"],
                 "labels": example["labels"],
-                "ranges_over_batch": ranges_over_batch,
+                "semantic_positional_encoding": semantic_positional_encoding,
             }
         else:
             result = {
@@ -1000,7 +978,9 @@ class BertClassifierOriginalArchitectureBase(ClassifierBase):
                 .to("cpu")
                 .tolist(),
                 "labels": example["labels"],
-                "ranges_over_batch": ranges_over_batch.detach().to("cpu").tolist(),
+                "semantic_positional_encoding": semantic_positional_encoding.detach()
+                .to("cpu")
+                .tolist(),
             }
         return result
 
@@ -1008,7 +988,7 @@ class BertClassifierOriginalArchitectureBase(ClassifierBase):
 class AttentionBertClassifierBase(ClassifierBase):
     def __init__(
         self,
-        loader,
+        kge_manager,
         get_embedding_cb,
         model_max_length=256,
         false_ratio=2.0,
@@ -1020,7 +1000,7 @@ class AttentionBertClassifierBase(ClassifierBase):
         self.graph_embeddings_path = EMBEDDING_GRAPH_EMBEDDINGS_PATH
         tokens_path = EMBEDDING_TOKENS_PATH
         super().__init__(
-            df=loader.llm_df,
+            df=kge_manager.llm_df,
             semantic_datapoints=EMBEDDING_BASED_SEMANTIC_TOKENS,
             best_model_path=best_model_path,
             attentions_path=attentions_path,
@@ -1045,32 +1025,32 @@ class AttentionBertClassifierBase(ClassifierBase):
         self.train_data_collator = EmbeddingBasedDataCollator(
             self.tokenizer,
             self.device,
-            loader.llm_df,
-            loader.source_df,
-            loader.target_df,
-            loader.gnn_train_data,
+            kge_manager.llm_df,
+            kge_manager.source_df,
+            kge_manager.target_df,
+            kge_manager.gnn_train_data,
             get_embedding_cb,
             false_ratio=false_ratio,
         )
         self.test_data_collator = EmbeddingBasedDataCollator(
             self.tokenizer,
             self.device,
-            loader.llm_df,
-            loader.source_df,
-            loader.target_df,
-            loader.gnn_test_data,
+            kge_manager.llm_df,
+            kge_manager.source_df,
+            kge_manager.target_df,
+            kge_manager.gnn_test_data,
             get_embedding_cb,
-            false_ratio=false_ratio,
+            false_ratio=-1.0,
         )
         self.eval_data_collator = EmbeddingBasedDataCollator(
             self.tokenizer,
             self.device,
-            loader.llm_df,
-            loader.source_df,
-            loader.target_df,
-            loader.gnn_val_data,
+            kge_manager.llm_df,
+            kge_manager.source_df,
+            kge_manager.target_df,
+            kge_manager.gnn_val_data,
             get_embedding_cb,
-            false_ratio=false_ratio,
+            false_ratio=-1.0,
         )
 
     def _get_trainer(
@@ -1118,16 +1098,16 @@ class AttentionBertClassifierBase(ClassifierBase):
             truncation=True,
             return_tensors="pt",
         )
-        ranges_over_batch = get_ranges_over_batch(
+        semantic_positional_encoding = get_semantic_positional_encoding(
             tokenized["input_ids"], self.tokenizer.sep_token_id
         )
-        ranges_over_batch = sort_ranges(ranges_over_batch)
+        semantic_positional_encoding = sort_ranges(semantic_positional_encoding)
         if return_pt:
             result = {
                 "input_ids": tokenized["input_ids"],
                 "attention_mask": tokenized["attention_mask"],
                 "labels": example["labels"],
-                "ranges_over_batch": ranges_over_batch,
+                "semantic_positional_encoding": semantic_positional_encoding,
                 "graph_embeddings": example["graph_embeddings"],
             }
         else:
@@ -1138,7 +1118,9 @@ class AttentionBertClassifierBase(ClassifierBase):
                 .to("cpu")
                 .tolist(),
                 "labels": example["labels"],
-                "ranges_over_batch": ranges_over_batch.detach().to("cpu").tolist(),
+                "semantic_positional_encoding": semantic_positional_encoding.detach()
+                .to("cpu")
+                .tolist(),
                 "graph_embeddings": example["graph_embeddings"],
             }
         return result
@@ -1197,6 +1179,7 @@ class AttentionBertClassifierBase(ClassifierBase):
     def forward_dataset_and_save_outputs(
         self,
         dataset: datasets.Dataset | datasets.DatasetDict,
+        get_tokens_as_df_cb: Callable,
         splits: List[str] = ["train", "test", "val"],
         batch_size: int = 64,
         epochs: int = 1,
@@ -1243,27 +1226,31 @@ class AttentionBertClassifierBase(ClassifierBase):
                                 input_ids=batch["input_ids"],
                                 attention_mask=batch["attention_mask"],
                                 graph_embeddings=batch["graph_embeddings"],
-                                ranges_over_batch=batch["ranges_over_batch"],
+                                semantic_positional_encoding=batch[
+                                    "semantic_positional_encoding"
+                                ],
                                 output_hidden_states=add_hidden_states,
                                 output_attentions=add_attentions,
                             )
-                            ranges_over_batch = batch["ranges_over_batch"]
+                            semantic_positional_encoding = batch[
+                                "semantic_positional_encoding"
+                            ]
                             if add_attentions:
                                 attentions = outputs.attentions
                                 attentions = [
                                     torch.sum(layer, dim=1) for layer in attentions
                                 ]
                                 attentions = torch.stack(attentions).permute(1, 2, 3, 0)
-                                attentions = means_over_ranges_cross(
-                                    ranges_over_batch, attentions
+                                attentions = self._means_over_ranges_cross(
+                                    semantic_positional_encoding, attentions
                                 ).numpy()
                                 all_attentions.append(attentions)
                             if add_hidden_states:
                                 hidden_states_on_each_layer = []
                                 for hidden_states in outputs.hidden_states:
                                     hidden_states_on_layer = (
-                                        avg_over_hidden_states(
-                                            ranges_over_batch, hidden_states
+                                        self._avg_over_hidden_states(
+                                            semantic_positional_encoding, hidden_states
                                         )
                                         .permute((1, 0, 2))
                                         .numpy()
@@ -1275,8 +1262,10 @@ class AttentionBertClassifierBase(ClassifierBase):
                                     hidden_states_on_each_layer
                                 )
                                 all_hidden_states.append(hidden_states_on_each_layer)
-                            tokens = self.get_tokens_as_df(
-                                batch["input_ids"], ranges_over_batch[:, [1, 3, 5]]
+                            tokens = get_tokens_as_df_cb(
+                                batch["input_ids"],
+                                self.tokenizer,
+                                semantic_positional_encoding,
                             )
                             if add_graph_embeddings:
                                 all_graph_embeddings.append(
@@ -1393,49 +1382,11 @@ class AttentionBertClassifierBase(ClassifierBase):
         all_tokens[all_tokens["split"].isin(splits)]
         return all_tokens
 
-    def get_tokens_as_df(self, input_ids, all_ranges_over_batch) -> pd.DataFrame:
-        user_ids = []
-        titles = []
-        genres = []
-        all_semantic_tokens = [user_ids, titles, genres]
-        ends = all_ranges_over_batch[:, :, 1]
-        starts = all_ranges_over_batch[:, :, 0]
-        # input: # ends: torch.tensor([2, 5, 6]) starts: tensor([0, 2, 4])
-        # Compute the maximum length of the ranges
-        max_length = (ends - starts).max()
-        # Create a range tensor from 0 to max_length-1
-        range_tensor = torch.arange(max_length).unsqueeze(0)
-        for pos, semantic_tokens in enumerate(all_semantic_tokens):
-            # Compute the ranges using broadcasting and masking
-            ranges = starts[:, pos].unsqueeze(1) + range_tensor
-            mask = ranges < ends[:, pos].unsqueeze(1)
-
-            # Apply the mask
-            result = (
-                ranges * mask
-            )  # result: tensor([[0, 1, 0], [2, 3, 4], [4, 5, 0]]) here padding index is 0
-            #                        -                     -    positions were padded
-            # result = result.unsqueeze(dim = 2).repeat(1,1, input_ids.shape[2])
-            gather = input_ids.gather(dim=1, index=result)
-            decoded = self.tokenizer.batch_decode(gather, skip_special_tokens=False)
-            semantic_tokens.extend([decode.replace(" [CLS]", "") for decode in decoded])
-        all_semantic_tokens[0] = [int(id) for id in all_semantic_tokens[0]]
-        all_semantic_tokens[2] = [
-            ast.literal_eval(string_list) for string_list in all_semantic_tokens[2]
-        ]
-        data = {
-            "user_id": all_semantic_tokens[0],
-            "title": all_semantic_tokens[1],
-            "genres": all_semantic_tokens[2],
-        }
-        df = pd.DataFrame(data)
-        return df
-
 
 class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
     def __init__(
         self,
-        loader,
+        kge_manager,
         get_embedding_cb,
         model_max_length=256,
         false_ratio=2.0,
@@ -1447,7 +1398,7 @@ class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
         self.graph_embeddings_path = PROMPT_GRAPH_EMBEDDINGS_PATH
         tokens_path = PROMPT_TOKENS_PATH
         super().__init__(
-            df=loader.llm_df,
+            df=kge_manager.llm_df,
             semantic_datapoints=EMBEDDING_BASED_SEMANTIC_TOKENS,
             best_model_path=best_model_path,
             attentions_path=attentions_path,
@@ -1458,30 +1409,30 @@ class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
         )
         self.train_data_collator = PromptEmbeddingDataCollator(
             self.tokenizer,
-            loader.llm_df,
-            loader.source_df,
-            loader.target_df,
-            loader.gnn_train_data,
+            kge_manager.llm_df,
+            kge_manager.source_df,
+            kge_manager.target_df,
+            kge_manager.gnn_train_data,
             get_embedding_cb,
             false_ratio=false_ratio,
         )
         self.test_data_collator = PromptEmbeddingDataCollator(
             self.tokenizer,
-            loader.llm_df,
-            loader.source_df,
-            loader.target_df,
-            loader.gnn_test_data,
+            kge_manager.llm_df,
+            kge_manager.source_df,
+            kge_manager.target_df,
+            kge_manager.gnn_test_data,
             get_embedding_cb,
-            false_ratio=false_ratio,
+            false_ratio=-1.0,
         )
         self.eval_data_collator = PromptEmbeddingDataCollator(
             self.tokenizer,
-            loader.llm_df,
-            loader.source_df,
-            loader.target_df,
-            loader.gnn_val_data,
+            kge_manager.llm_df,
+            kge_manager.source_df,
+            kge_manager.target_df,
+            kge_manager.gnn_val_data,
             get_embedding_cb,
-            false_ratio=false_ratio,
+            false_ratio=-1.0,
         )
 
     def _get_trainer(
@@ -1567,6 +1518,7 @@ class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
     def forward_dataset_and_save_outputs(
         self,
         dataset: datasets.Dataset | datasets.DatasetDict,
+        get_tokens_as_df_cb: Callable,
         splits: List[str] = ["train", "test", "val"],
         batch_size: int = 64,
         epochs: int = 1,
@@ -1612,27 +1564,31 @@ class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
                             outputs = self.model(
                                 input_ids=batch["input_ids"],
                                 attention_mask=batch["attention_mask"],
-                                ranges_over_batch=batch["ranges_over_batch"],
+                                semantic_positional_encoding=batch[
+                                    "semantic_positional_encoding"
+                                ],
                                 output_hidden_states=add_hidden_states,
                                 output_attentions=add_attentions,
                             )
-                            ranges_over_batch = batch["ranges_over_batch"]
+                            semantic_positional_encoding = batch[
+                                "semantic_positional_encoding"
+                            ]
                             if add_attentions:
                                 attentions = outputs.attentions
                                 attentions = [
                                     torch.sum(layer, dim=1) for layer in attentions
                                 ]
                                 attentions = torch.stack(attentions).permute(1, 2, 3, 0)
-                                attentions = means_over_ranges_cross(
-                                    ranges_over_batch, attentions
+                                attentions = self._means_over_ranges_cross(
+                                    semantic_positional_encoding, attentions
                                 ).numpy()
                                 all_attentions.append(attentions)
                             if add_hidden_states:
                                 hidden_states_on_each_layer = []
                                 for hidden_states in outputs.hidden_states:
                                     hidden_states_on_layer = (
-                                        avg_over_hidden_states(
-                                            ranges_over_batch, hidden_states
+                                        self._avg_over_hidden_states(
+                                            semantic_positional_encoding, hidden_states
                                         )
                                         .permute((1, 0, 2))
                                         .numpy()
@@ -1644,9 +1600,10 @@ class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
                                     hidden_states_on_each_layer
                                 )
                                 all_hidden_states.append(hidden_states_on_each_layer)
-                            tokens, graph_embeddings = self.get_tokens_as_df(
+                            tokens, graph_embeddings = get_tokens_as_df_cb(
                                 batch["input_ids"],
-                                ranges_over_batch[:, [1, 3, 5, 7, 9]],
+                                self.tokenizer,
+                                semantic_positional_encoding,
                             )
                             if add_graph_embeddings:
                                 all_graph_embeddings.append(graph_embeddings.numpy())
@@ -1760,62 +1717,6 @@ class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
         all_tokens[all_tokens["split"].isin(splits)]
         return all_tokens
 
-    def get_tokens_as_df(
-        self, input_ids, all_ranges_over_batch
-    ) -> Tuple[pd.DataFrame, torch.Tensor]:
-        all_semantic_tokens = [[], [], [], [], []]
-        ends = all_ranges_over_batch[:, :, 1]
-        starts = all_ranges_over_batch[:, :, 0]
-        # input: # ends: torch.tensor([2, 5, 6]) starts: tensor([0, 2, 4])
-        # Compute the maximum length of the ranges
-        max_length = (ends - starts).max()
-        # Create a range tensor from 0 to max_length-1
-        range_tensor = torch.arange(max_length).unsqueeze(0)
-        for pos, semantic_tokens in enumerate(all_semantic_tokens):
-            # Compute the ranges using broadcasting and masking
-            ranges = starts[:, pos].unsqueeze(1) + range_tensor
-            mask = ranges < ends[:, pos].unsqueeze(1)
-
-            # Apply the mask
-            result = (
-                ranges * mask
-            )  # result: tensor([[0, 1, 0], [2, 3, 4], [4, 5, 0]]) here padding index is 0
-            #                        -                     -    positions were padded
-            # result = result.unsqueeze(dim = 2).repeat(1,1, input_ids.shape[2])
-            gather = input_ids.gather(dim=1, index=result)
-            decoded = self.tokenizer.batch_decode(gather, skip_special_tokens=False)
-            semantic_tokens.extend([decode.replace(" [CLS]", "") for decode in decoded])
-        all_semantic_tokens[0] = [int(id) for id in all_semantic_tokens[0]]
-        all_semantic_tokens[2] = [
-            ast.literal_eval(string_list) for string_list in all_semantic_tokens[2]
-        ]
-        all_semantic_tokens[3] = [
-            [
-                float(str_float)
-                for str_float in ast.literal_eval(string_list.replace(" ", ""))
-            ]
-            for string_list in all_semantic_tokens[3]
-        ]
-        all_semantic_tokens[4] = [
-            [
-                float(str_float)
-                for str_float in ast.literal_eval(string_list.replace(" ", ""))
-            ]
-            for string_list in all_semantic_tokens[4]
-        ]
-        user_embeddings = torch.tensor(all_semantic_tokens[3])
-        movie_embeddings = torch.tensor(all_semantic_tokens[4])
-        graph_embeddings = torch.stack([user_embeddings, movie_embeddings]).permute(
-            (1, 0, 2)
-        )
-        data = {
-            "user_id": all_semantic_tokens[0],
-            "title": all_semantic_tokens[1],
-            "genres": all_semantic_tokens[2],
-        }
-        df = pd.DataFrame(data)
-        return df, graph_embeddings
-
     def _get_data_collator(self, split):
         return (
             self.test_data_collator
@@ -1846,8 +1747,11 @@ class VanillaBertClassifier(BertClassifierOriginalArchitectureBase):
             model_max_length=model_max_length,
             force_recompute=force_recompute,
         )
-        self.data_collator = VanillaEmbeddingDataCollator(
+        self.train_data_collator = VanillaEmbeddingDataCollator(
             self.tokenizer, df, source_df, target_df, false_ratio=false_ratio
+        )
+        self.eval_data_collator = VanillaEmbeddingDataCollator(
+            self.tokenizer, df, source_df, target_df, false_ratio=-1.0
         )
 
     def _get_trainer(
@@ -1872,12 +1776,13 @@ class VanillaBertClassifier(BertClassifierOriginalArchitectureBase):
         )
         assert isinstance(self.model, BertForSequenceClassificationRanges)
         # Initialize the Trainer
-        return Trainer(
+        return CustomTrainer(
             model=self.model,
             args=training_args,
             train_dataset=tokenized_dataset["train"],
             eval_dataset=tokenized_dataset["test"],
-            data_collator=self.data_collator,
+            data_collator=self.train_data_collator,
+            eval_data_collator=self.eval_data_collator,
             compute_metrics=self._compute_metrics,  # type: ignore
         )
 
@@ -1913,6 +1818,7 @@ class VanillaBertClassifier(BertClassifierOriginalArchitectureBase):
     def forward_dataset_and_save_outputs(
         self,
         dataset: datasets.Dataset | datasets.DatasetDict,
+        get_tokens_as_df_cb: Callable,
         splits: List[str] = ["train", "test", "val"],
         batch_size: int = 64,
         epochs: int = 1,
@@ -1957,28 +1863,34 @@ class VanillaBertClassifier(BertClassifierOriginalArchitectureBase):
                             outputs = self.model(
                                 input_ids=input_ids,
                                 attention_mask=batch["attention_mask"],
-                                ranges_over_batch=batch["ranges_over_batch"],
+                                semantic_positional_encoding=batch[
+                                    "semantic_positional_encoding"
+                                ],
                                 output_hidden_states=add_hidden_states,
                                 output_attentions=add_attentions,
                             )
-                            ranges_over_batch = batch["ranges_over_batch"]
+                            semantic_positional_encoding = batch[
+                                "semantic_positional_encoding"
+                            ]
                             if "attentions" in load_fields:
                                 attentions = outputs.attentions
                                 attentions = [
                                     torch.sum(layer, dim=1) for layer in attentions
                                 ]
                                 attentions = torch.stack(attentions).permute(1, 2, 3, 0)
-                                attentions = means_over_ranges_cross(
-                                    ranges_over_batch, attentions
+                                attentions = self._means_over_ranges_cross(
+                                    semantic_positional_encoding, attentions
                                 )
                                 all_attentions.append(attentions.numpy())
                                 del attentions
                             if "hidden_states" in load_fields:
                                 hidden_states_on_each_layer = []
                                 for hidden_states in outputs.hidden_states:
-                                    hidden_states_on_layer = avg_over_hidden_states(
-                                        ranges_over_batch, hidden_states
-                                    ).permute((1, 0, 2))
+                                    hidden_states_on_layer = (
+                                        self._avg_over_hidden_states(
+                                            semantic_positional_encoding, hidden_states
+                                        ).permute((1, 0, 2))
+                                    )
                                     hidden_states_on_each_layer.append(
                                         hidden_states_on_layer.numpy()
                                     )
@@ -1987,8 +1899,10 @@ class VanillaBertClassifier(BertClassifierOriginalArchitectureBase):
                                     hidden_states_on_each_layer
                                 )
                                 all_hidden_states.append(hidden_states_on_each_layer)
-                            tokens = self.get_tokens_as_df(
-                                input_ids, ranges_over_batch[:, [1, 3, 5]]
+                            tokens = get_tokens_as_df_cb(
+                                self.tokenizer,
+                                input_ids,
+                                semantic_positional_encoding[:, [1, 3, 5]],
                             )
                             tokens["labels"] = batch["labels"].tolist()
                             tokens["split"] = splits_
@@ -2072,43 +1986,8 @@ class VanillaBertClassifier(BertClassifierOriginalArchitectureBase):
         all_tokens[all_tokens["split"].isin(splits)]
         return all_tokens
 
-    def get_tokens_as_df(self, input_ids, all_ranges_over_batch) -> pd.DataFrame:
-        user_ids = []
-        titles = []
-        genres = []
-        all_semantic_tokens = [user_ids, titles, genres]
-        ends = all_ranges_over_batch[:, :, 1]
-        starts = all_ranges_over_batch[:, :, 0]
-        # input: # ends: torch.tensor([2, 5, 6]) starts: tensor([0, 2, 4])
-        # Compute the maximum length of the ranges
-        max_length = (ends - starts).max()
-        # Create a range tensor from 0 to max_length-1
-        range_tensor = torch.arange(max_length).unsqueeze(0)
-        for pos, semantic_tokens in enumerate(all_semantic_tokens):
-            # Compute the ranges using broadcasting and masking
-            ranges = starts[:, pos].unsqueeze(1) + range_tensor
-            mask = ranges < ends[:, pos].unsqueeze(1)
-
-            # Apply the mask
-            result = (
-                ranges * mask
-            )  # result: tensor([[0, 1, 0], [2, 3, 4], [4, 5, 0]]) here padding index is 0
-            #                        -                     -    positions were padded
-            # result = result.unsqueeze(dim = 2).repeat(1,1, input_ids.shape[2])
-            gather = input_ids.gather(dim=1, index=result)
-            decoded = self.tokenizer.batch_decode(gather, skip_special_tokens=False)
-            semantic_tokens.extend([decode.replace(" [CLS]", "") for decode in decoded])
-        all_semantic_tokens[0] = [int(id) for id in all_semantic_tokens[0]]
-        all_semantic_tokens[2] = [
-            ast.literal_eval(string_list) for string_list in all_semantic_tokens[2]
-        ]
-        data = {
-            "user_id": all_semantic_tokens[0],
-            "title": all_semantic_tokens[1],
-            "genres": all_semantic_tokens[2],
-        }
-        df = pd.DataFrame(data)
-        return df
-
-    def _get_data_collator(self, split=None):
-        return self.data_collator
+    def _get_data_collator(self, split: str = "train") -> VanillaEmbeddingDataCollator:
+        if split == "train":
+            return self.train_data_collator
+        else:
+            return self.eval_data_collator

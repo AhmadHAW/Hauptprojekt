@@ -2,23 +2,118 @@
 by Ahmad Khalidi
 As part of the Hauptprojekt in the HAW-Hamburg.
 
+## Toolsuite Applications
+The Toolsuite is designed to give the user insights of how Knowledge Graph Embeddings change the semantic behaviour of LLMs (NLP-Transformer) and provides a pipeline with which a user can:
+
+**1.**  pre-process a suitable graph dataset and convert it into a standardized format,
+**2.**  produce low-dimensional graph embeddings (KGE) of nodes,
+**3.**  train multiple LLMs on the downstream task, with and without including KGEs and
+**4.**  create plots over semantically meaningful related areas of attentions and hidden states during inference.
+
+As a result of the toolsuite pipeline, the user is confronted with a the internal structures of multiple LLMs. Those LLMs were trained in different ways to include KGEs in or even omit KGEs completely and rely only on the natural language part of the dataset. This allows the user to get an understanding of how introducing KGEs to LLMs changes their semantic behaviour.
+
+The current version only supports the downstream task: **Link Prediction**, a task in which the model must decide for a given pair of nodes whether an edge exists between them.
+In addition, only the **Bert architecture** [8]  is currently supported. However, the corresponding interfaces for integrating other architectures are available.
+The tool suite was designed so that **standardized artifacts** are exchanged between the steps of the pipeline, thus ensuring a loose coupling of the components.
+The tool suite is demonstrated using the MovieLens dataset [7]. However, if the required preconditions are met, any other graph datasets can also be used for processing.
+
+## Toolsuite Components
+The toolsuite is divided into four main components: **Knowledge Graph Manager**, **Graph Representation Generator**, **LLM Manager** and **Explainability Module**.
+The Knowledge Graph Manager preprocesses given dataset and manages its distribution and persistence.
+The Graph Representation Generator manages the Graph Models to produe KGEs.
+The LLM Manager enables the LLMs to process KGE empowered datasets.
+Explainability Module produces manageable plots of the inner workings of the LLMs. The components are defined as following.
+
+### Knowledge Graph Manager
+
+#### Initialization
+
+The Knowledge Graph Manager is initialized with a standartized form of the Knowledge Graph. First the manager genereates a dir structure for all upcomming files to be saved. The dataset is then transformed into a Torch Geometric [6] Hetero data object ("A data object describing a heterogeneous graph, holding multiple node and/or edge types in disjunct storage objects."). This data object is then split into *train*, *test* and *validation* data objects. The same split is then applied on the original standartized form of the dataset. Last, prompts are generated, that can be used by LLMs for the downstream *link prediction* task **without** including *KGEs*.
+
+#### Dataset Distributions
+
+Every other component receives their datas from this manager but also provides new data to this manager, to be included in a standartized form. Once the KGEs are produced, they can be appended to the original standartized dataset.
+
+#### Dataset Persistence
+
+The standartized original form of the dataset are tabular data and saved as *csv*. Every additional Embeddings, while persisting are first transformed into torch-Tensors and saved seperatly. The saved csv do not contain any embeddings on the disk, but only in memory. 
+
+### Graph Representation Generator
+
+The graph representation generators are managing the underlying graph convolutional networks. They are also providing a callback function to other components which allows them to produce KGEs for any given datapoint. There is one graph representation generators for every method we have to include KGEs into the LLM decision process (currently 2). There are multiple generators in this toolsuite, because depending on the way the KGE is included in the LLM, different embedding sizes are viable and thus different graph convolutional model output sizes.
+
+#### Graph Convolutional Network Training
+
+Ones the Knowledge Graph Manager is initialized the Graph Representation Generator picks up the Hetero data object and trains the graph convolutional networks on the **link prediction** task. While training, **non-existing edges are produced on the fly** with a factor of 2:3, so for every existing edge, two non-existing edges are trained on.
+
+#### KGE Callback Function
+
+This callback function provides other components to generate the KGEs for any given datapoint (existing or non-existing). The callback function takes care, that when producing the KGE, only nodes of the same split are included.
+
+### LLM Manager
+
+The llm manager provide the nessecary tools to include KGEs into LLMs (currently Bert only). Every Bert Classifier in this component manages its own DataLoader and tokenize procedure, depending on how KGEs are included in the *link-prediction* task. After the training, the manager produces a fixed validation dataset that is then passed to the Explainability Module.
+
+#### Bert Classifier
+
+Every Bert Classifier manages the way, KGEs are included into the prediction process. For that the input parameters are expanded by a semantic positional encoding and in one case by the KGEs. To expand the input parameters, all classifier hold customized DataLoader and tokenize procedure.
+
+#### Data Loader
+
+The data loaders are based on the Graph Representation Learner and are able to produce non-existing edges on the fly. They also manage the KGEs and values to be passed in the correct format. A data loader can be initialized in a way, that no non-existing edges are produced on the fly.
+
+#### Tokenize Procedure
+
+The tokenize procedure is not only defining the mapping of prompts to input ids and attention masks, but also the generation of the semantic positional encodings. These encodings are used to summarize hidden states and attentions over the entire input positions.
+
+#### Producing the fixed Validation dataset
+
+The LLM Manager produces a fixed dataset with existing and non-existing edges. For every sample forwarded, the hidden states and attentions are summarized over the semantic positional encodings and then saved for later use. This results in a validation dataset that can be examined in the Explainability Module.
+
+### Explainability Module
+
+The Explainability Module is used to examine the semantic behaviour of the LLM and their usage of KGEs in downstream tasks. With the previous summarization process, the attentions can be used to explain what features and KGEs the LLM takes into consideration. The hidden states give indications of how much information is stored in the internal representation of the LLMs.
+
+#### Attentions View
+
+This module allows to plot the attentions over all input features over all attention layers of the LLM. This allows us to see which features and KGEs have the highest influence on the downstream task. We can also summerize the attentions even more to directly compare the influence of input features and KGEs.
+
+#### Hidden States View
+
+This module allows the user to display the internal LLM embeddings on a 2d view, using principal component analysis. For every feature and KGE, the summarized hidden states are transformed to two dimensions. The user can examine the differences of the models with corresponding filtering, coloring and shaping of the scatter plot.
+
+### Example Plots
+
+
+Vanilla Model             |  Prompt Model             |  Attention Model
+:-------------------------:|:-------------------------:|:-------------------------:
+![Vanilla Attentions](/images/Vanilla_Attentions.png)  |  ![Prompt Attentions](/images/Prompt_Attentions.png)|![Embedding Attentions](/images/Embedding_Attentions.png)
+![Vanilla Hidden States](/images/Vanilla_Hidden_States.png)  |  ![Prompt Hidden States](/images/Prompt_Hidden_States_user_title_genre.png)|![Embedding Hidden States](/images/Embedding_Hidden_States_user_title_genre.png)
+||![Prompt Hidden States](/images/Prompt_Hidden_States.png)|![Embedding Hidden States](/images/Embedding_Hidden_States.png)
+
+Here we see the attention views (top) and the hidden states views (middle and bottom) for three different KGE strategies: *no KGE included* (left), *KGE passed in prompt* (middle) and *KGE passed in the input embeddings* (right). We can see which features in the two layerd models influence the models behaviour most and how the internal embeddings store information.
+
+## Technical Details
+
+
+
+## Related Work
+
 The Large Language Model (LLM) Transformer architecture has achieved great success in the Natural language processing field (NLP) in recent years. However, the immense success has also increased the demand on language models to refer to underlying facts in questions of knowledge and to reason in a comprehensible manner.
 LLMs are often applied to purely natural language data, which do not include the structural information in which the texts may appear [1].
 Structural information can be mapped as **Knowledge Graphs (KG)**, among other things.
 KGs are multi-relational graphs that model knowledge from the real world in a structured way. Nodes represent entities such as names, products or locations and edges represent the relationships between these entities. In most cases, KGs are defined as a a list of triples: two entities and their relationship (i.e., ```<head entity, relation, tail entity>```)[2].
 There are two major strategies to include knowledge of graphs into LLMs: the parametic (embedding) approach, also known as **Knowledge Graph Embedding (KGE)** and the non-parametic approach, also known as **Retrieval-Augmented Generation (RAG)**[3].
 
-RAG allows LLMs to incorporate concrete knowledge from (un-)structured sources during sequence generation by using a pre-trained retriever to extract relevant passages from the facts and make them available to the LLM.
-In the context of KG, this could mean for RAG to extract the nodes and edges relevant for the task and make them available to the LLM as additional information.
-
-KGE, on the other hand, does not include any further textual information in the prediction, but refers exclusively to the specific graph topology of the entire graph and of nodes and edges in their (close) neighborhood.
+KGE refers exclusively to the specific graph topologies of (sub-) graphs, nodes and edges in their (close) neighborhood.
 ![Possible Graph Structures [1]](/images/Graph-Structures.png?raw=true)
 
 The illustration shows how strongly the structural differences between KG topologies can vary. With KGE, these complex high dimensional graph structures can be embedded on low-dimensional vectors and thus made available to the LLM for further downstream tasks [1][2][4].
+We want to provide a tool to understand *the **semantic processing of natural language in LLMs** when **knowledge graph embeddings** are introduced.*
 
 ## Research Question and Experiment
 While RAG is a powerful tool for incorporating factual knowledge into LLMs, in this project we focus only on the influence of KGEs on LLMs, as their semantic influence on the inner workings of LLMs has neither been sufficiently studied nor intuitively understood.
-With this knowledge, the following question arises from current research: *How does the **semantic processing of natural language in LLMs** change with the **inclusion of knowledge graph embeddings**, illustrated by a simple experiment?*
+With this knowledge, the following question arises from current research: 
 
 In a simple experiment, we want to determine how the inclusion of low dimensional graph embeddings affects the semantic *understanding* of the LLM. To do this, we compare LLMs that have been trained **with and without** the inclusion of KGEs. We want to determine what **degree of *attention*** the trained model gives to the KGEs. In addition, we want to determine how the **semantic properties of the LLM's output embeddings** change when the KGEs are included.
 
@@ -56,7 +151,7 @@ As before, we opt for the supposedly simplest implementation to observe the sema
 
 
 ## Dataset MovieLens
-MovieLens is a non-commercial movie-recommendation dataset. Users can rate films via an [Internet service](https://movielens.org/). In its full form, the benchmark dataset consists of 25 million film ratings, 1 million tags applied to 62,000 films and 16,000 users. A smaller version consists of 100000 ratings, 3600 tags, applied to 9000 movies and 600 users.
+MovieLens[7] is a non-commercial movie-recommendation dataset. Users can rate films via an [Internet service](https://movielens.org/). In its full form, the benchmark dataset consists of 25 million film ratings, 1 million tags applied to 62,000 films and 16,000 users. A smaller version consists of 100000 ratings, 3600 tags, applied to 9000 movies and 600 users.
 A data point has the form ```<user, movie, rating, timestamp>```. Users are only mapped as IDs. Movies have the content <title, ID, genres>. For our research question, we are not looking at the tags for now.
 As already mentioned, we have strictly adhered to the Torch Geometric Tutorial when reshaping the data set. As a result, we get the following data points for the graph model: ```<user, rates, movie>```, where user and movie only consist of the IDs.
 For the LLM we get the following data points: ```<prompt, label>```, where the prompt is a natural language text consisting of *user ID, movie title, movie genres and movie ID*. The label is ```1``` (for user has rated the movie) and ```0``` (for user has not rated the movie).
@@ -140,3 +235,5 @@ First             |  Second             |
 [6] Fey, Matthias and Jan Eric Lenssen. “Fast Graph Representation Learning with PyTorch Geometric.” ArXiv abs/1903.02428 (2019): n. pag.
 
 [7] Harper, F. Maxwell et al. “The MovieLens Datasets: History and Context.” ACM Trans. Interact. Intell. Syst. 5 (2016): 19:1-19:19.
+
+[8] Devlin, Jacob, Ming-Wei Chang, Kenton Lee and Kristina Toutanova. “BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding.” North American Chapter of the Association for Computational Linguistics (2019).

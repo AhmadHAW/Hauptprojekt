@@ -7,11 +7,7 @@ import torch
 PROMPT_COLUMNS = ["source_id", "title", "genres"]
 
 
-def transform_embeddings_to_string(embeddings: torch.Tensor, float_numbers: int = 16):
-    return str([format(embedding, f".{float_numbers}f") for embedding in embeddings])
-
-
-def _find_non_existing_source_target(
+def find_non_existing_source_target(
     df: pd.DataFrame, already_added_pairs: Optional[Set[Tuple[int, int]]] = None
 ) -> Tuple[int, int]:
     while True:
@@ -27,13 +23,57 @@ def _find_non_existing_source_target(
                 return source_id, target_id
 
 
+def mean_over_ranges(
+    tens: torch.Tensor, starts: torch.Tensor, ends: torch.Tensor
+) -> torch.Tensor:
+    """
+    This operation allows to produce a mean over ranges of different sizes in torch tensor manner only.
+    We use padding positions to calculate an average and then remove the padded positions afterwards.
+    This code was based on ChatGPT suggestions and works on the assumption:
+    Let S be the sum of the padded list of numbers.
+    Let n be the number of elements in the padded list.
+    Let μ be the average of the padded list of numbers.
+    Let r be the difference between the actual range lengths and the max range length
+    Let x be the number that is at the padding position.
+    μ' = ((μ * n)-(r * x)) / (n - r)
+    """
+    # input: # ends: torch.tensor([2, 5, 6]) starts: tensor([0, 2, 4])
+    # Compute the maximum length of the ranges
+    max_length = (ends - starts).max().item()
+    range_diffs = (max_length - (ends - starts)).unsqueeze(
+        1
+    )  # the amount of times, the range had to be padded
+    # Create a range tensor from 0 to max_length-1
+    range_tensor = torch.arange(max_length).unsqueeze(0)
+
+    # Compute the ranges using broadcasting and masking
+    ranges = starts.unsqueeze(1) + range_tensor
+    mask = ranges < ends.unsqueeze(1)
+
+    # Apply the mask
+    result = (
+        ranges * mask
+    )  # result: tensor([[0, 1, 0], [2, 3, 4], [4, 5, 0]]) here padding index is 0
+    #                        -                     -    positions were padded
+    result = result.unsqueeze(dim=2).repeat(1, 1, tens.shape[2])
+    gather = tens.gather(dim=1, index=result)
+    means = torch.mean(
+        gather, dim=1
+    )  # The mean was computed with the padding positions. We will remove the values from the mean now,
+    values_to_remove = range_diffs * tens[:, 0]  # the summed value at padded position
+    actual_means = (means * max_length - values_to_remove) / (
+        max_length - range_diffs
+    )  # the actual mean without padding positions
+    return actual_means
+
+
 def row_to_attention_datapoint(
     row: pd.Series,
     sep_token: str = "[SEP]",
     pad_token: str = "[PAD]",
 ) -> str:
     prompt = row_to_vanilla_datapoint(row, sep_token)
-    prompt = f"{prompt}s{sep_token}{pad_token}{sep_token}{pad_token}"
+    prompt = f"{prompt}{sep_token}{pad_token}{sep_token}{pad_token}"
     return prompt
 
 
@@ -45,8 +85,19 @@ def row_to_prompt_datapoint(row: pd.Series, sep_token: str = "[SEP]") -> str:
     return prompt
 
 
-def row_to_vanilla_datapoint(row: pd.Series, sep_token: str) -> str:
+def row_to_vanilla_datapoint(row: pd.Series, sep_token: str = "[SEP]") -> str:
     prompt = ""
-    for prompt_column in PROMPT_COLUMNS:
+    prompt_columns = list(
+        filter(
+            lambda column: column.startswith("prompt_feature_")
+            or column in ["source_id", "target_id"],
+            row.columns,
+        )
+    )
+    for prompt_column in prompt_columns:
         prompt += f"{row[prompt_column]}{sep_token}"
     return prompt[: -len(sep_token)]
+
+
+def transform_embeddings_to_string(embeddings: torch.Tensor, float_numbers: int = 16):
+    return str([format(embedding, f".{float_numbers}f") for embedding in embeddings])

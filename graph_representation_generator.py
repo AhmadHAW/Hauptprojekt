@@ -1,6 +1,5 @@
 import os
-import joblib
-from typing import Optional, Tuple
+from typing import Optional
 
 from pandas import DataFrame, Series
 import torch
@@ -12,9 +11,8 @@ import torch_geometric.transforms as T
 from torch_geometric.loader import LinkNeighborLoader
 import tqdm
 from sklearn.metrics import roc_auc_score
-from sklearn.decomposition import PCA
 
-from dataset_preprocess import MovieLensLoader, GNN_PATH
+from dataset_manager import GNN_PATH
 
 GNN_MODEL_PATH = f"{GNN_PATH}/model_{{}}.pth"
 
@@ -112,13 +110,13 @@ class Model(torch.nn.Module):
         return self.gnn(x_dict, data.edge_index_dict)
 
 
-class GNNTrainer:
+class GraphRepresentationGenerator:
     """
-    The GNNTrainer manages and trains a GNN model. A GNN model consists of an encoder and classifier.
+    The GraphRepresentationGenerator manages and trains a GNN model. A GNN model consists of an encoder and classifier.
     An encoder is a Grap Convolutional Network (GCN) with a 2-layer GNN computation graph and a single ReLU activation function in between.
     A classifier applies the dot-product between source and destination node embeddings to derive edge-level predictions.
     In addition to training, validating and saving the model,
-    the GNNTrainer provides a callback function for generating embeddings for given edges.
+    the GraphRepresentationGenerator provides a callback function for generating embeddings for given edges.
     Among other things, this function can help to generate non-existent edges on the fly.
     """
 
@@ -133,7 +131,7 @@ class GNNTrainer:
         hidden_channels: int = 64,
     ) -> None:
         """
-        The constructor of the GNNTrainer initializes the model in the corresponding dimensions, the optimizer for the training and data set splits.
+        The constructor of the GraphRepresentationGenerator initializes the model in the corresponding dimensions, the optimizer for the training and data set splits.
         Parameters
         __________
         data:                   HeteroData

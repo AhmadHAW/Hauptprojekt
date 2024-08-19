@@ -1,6 +1,7 @@
 import os
 from typing import List, Tuple, Callable, Optional, Dict, Union, Set, Union
-from abc import ABC
+from abc import ABC, abstractmethod
+import ast
 
 import torch
 from torch_geometric.data import download_url, extract_zip
@@ -9,12 +10,13 @@ import torch_geometric.transforms as T
 import pandas as pd
 import datasets
 from datasets import Dataset, DatasetDict
+from transformers import PreTrainedTokenizer
 
 from utils import (
-    row_to_attention_datapoint,
-    row_to_prompt_datapoint,
+    find_non_existing_source_target,
     row_to_vanilla_datapoint,
-    _find_non_existing_source_target,
+    row_to_prompt_datapoint,
+    row_to_attention_datapoint,
 )
 
 
@@ -73,9 +75,9 @@ DIRS_TO_INIT = [
 ]
 
 
-class KGLoader(ABC):
+class KGManger(ABC):
     """
-    The KGLoader manages and pre-processes the datasets for GNNs and LLMs.
+    The KGManger manages and pre-processes the datasets for GNNs and LLMs.
     """
 
     def __init__(
@@ -118,10 +120,10 @@ class KGLoader(ABC):
             self.data = self.generate_hetero_dataset()
             # split HeteroDataset dataset into train, dev and test
             self.split_data()
-            # generate pandas dataframe with prompts and labels for LLM
-            self.generate_llm_dataset()
             # split llm dataset according to the HeteroDataset split into train, dev, test and rest
             self.__split_llm_dataset()
+            # generate pandas dataframe with prompts and labels for LLM
+            self.generate_llm_dataset()
 
             self.source_df.to_csv(LLM_SOURCE_DF_PATH, index=False)
             self.target_df.to_csv(LLM_TARGET_DF_PATH, index=False)
@@ -360,145 +362,6 @@ class KGLoader(ABC):
                 torch.tensor(self.llm_df[column].tolist()), f"{GNN_PATH}/{column}.pt"
             )
 
-
-def create_dirs(dirs_to_init: List[str]) -> None:
-    """
-    Create dir structure if not exist
-    """
-    for directory in dirs_to_init:
-        if not os.path.exists(directory):
-            os.makedirs(directory)
-
-
-class MovieLensLoader(KGLoader):
-    """
-    The MovieLensLoader manages the original graph data set and the pre-processed data sets for GNNs and LLMs.
-    """
-
-    def __init__(
-        self,
-        source_df: Optional[pd.DataFrame] = None,
-        target_df: Optional[pd.DataFrame] = None,
-        edge_df: Optional[pd.DataFrame] = None,
-        force_recompute: bool = False,
-    ) -> None:
-        """
-        The constructor allows general settings, like forcing to reload even tho there are datasets present.
-        The preprocessing of the dataset can be read in detail in the original gnn link prediction tutorial of
-        torch geometrics (https://colab.research.google.com/drive/1xpzn1Nvai1ygd_P5Yambc_oe4VBPK_ZT?usp=sharing#scrollTo=vit8xKCiXAue)
-
-        Parameters
-        __________
-        force_recompute:            bool
-                                    Whether to force reloading and recomputing datasets and values.
-                                    Default False -> Loads and computes only if missing.
-
-
-        """
-        if not self.data_present() or force_recompute:
-            if source_df:
-                assert target_df
-                assert edge_df
-            else:
-                movies_df, movies_llm_df, ratings_df = self.__download_dataset()
-                source_df, target_df, edge_df = self.__map_to_unique(
-                    movies_df, movies_llm_df, ratings_df
-                )
-            super().__init__(source_df, target_df, edge_df, force_recompute)
-        else:
-            self.load_datasets_from_disk()
-
-    def __download_dataset(self) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        """Downloads the https://files.grouplens.org/datasets/movielens/ml-latest-small.zip dataset and
-        extracts the content into ROOT//ml-latest-small/"""
-        movies_path = f"{ROOT}/ml-latest-small/movies.csv"
-        ratings_path = f"{ROOT}/ml-latest-small/ratings.csv"
-        url = "https://files.grouplens.org/datasets/movielens/ml-latest-small.zip"
-        extract_zip(download_url(url, ROOT), ROOT)
-        movies_df = pd.read_csv(movies_path, index_col="movieId")
-        movies_llm_df = pd.read_csv(movies_path, index_col="movieId")
-        movies_llm_df["genres"] = movies_llm_df["genres"].apply(
-            lambda genres: list(genres.split("|"))
-        )
-        ratings_df = pd.read_csv(ratings_path)
-        return movies_df, movies_llm_df, ratings_df
-
-    def __map_to_unique(
-        self,
-        movies_df: pd.DataFrame,
-        movies_llm_df: pd.DataFrame,
-        ratings_df: pd.DataFrame,
-    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        """Maps the IDs from the data set to a compact ID series.
-        Then merge the data points so that <userID, movieID, title, genres] quadruples are created.
-        """
-        # Create a mapping from unique user indices to range [0, num_user_nodes):
-        unique_user_id = ratings_df["userId"].unique()
-        unique_user_id = pd.DataFrame(
-            data={
-                "userId": unique_user_id,
-                "mappedUserId": pd.RangeIndex(len(unique_user_id)),
-            }
-        )
-        source_df = pd.DataFrame({"id": pd.RangeIndex(len(unique_user_id))})
-        # Create a mapping from unique movie indices to range [0, num_movie_nodes):
-        unique_movie_id = pd.DataFrame(
-            data={
-                "movieId": movies_df.index,
-                "mappedMovieId": pd.RangeIndex(len(movies_df)),
-            }
-        )
-        target_df = pd.DataFrame(
-            data={
-                "id": pd.RangeIndex(len(movies_llm_df)),
-                "title": movies_llm_df["title"].tolist(),
-                "genres": movies_llm_df["genres"].tolist(),
-            }
-        )
-        genre_dummies = (
-            pd.get_dummies(target_df["genres"].explode(), prefix="feature")
-            .groupby(level=0)
-            .sum()
-        )
-        target_df = pd.concat([target_df, genre_dummies], axis=1)
-
-        # Perform merge to obtain the edges from users and movies:
-        ratings_user_id = pd.merge(
-            ratings_df["userId"],
-            unique_user_id,
-            left_on="userId",
-            right_on="userId",
-            how="left",
-        )
-        ratings_user_id = torch.from_numpy(ratings_user_id["mappedUserId"].values)
-        ratings_movie_id = pd.merge(
-            ratings_df["movieId"],
-            unique_movie_id,
-            left_on="movieId",
-            right_on="movieId",
-            how="left",
-        )
-        ratings_movie_id = torch.from_numpy(ratings_movie_id["mappedMovieId"].values)
-        edge_df = pd.DataFrame(
-            {"source_id": ratings_user_id, "target_id": ratings_movie_id}
-        )
-        return source_df, target_df, edge_df
-
-    def __dataset_from_df(self, df: pd.DataFrame) -> DatasetDict:
-        """
-        Generates the LLM datasets from the pandas dataframe.
-        """
-        dataset_train = Dataset.from_pandas(df[df["split"] == "train"])
-        dataset_val = Dataset.from_pandas(df[df["split"] == "val"])
-        dataset_test = Dataset.from_pandas(df[df["split"] == "test"])
-        return DatasetDict(
-            {
-                "train": dataset_train,
-                "val": dataset_val,
-                "test": dataset_test,
-            }
-        )
-
     def generate_prompt_embedding_dataset(
         self,
         tokenize_function: Optional[Callable] = None,
@@ -639,23 +502,21 @@ class MovieLensLoader(KGLoader):
         prompt_get_embedding_cb: Optional[Callable] = None,
         attention_get_embedding_cb: Optional[Callable] = None,
         sep_token="[SEP]",
+        splits=["train", "test", "val"],
     ):
         if 0 not in self.llm_df["labels"].unique():
             df = self.llm_df.copy()
             df["labels"] = 1
             already_added_pairs = set()
             new_rows = []
+
             split_proportions = [
-                int(len(df[df["split"] == "train"]) * false_ratio),
-                int(len(df[df["split"] == "test"]) * false_ratio),
-                int(len(df[df["split"] == "val"]) * false_ratio),
+                int(len(df[df["split"] == split]) * false_ratio) for split in splits
             ]
-            for split_proportion, split in zip(
-                split_proportions, ["train", "test", "val"]
-            ):
+            for split_proportion, split in zip(split_proportions, splits):
                 print(f"Adding {split_proportion} false edges for {split}.")
                 for idx in range(split_proportion):
-                    source_id, target_id = _find_non_existing_source_target(
+                    source_id, target_id = find_non_existing_source_target(
                         self.llm_df, already_added_pairs
                     )
                     random_source: pd.DataFrame = (
@@ -684,26 +545,245 @@ class MovieLensLoader(KGLoader):
                         )
             df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
             df["prompt"] = df.apply(
-                lambda row: row_to_vanilla_datapoint(row, sep_token=sep_token), axis=1
+                lambda row: row_to_vanilla_datapoint(row, sep_token=sep_token),
+                axis=1,
             )
             self.replace_llm_df(df)
         return self.llm_df
 
-    def replace_llm_df(self, df: pd.DataFrame):
+    def __dataset_from_df(self, df: pd.DataFrame) -> DatasetDict:
         """
-        overrides the current llm dataset with the given dataset."""
-        self.llm_df = df
-        self.save_llm_df()
+        Generates the LLM datasets from the pandas dataframe.
+        """
+        dataset_train = Dataset.from_pandas(df[df["split"] == "train"])
+        dataset_val = Dataset.from_pandas(df[df["split"] == "val"])
+        dataset_test = Dataset.from_pandas(df[df["split"] == "test"])
+        return DatasetDict(
+            {
+                "train": dataset_train,
+                "val": dataset_val,
+                "test": dataset_test,
+            }
+        )
 
-    def save_llm_df(self):
-        columns_without_embeddings = list(
-            filter(lambda column: "embedding" not in column, self.llm_df.columns)
+    def fill_all_semantic_tokens(
+        self,
+        all_semantic_tokens: List[List],
+        input_ids: torch.Tensor,
+        tokenizer: PreTrainedTokenizer,
+        all_semantic_positional_encoding: torch.Tensor,
+    ) -> None:
+        ends = all_semantic_positional_encoding[:, :, 1]
+        starts = all_semantic_positional_encoding[:, :, 0]
+        # input: # ends: torch.tensor([2, 5, 6]) starts: tensor([0, 2, 4])
+        # Compute the maximum length of the ranges
+        max_length = (ends - starts).max()
+        # Create a range tensor from 0 to max_length-1
+        range_tensor = torch.arange(max_length).unsqueeze(0)  # type: ignore
+        for pos, semantic_tokens in enumerate(all_semantic_tokens):
+            # Compute the ranges using broadcasting and masking
+            ranges = starts[:, pos].unsqueeze(1) + range_tensor
+            mask = ranges < ends[:, pos].unsqueeze(1)
+
+            # Apply the mask
+            result = (
+                ranges * mask
+            )  # result: tensor([[0, 1, 0], [2, 3, 4], [4, 5, 0]]) here padding index is 0
+            #                        -                     -    positions were padded
+            # result = result.unsqueeze(dim = 2).repeat(1,1, input_ids.shape[2])
+            gather = input_ids.gather(dim=1, index=result)
+            decoded = tokenizer.batch_decode(gather, skip_special_tokens=False)
+            semantic_tokens.extend([decode.replace(" [CLS]", "") for decode in decoded])
+
+
+class MovieLensManager(KGManger):
+    """
+    The MovieLensManager manages the original graph data set and the pre-processed data sets for GNNs and LLMs.
+    """
+
+    def __init__(
+        self,
+        source_df: Optional[pd.DataFrame] = None,
+        target_df: Optional[pd.DataFrame] = None,
+        edge_df: Optional[pd.DataFrame] = None,
+        force_recompute: bool = False,
+    ) -> None:
+        """
+        The constructor allows general settings, like forcing to reload even tho there are datasets present.
+        The preprocessing of the dataset can be read in detail in the original gnn link prediction tutorial of
+        torch geometrics (https://colab.research.google.com/drive/1xpzn1Nvai1ygd_P5Yambc_oe4VBPK_ZT?usp=sharing#scrollTo=vit8xKCiXAue)
+
+        Parameters
+        __________
+        force_recompute:            bool
+                                    Whether to force reloading and recomputing datasets and values.
+                                    Default False -> Loads and computes only if missing.
+
+
+        """
+        if not self.data_present() or force_recompute:
+            if source_df:
+                assert target_df
+                assert edge_df
+            else:
+                movies_df, movies_llm_df, ratings_df = self.__download_dataset()
+                source_df, target_df, edge_df = self.__map_to_unique(
+                    movies_df, movies_llm_df, ratings_df
+                )
+            super().__init__(source_df, target_df, edge_df, force_recompute)
+        else:
+            self.load_datasets_from_disk()
+
+    def __download_dataset(self) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """Downloads the https://files.grouplens.org/datasets/movielens/ml-latest-small.zip dataset and
+        extracts the content into ROOT//ml-latest-small/"""
+        movies_path = f"{ROOT}/ml-latest-small/movies.csv"
+        ratings_path = f"{ROOT}/ml-latest-small/ratings.csv"
+        url = "https://files.grouplens.org/datasets/movielens/ml-latest-small.zip"
+        extract_zip(download_url(url, ROOT), ROOT)
+        movies_df = pd.read_csv(movies_path, index_col="movieId")
+        movies_llm_df = pd.read_csv(movies_path, index_col="movieId")
+        movies_llm_df["genres"] = movies_llm_df["genres"].apply(
+            lambda genres: list(genres.split("|"))
         )
-        columns_with_embeddings = list(
-            filter(lambda column: "embedding" in column, self.llm_df.columns)
+        ratings_df = pd.read_csv(ratings_path)
+        return movies_df, movies_llm_df, ratings_df
+
+    def __map_to_unique(
+        self,
+        movies_df: pd.DataFrame,
+        movies_llm_df: pd.DataFrame,
+        ratings_df: pd.DataFrame,
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """Maps the IDs from the data set to a compact ID series.
+        Then merge the data points so that <userID, movieID, title, genres] quadruples are created.
+        """
+        # Create a mapping from unique user indices to range [0, num_user_nodes):
+        unique_user_id = ratings_df["userId"].unique()
+        unique_user_id = pd.DataFrame(
+            data={
+                "userId": unique_user_id,
+                "mappedUserId": pd.RangeIndex(len(unique_user_id)),
+            }
         )
-        self.llm_df[columns_without_embeddings].to_csv(LLM_DATASET_PATH, index=False)
-        for column in columns_with_embeddings:
-            torch.save(
-                torch.tensor(self.llm_df[column].tolist()), f"{GNN_PATH}/{column}.pt"
-            )
+        source_df = pd.DataFrame({"id": pd.RangeIndex(len(unique_user_id))})
+        # Create a mapping from unique movie indices to range [0, num_movie_nodes):
+        unique_movie_id = pd.DataFrame(
+            data={
+                "movieId": movies_df.index,
+                "mappedMovieId": pd.RangeIndex(len(movies_df)),
+            }
+        )
+        target_df = pd.DataFrame(
+            data={
+                "id": pd.RangeIndex(len(movies_llm_df)),
+                "title": movies_llm_df["title"].tolist(),
+                "genres": movies_llm_df["genres"].tolist(),
+            }
+        )
+        genre_dummies = (
+            pd.get_dummies(target_df["genres"].explode(), prefix="gnn_feature")
+            .groupby(level=0)
+            .sum()
+        )
+        target_df = pd.concat([target_df, genre_dummies], axis=1)
+
+        # Perform merge to obtain the edges from users and movies:
+        ratings_user_id = pd.merge(
+            ratings_df["userId"],
+            unique_user_id,
+            left_on="userId",
+            right_on="userId",
+            how="left",
+        )
+        ratings_user_id = torch.from_numpy(ratings_user_id["mappedUserId"].values)
+        ratings_movie_id = pd.merge(
+            ratings_df["movieId"],
+            unique_movie_id,
+            left_on="movieId",
+            right_on="movieId",
+            how="left",
+        )
+        ratings_movie_id = torch.from_numpy(ratings_movie_id["mappedMovieId"].values)
+        edge_df = pd.DataFrame(
+            {"source_id": ratings_user_id, "target_id": ratings_movie_id}
+        )
+        target_df = target_df.rename(
+            columns={"title": "prompt_feature_title", "genres": "prompt_feature_genres"}
+        )
+        return source_df, target_df, edge_df
+
+    def get_vanilla_tokens_as_df(
+        self,
+        input_ids: torch.Tensor,
+        tokenizer: PreTrainedTokenizer,
+        all_semantic_positional_encoding: torch.Tensor,
+    ) -> pd.DataFrame:
+        all_semantic_positional_encoding = all_semantic_positional_encoding[
+            :, [1, 3, 5, 7]
+        ]
+        user_ids = []
+        titles = []
+        genres = []
+        all_semantic_tokens = [user_ids, titles, genres]
+        self.fill_all_semantic_tokens(
+            all_semantic_tokens, input_ids, tokenizer, all_semantic_positional_encoding
+        )
+        all_semantic_tokens[0] = [int(id) for id in all_semantic_tokens[0]]
+        all_semantic_tokens[1] = [int(id) for id in all_semantic_tokens[1]]
+        all_semantic_tokens[2] = [
+            ast.literal_eval(string_list) for string_list in all_semantic_tokens[2]
+        ]
+        data = {
+            "user_id": all_semantic_tokens[0],
+            "movie_id": all_semantic_tokens[1],
+            "title": all_semantic_tokens[2],
+            "genres": all_semantic_tokens[3],
+        }
+        df = pd.DataFrame(data)
+        return df
+
+    def get_prompt_tokens_as_df(
+        self,
+        input_ids: torch.Tensor,
+        tokenizer: PreTrainedTokenizer,
+        all_semantic_positional_encoding: torch.Tensor,
+    ) -> Tuple[pd.DataFrame, torch.Tensor]:
+        all_semantic_positional_encoding = all_semantic_positional_encoding[
+            :, [1, 3, 5, 7, 9, 11]
+        ]
+        all_semantic_tokens = [[], [], [], [], [], []]
+        self.fill_all_semantic_tokens(
+            all_semantic_tokens, input_ids, tokenizer, all_semantic_positional_encoding
+        )
+        all_semantic_tokens[0] = [int(id) for id in all_semantic_tokens[0]]
+        all_semantic_tokens[1] = [int(id) for id in all_semantic_tokens[1]]
+        all_semantic_tokens[3] = [
+            ast.literal_eval(string_list) for string_list in all_semantic_tokens[2]
+        ]
+        all_semantic_tokens[4] = [
+            [
+                float(str_float)
+                for str_float in ast.literal_eval(string_list.replace(" ", ""))
+            ]
+            for string_list in all_semantic_tokens[3]
+        ]
+        all_semantic_tokens[5] = [
+            [
+                float(str_float)
+                for str_float in ast.literal_eval(string_list.replace(" ", ""))
+            ]
+            for string_list in all_semantic_tokens[5]
+        ]
+        user_embeddings = torch.tensor(all_semantic_tokens[3])
+        movie_embeddings = torch.tensor(all_semantic_tokens[4])
+        graph_embeddings = torch.stack([user_embeddings, movie_embeddings]).permute(
+            (1, 0, 2)
+        )
+        data = {
+            "user_id": all_semantic_tokens[0],
+            "title": all_semantic_tokens[1],
+            "genres": all_semantic_tokens[2],
+        }
+        df = pd.DataFrame(data)
+        return df, graph_embeddings
