@@ -1900,9 +1900,9 @@ class VanillaBertClassifier(BertClassifierOriginalArchitectureBase):
                                 )
                                 all_hidden_states.append(hidden_states_on_each_layer)
                             tokens = get_tokens_as_df_cb(
-                                self.tokenizer,
                                 input_ids,
-                                semantic_positional_encoding[:, [1, 3, 5]],
+                                self.tokenizer,
+                                semantic_positional_encoding,
                             )
                             tokens["labels"] = batch["labels"].tolist()
                             tokens["split"] = splits_

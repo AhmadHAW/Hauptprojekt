@@ -112,7 +112,8 @@ class KGManger(ABC):
             ).merge(target_df, left_on="target_id", right_on="id", how="left")
             feature_columns = list(
                 filter(
-                    lambda column: column.startswith("feature_"), self.llm_df.columns
+                    lambda column: column.startswith("gnn_feature_"),
+                    self.llm_df.columns,
                 )
             )
             self.llm_df = self.llm_df.drop(columns=feature_columns)
@@ -174,7 +175,7 @@ class KGManger(ABC):
         source_one_hot_feature_cols = [
             col
             for col in self.source_df
-            if col.startswith("feature_")  # type: ignore
+            if col.startswith("gnn_feature_")  # type: ignore
         ]
         # Add the node features and edge indices:
         if len(source_one_hot_feature_cols) > 0:
@@ -186,7 +187,7 @@ class KGManger(ABC):
         target_one_hot_feature_cols = [
             col
             for col in self.target_df
-            if col.startswith("feature_")  # type: ignore
+            if col.startswith("gnn_feature_")  # type: ignore
         ]
         # Add the node features and edge indices:
         if len(target_one_hot_feature_cols) > 0:
@@ -725,14 +726,15 @@ class MovieLensManager(KGManger):
         user_ids = []
         titles = []
         genres = []
-        all_semantic_tokens = [user_ids, titles, genres]
+        movie_ids = []
+        all_semantic_tokens = [user_ids, movie_ids, titles, genres]
         self.fill_all_semantic_tokens(
             all_semantic_tokens, input_ids, tokenizer, all_semantic_positional_encoding
         )
         all_semantic_tokens[0] = [int(id) for id in all_semantic_tokens[0]]
         all_semantic_tokens[1] = [int(id) for id in all_semantic_tokens[1]]
-        all_semantic_tokens[2] = [
-            ast.literal_eval(string_list) for string_list in all_semantic_tokens[2]
+        all_semantic_tokens[3] = [
+            ast.literal_eval(string_list) for string_list in all_semantic_tokens[3]
         ]
         data = {
             "user_id": all_semantic_tokens[0],

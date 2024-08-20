@@ -91,7 +91,7 @@ def row_to_vanilla_datapoint(row: pd.Series, sep_token: str = "[SEP]") -> str:
         filter(
             lambda column: column.startswith("prompt_feature_")
             or column in ["source_id", "target_id"],
-            row.columns,
+            row.keys(),
         )
     )
     for prompt_column in prompt_columns:
