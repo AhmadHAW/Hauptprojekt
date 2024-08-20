@@ -1977,7 +1977,9 @@ class VanillaBertClassifier(BertClassifierOriginalArchitectureBase):
                 averaged_hidden_states = torch.from_numpy(
                     np.load(self.hidden_states_path)
                 )
-                all_tokens["hidden_states"] = torch.unbind(averaged_hidden_states)
+                all_tokens["hidden_states"] = torch.unbind(
+                    averaged_hidden_states.permute(1, 0, 2, 3)
+                )
                 del averaged_hidden_states
             if "attentions" in load_fields:
                 averaged_attentions = torch.from_numpy(np.load(self.attentions_path))

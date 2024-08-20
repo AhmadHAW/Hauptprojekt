@@ -761,14 +761,14 @@ class MovieLensManager(KGManger):
         all_semantic_tokens[0] = [int(id) for id in all_semantic_tokens[0]]
         all_semantic_tokens[1] = [int(id) for id in all_semantic_tokens[1]]
         all_semantic_tokens[3] = [
-            ast.literal_eval(string_list) for string_list in all_semantic_tokens[2]
+            ast.literal_eval(string_list) for string_list in all_semantic_tokens[3]
         ]
         all_semantic_tokens[4] = [
             [
                 float(str_float)
                 for str_float in ast.literal_eval(string_list.replace(" ", ""))
             ]
-            for string_list in all_semantic_tokens[3]
+            for string_list in all_semantic_tokens[4]
         ]
         all_semantic_tokens[5] = [
             [
@@ -777,8 +777,8 @@ class MovieLensManager(KGManger):
             ]
             for string_list in all_semantic_tokens[5]
         ]
-        user_embeddings = torch.tensor(all_semantic_tokens[3])
-        movie_embeddings = torch.tensor(all_semantic_tokens[4])
+        user_embeddings = torch.tensor(all_semantic_tokens[4])
+        movie_embeddings = torch.tensor(all_semantic_tokens[5])
         graph_embeddings = torch.stack([user_embeddings, movie_embeddings]).permute(
             (1, 0, 2)
         )
