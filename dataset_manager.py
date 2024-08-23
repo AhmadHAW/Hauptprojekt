@@ -1,6 +1,6 @@
 import os
 from typing import List, Tuple, Callable, Optional, Dict, Union, Set, Union
-from abc import ABC, abstractmethod
+from abc import ABC
 import ast
 
 import torch
@@ -9,7 +9,8 @@ from torch_geometric.data import HeteroData
 import torch_geometric.transforms as T
 import pandas as pd
 import datasets
-from datasets import Dataset, DatasetDict
+import numpy as np
+from datasets import Dataset, DatasetDict, load_from_disk, load_dataset
 from transformers import PreTrainedTokenizer
 
 from utils import (
@@ -243,7 +244,7 @@ class KGManger(ABC):
         # training (80%), validation (10%), and testing edges (10%).
         # Across the training edges, we use 70% of edges for message passing,
         # and 30% of edges for supervision.
-        # We further want to generate fixed negative edges for evaluation with a ratio of 2:1.
+        # We further want to generate fixed negative edges for evaluation with a ratio of 1:1.
         # Negative edges during training will be generated on-the-fly, so we don't want to
         # add them to the graph right away.
         # Overall, we can leverage the `RandomLinkSplit()` transform for this from PyG:
@@ -251,7 +252,7 @@ class KGManger(ABC):
             num_val=0.1,
             num_test=0.1,
             disjoint_train_ratio=0.3,
-            neg_sampling_ratio=2.0,
+            neg_sampling_ratio=1.0,
             add_negative_train_samples=False,
             edge_types=("source", "edge", "target"),
             rev_edge_types=("target", "rev_edge", "source"),
@@ -499,51 +500,49 @@ class KGManger(ABC):
 
     def add_false_edges(
         self,
-        false_ratio: float = 2.0,
+        false_ratio: float = 1.0,
         prompt_get_embedding_cb: Optional[Callable] = None,
         attention_get_embedding_cb: Optional[Callable] = None,
         sep_token="[SEP]",
         splits=["train", "test", "val"],
     ):
-        if 0 not in self.llm_df["labels"].unique():
-            df = self.llm_df.copy()
-            df["labels"] = 1
-            already_added_pairs = set()
-            new_rows = []
+        df = self.llm_df.copy()
+        already_added_pairs = set()
+        new_rows = []
 
-            split_proportions = [
-                int(len(df[df["split"] == split]) * false_ratio) for split in splits
-            ]
-            for split_proportion, split in zip(split_proportions, splits):
-                print(f"Adding {split_proportion} false edges for {split}.")
-                for idx in range(split_proportion):
-                    source_id, target_id = find_non_existing_source_target(
-                        self.llm_df, already_added_pairs
+        split_proportions = [
+            int(len(df[df["split"] == split]) * false_ratio) for split in splits
+        ]
+        for split_proportion, split in zip(split_proportions, splits):
+            print(f"Adding {split_proportion} false edges for {split}.")
+            for idx in range(split_proportion):
+                source_id, target_id = find_non_existing_source_target(
+                    self.llm_df, already_added_pairs
+                )
+                random_source: pd.DataFrame = (
+                    self.source_df[self.source_df["id"] == source_id]
+                    .sample(1)
+                    .rename(columns={"id": "source_id"})
+                    .reset_index(drop=True)
+                )
+                random_target: pd.DataFrame = (
+                    self.target_df[self.target_df["id"] == target_id]
+                    .sample(1)
+                    .rename(columns={"id": "target_id"})
+                    .reset_index(drop=True)
+                )
+                random_row = pd.concat([random_source, random_target], axis=1).iloc[0]
+                random_row["target_id"] = target_id
+                random_row["labels"] = 0
+                random_row["split"] = split
+                if prompt_get_embedding_cb and attention_get_embedding_cb:
+                    random_row = self.add_graph_embeddings(
+                        random_row,
+                        prompt_get_embedding_cb,
+                        attention_get_embedding_cb,
                     )
-                    random_source: pd.DataFrame = (
-                        self.source_df[self.source_df["id"] == source_id]
-                        .sample(1)
-                        .rename(columns={"id": "source_id"})
-                        .reset_index(drop=True)
-                    )
-                    random_target: pd.DataFrame = (
-                        self.target_df[self.target_df["id"] == target_id]
-                        .sample(1)
-                        .rename(columns={"id": "target_id"})
-                        .reset_index(drop=True)
-                    )
-                    random_row = pd.concat([random_source, random_target], axis=1).iloc[
-                        0
-                    ]
-                    random_row["target_id"] = target_id
-                    random_row["labels"] = 0
-                    random_row["split"] = split
-                    if prompt_get_embedding_cb and attention_get_embedding_cb:
-                        random_row = self.add_graph_embeddings(
-                            random_row,
-                            prompt_get_embedding_cb,
-                            attention_get_embedding_cb,
-                        )
+                new_rows.append(new_rows)
+
             df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
             df["prompt"] = df.apply(
                 lambda row: row_to_vanilla_datapoint(row, sep_token=sep_token),
@@ -552,13 +551,101 @@ class KGManger(ABC):
             self.replace_llm_df(df)
         return self.llm_df
 
+    def generate_huggingface_dataset(
+        self,
+        vanilla_df: pd.DataFrame,
+        prompt_df: pd.DataFrame,
+        attention_df: pd.DataFrame,
+    ) -> DatasetDict:
+        for df in [vanilla_df, prompt_df, attention_df]:
+            df["attentions_original_shape"] = df["attentions"].apply(
+                lambda attention: attention.shape
+            )
+            df["attentions"] = df["attentions"].apply(
+                lambda attention: attention.flatten()
+            )
+            df["hidden_states_original_shape"] = df["hidden_states"].apply(
+                lambda hidden_states: hidden_states.shape
+            )
+            df["hidden_states"] = df["hidden_states"].apply(
+                lambda attention: attention.flatten()
+            )
+        export_llm = self.llm_df.merge(
+            vanilla_df[
+                [
+                    "source_id",
+                    "target_id",
+                    "attentions",
+                    "hidden_states",
+                    "attentions_original_shape",
+                    "hidden_states_original_shape",
+                ]
+            ].rename(
+                columns={
+                    "attentions": "vanilla_attentions",
+                    "hidden_states": "vanilla_hidden_states",
+                    "attentions_original_shape": "vanilla_attentions_original_shape",
+                    "hidden_states_original_shape": "vanilla_hidden_states_original_shape",
+                }
+            ),
+            on=["source_id", "target_id"],
+        )
+        export_llm = export_llm.merge(
+            prompt_df[
+                [
+                    "source_id",
+                    "target_id",
+                    "attentions",
+                    "hidden_states",
+                    "attentions_original_shape",
+                    "hidden_states_original_shape",
+                ]
+            ].rename(
+                columns={
+                    "attentions": "prompt_attentions",
+                    "hidden_states": "prompt_hidden_states",
+                    "attentions_original_shape": "prompt_attentions_original_shape",
+                    "hidden_states_original_shape": "prompt_hidden_states_original_shape",
+                }
+            ),
+            on=["source_id", "target_id"],
+        )
+        export_llm = export_llm.merge(
+            attention_df[
+                [
+                    "source_id",
+                    "target_id",
+                    "attentions",
+                    "hidden_states",
+                    "attentions_original_shape",
+                    "hidden_states_original_shape",
+                ]
+            ].rename(
+                columns={
+                    "attentions": "attention_attentions",
+                    "hidden_states": "attention_hidden_states",
+                    "attentions_original_shape": "attention_attentions_original_shape",
+                    "hidden_states_original_shape": "attention_hidden_states_original_shape",
+                }
+            ),
+            on=["source_id", "target_id"],
+        )
+        dataset = self.__dataset_from_df(export_llm)
+        return dataset
+
     def __dataset_from_df(self, df: pd.DataFrame) -> DatasetDict:
         """
         Generates the LLM datasets from the pandas dataframe.
         """
-        dataset_train = Dataset.from_pandas(df[df["split"] == "train"])
-        dataset_val = Dataset.from_pandas(df[df["split"] == "val"])
-        dataset_test = Dataset.from_pandas(df[df["split"] == "test"])
+        dataset_train = Dataset.from_pandas(
+            df[df["split"] == "train"], preserve_index=False
+        )
+        dataset_val = Dataset.from_pandas(
+            df[df["split"] == "val"], preserve_index=False
+        )
+        dataset_test = Dataset.from_pandas(
+            df[df["split"] == "test"], preserve_index=False
+        )
         return DatasetDict(
             {
                 "train": dataset_train,
@@ -737,8 +824,8 @@ class MovieLensManager(KGManger):
             ast.literal_eval(string_list) for string_list in all_semantic_tokens[3]
         ]
         data = {
-            "user_id": all_semantic_tokens[0],
-            "movie_id": all_semantic_tokens[1],
+            "source_id": all_semantic_tokens[0],
+            "target_id": all_semantic_tokens[1],
             "title": all_semantic_tokens[2],
             "genres": all_semantic_tokens[3],
         }
@@ -783,9 +870,60 @@ class MovieLensManager(KGManger):
             (1, 0, 2)
         )
         data = {
-            "user_id": all_semantic_tokens[0],
-            "title": all_semantic_tokens[1],
-            "genres": all_semantic_tokens[2],
+            "source_id": all_semantic_tokens[0],
+            "target_id": all_semantic_tokens[1],
+            "title": all_semantic_tokens[2],
+            "genres": all_semantic_tokens[3],
         }
         df = pd.DataFrame(data)
         return df, graph_embeddings
+
+    @staticmethod
+    def load_dataset_from_disk(path_to_hf_dataset: str) -> pd.DataFrame:
+        dataset = load_from_disk(path_to_hf_dataset)
+        dfs = []
+        for split in ["train", "test", "val"]:
+            df = dataset[split].to_pandas()
+            dfs.append(df)
+        df = pd.concat(dfs)
+        for attention_column in ["vanilla", "prompt", "attention"]:
+            df[f"{attention_column}_attentions"] = df.apply(
+                lambda row: row[f"{attention_column}_attentions"].reshape(
+                    row[f"{attention_column}_attentions_original_shape"]
+                ),
+                axis=1,
+            )
+
+        for hidden_state_column in ["vanilla", "prompt", "attention"]:
+            df[f"{hidden_state_column}_hidden_states"] = df.apply(
+                lambda row: row[f"{hidden_state_column}_hidden_states"].reshape(
+                    row[f"{hidden_state_column}_hidden_states_original_shape"]
+                ),
+                axis=1,
+            )
+        return df
+
+    @staticmethod
+    def load_dataset_from_hub(path_to_dataset_hub: str) -> pd.DataFrame:
+        dataset = load_dataset(path_to_dataset_hub)
+        dfs = []
+        for split in ["train", "test", "val"]:
+            df = dataset[split].to_pandas()
+            dfs.append(df)
+        df = pd.concat(dfs)
+        for attention_column in ["vanilla", "prompt", "attention"]:
+            df[f"{attention_column}_attentions"] = df.apply(
+                lambda row: row[f"{attention_column}_attentions"].reshape(
+                    row[f"{attention_column}_attentions_original_shape"]
+                ),
+                axis=1,
+            )
+
+        for hidden_state_column in ["vanilla", "prompt", "attention"]:
+            df[f"{hidden_state_column}_hidden_states"] = df.apply(
+                lambda row: row[f"{hidden_state_column}_hidden_states"].reshape(
+                    row[f"{hidden_state_column}_hidden_states_original_shape"]
+                ),
+                axis=1,
+            )
+        return df

@@ -222,7 +222,7 @@ class DataCollatorBase(DataCollatorForLanguageModeling, ABC):
     in existing edges are replaced with non-existing edges.
     """
 
-    def __init__(self, tokenizer, df, source_df, target_df, false_ratio=2.0):
+    def __init__(self, tokenizer, df, source_df, target_df, false_ratio=1.0):
         super().__init__(tokenizer=tokenizer, mlm=False)
         self.false_ratio = false_ratio
         self.tokenizer = tokenizer
@@ -257,7 +257,7 @@ class DataCollatorBase(DataCollatorForLanguageModeling, ABC):
 
 
 class TextBasedDataCollator(DataCollatorBase, ABC):
-    def __init__(self, tokenizer, df, source_df, target_df, false_ratio=2.0):
+    def __init__(self, tokenizer, df, source_df, target_df, false_ratio=1.0):
         super().__init__(tokenizer, df, source_df, target_df, false_ratio=false_ratio)
 
     def _convert_features_into_batches(self, features: List[Dict]) -> Dict:
@@ -287,7 +287,7 @@ class EmbeddingBasedDataCollator(DataCollatorBase):
         target_df,
         data,
         get_embedding_cb,
-        false_ratio=2.0,
+        false_ratio=1.0,
     ):
         super().__init__(tokenizer, df, source_df, target_df, false_ratio=false_ratio)
         self.device = device
@@ -381,7 +381,7 @@ class PromptEmbeddingDataCollator(TextBasedDataCollator):
         target_df,
         data,
         get_embedding_cb,
-        false_ratio=2.0,
+        false_ratio=1.0,
     ):
         super().__init__(tokenizer, df, source_df, target_df, false_ratio=false_ratio)
         self.data = data
@@ -438,7 +438,7 @@ class VanillaEmbeddingDataCollator(TextBasedDataCollator):
     The vanilla data collator does only generate false edges without KGEs.
     """
 
-    def __init__(self, tokenizer, df, source_df, target_df, false_ratio=2.0):
+    def __init__(self, tokenizer, df, source_df, target_df, false_ratio=1.0):
         super().__init__(tokenizer, df, source_df, target_df, false_ratio=false_ratio)
 
     def _transform_to_false_example(self) -> Dict:
@@ -991,7 +991,7 @@ class AttentionBertClassifierBase(ClassifierBase):
         kge_manager,
         get_embedding_cb,
         model_max_length=256,
-        false_ratio=2.0,
+        false_ratio=1.0,
         force_recompute=False,
     ) -> None:
         best_model_path = LLM_ATTENTION_BEST_MODEL_PATH
@@ -1191,7 +1191,6 @@ class AttentionBertClassifierBase(ClassifierBase):
             or not os.path.exists(self.attentions_path)
             or not os.path.exists(self.hidden_states_path)
             or not os.path.exists(self.tokens_path)
-            or not os.path.exists(self.graph_embeddings_path)
         ):
             assert isinstance(self.model, EmbeddingBertForSequenceClassification)
             self.model.eval()
@@ -1235,7 +1234,7 @@ class AttentionBertClassifierBase(ClassifierBase):
                             semantic_positional_encoding = batch[
                                 "semantic_positional_encoding"
                             ]
-                            if add_attentions:
+                            if "attentions" in load_fields:
                                 attentions = outputs.attentions
                                 attentions = [
                                     torch.sum(layer, dim=1) for layer in attentions
@@ -1243,34 +1242,32 @@ class AttentionBertClassifierBase(ClassifierBase):
                                 attentions = torch.stack(attentions).permute(1, 2, 3, 0)
                                 attentions = self._means_over_ranges_cross(
                                     semantic_positional_encoding, attentions
-                                ).numpy()
-                                all_attentions.append(attentions)
-                            if add_hidden_states:
+                                )
+                                all_attentions.append(attentions.numpy())
+                                del attentions
+                            if "hidden_states" in load_fields:
                                 hidden_states_on_each_layer = []
                                 for hidden_states in outputs.hidden_states:
                                     hidden_states_on_layer = (
                                         self._avg_over_hidden_states(
                                             semantic_positional_encoding, hidden_states
                                         )
-                                        .permute((1, 0, 2))
-                                        .numpy()
                                     )
                                     hidden_states_on_each_layer.append(
-                                        hidden_states_on_layer
+                                        hidden_states_on_layer.numpy()
                                     )
+                                    del hidden_states
                                 hidden_states_on_each_layer = np.stack(
                                     hidden_states_on_each_layer
                                 )
-                                all_hidden_states.append(hidden_states_on_each_layer)
+                                all_hidden_states.append(
+                                    hidden_states_on_each_layer.transpose(2, 0, 1, 3)
+                                )
                             tokens = get_tokens_as_df_cb(
                                 batch["input_ids"],
                                 self.tokenizer,
                                 semantic_positional_encoding,
                             )
-                            if add_graph_embeddings:
-                                all_graph_embeddings.append(
-                                    batch["graph_embeddings"].numpy()
-                                )
                             tokens["labels"] = batch["labels"].tolist()
                             tokens["split"] = splits_
                             all_tokens.append(tokens)
@@ -1290,21 +1287,12 @@ class AttentionBertClassifierBase(ClassifierBase):
                             )
                             del all_attentions
                         if "hidden_states" in load_fields:
-                            all_hidden_states = np.concatenate(
-                                all_hidden_states, axis=1
-                            )
+                            all_hidden_states = np.concatenate(all_hidden_states)
                             np.save(
                                 HIDDEN_STATES_EMBEDDING_PATH.format(split, epoch),
                                 all_hidden_states,
                             )
                             del all_hidden_states
-                        if "graph_embeddings" in load_fields:
-                            all_graph_embeddings = np.concatenate(all_graph_embeddings)
-                            np.save(
-                                GRAPH_EMBEDDINGS_EMBEDDING_PATH.format(split, epoch),
-                                all_graph_embeddings,
-                            )
-                            del all_graph_embeddings
 
                 # all_tokens
                 all_tokens = []
@@ -1326,12 +1314,9 @@ class AttentionBertClassifierBase(ClassifierBase):
                                     HIDDEN_STATES_EMBEDDING_PATH.format(split, epoch)
                                 )
                             )
-                    all_hidden_states = np.concatenate(all_hidden_states, axis=1)
+                    all_hidden_states = np.concatenate(all_hidden_states)
                     np.save(self.hidden_states_path, all_hidden_states)
-                    all_hidden_states = torch.from_numpy(all_hidden_states).permute(
-                        (1, 0, 2, 3)
-                    )
-                    all_tokens["hidden_states"] = all_hidden_states.unbind()
+                    all_tokens["hidden_states"] = list(all_hidden_states)
                     del all_hidden_states
 
                 # attentions:
@@ -1344,41 +1329,15 @@ class AttentionBertClassifierBase(ClassifierBase):
                             )
                     attentions = np.concatenate(attentions)
                     np.save(self.attentions_path, attentions)
-                    attentions = torch.from_numpy(attentions)
-                    all_tokens["attentions"] = attentions.unbind()
-                    del attentions
-
-                # graph embeddings:
-                if "graph_embeddings" in load_fields:
-                    graph_embeddings = []
-                    for split in splits:
-                        for epoch in range(epochs):
-                            graph_embeddings.append(
-                                np.load(
-                                    GRAPH_EMBEDDINGS_EMBEDDING_PATH.format(split, epoch)
-                                )
-                            )
-                    graph_embeddings = np.concatenate(graph_embeddings)
-                    np.save(self.graph_embeddings_path, graph_embeddings)
-                    graph_embeddings = torch.from_numpy(graph_embeddings)
-                    all_tokens["graph_embeddings"] = graph_embeddings.unbind()
-                    del graph_embeddings
+                    all_tokens["attentions"] = list(attentions)
         else:
             all_tokens = pd.read_csv(self.tokens_path)
             if "hidden_states" in load_fields:
-                averaged_hidden_states = torch.from_numpy(
-                    np.load(self.hidden_states_path)
-                )
-                all_tokens["hidden_states"] = torch.unbind(averaged_hidden_states)
-                del averaged_hidden_states
+                all_hidden_states = np.load(self.hidden_states_path)
+                all_tokens["hidden_states"] = list(all_hidden_states)
             if "attentions" in load_fields:
-                averaged_attentions = torch.from_numpy(np.load(self.attentions_path))
-                all_tokens["attentions"] = torch.unbind(averaged_attentions)
-                del averaged_attentions
-            if "graph_embeddings" in load_fields:
-                graph_embeddings = torch.from_numpy(np.load(self.graph_embeddings_path))
-                all_tokens["graph_embeddings"] = torch.unbind(graph_embeddings)
-                del graph_embeddings
+                all_attentions = np.load(self.attentions_path)
+                all_tokens["attentions"] = list(all_attentions)
         all_tokens[all_tokens["split"].isin(splits)]
         return all_tokens
 
@@ -1389,7 +1348,7 @@ class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
         kge_manager,
         get_embedding_cb,
         model_max_length=256,
-        false_ratio=2.0,
+        false_ratio=1.0,
         force_recompute=False,
     ) -> None:
         best_model_path = LLM_PROMPT_BEST_MODEL_PATH
@@ -1522,7 +1481,7 @@ class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
         splits: List[str] = ["train", "test", "val"],
         batch_size: int = 64,
         epochs: int = 1,
-        load_fields: List[str] = ["attentions", "hidden_states"],
+        load_fields: List[str] = ["attentions", "hidden_states", "graph_embeddings"],
         force_recompute: bool = False,
     ):
         if (
@@ -1530,7 +1489,6 @@ class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
             or not os.path.exists(self.attentions_path)
             or not os.path.exists(self.hidden_states_path)
             or not os.path.exists(self.tokens_path)
-            or not os.path.exists(self.graph_embeddings_path)
         ):
             assert isinstance(self.model, BertForSequenceClassificationRanges)
             self.model.eval()
@@ -1573,7 +1531,7 @@ class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
                             semantic_positional_encoding = batch[
                                 "semantic_positional_encoding"
                             ]
-                            if add_attentions:
+                            if "attentions" in load_fields:
                                 attentions = outputs.attentions
                                 attentions = [
                                     torch.sum(layer, dim=1) for layer in attentions
@@ -1581,25 +1539,27 @@ class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
                                 attentions = torch.stack(attentions).permute(1, 2, 3, 0)
                                 attentions = self._means_over_ranges_cross(
                                     semantic_positional_encoding, attentions
-                                ).numpy()
-                                all_attentions.append(attentions)
-                            if add_hidden_states:
+                                )
+                                all_attentions.append(attentions.numpy())
+                                del attentions
+                            if "hidden_states" in load_fields:
                                 hidden_states_on_each_layer = []
                                 for hidden_states in outputs.hidden_states:
                                     hidden_states_on_layer = (
                                         self._avg_over_hidden_states(
                                             semantic_positional_encoding, hidden_states
                                         )
-                                        .permute((1, 0, 2))
-                                        .numpy()
                                     )
                                     hidden_states_on_each_layer.append(
-                                        hidden_states_on_layer
+                                        hidden_states_on_layer.numpy()
                                     )
+                                    del hidden_states
                                 hidden_states_on_each_layer = np.stack(
                                     hidden_states_on_each_layer
                                 )
-                                all_hidden_states.append(hidden_states_on_each_layer)
+                                all_hidden_states.append(
+                                    hidden_states_on_each_layer.transpose(2, 0, 1, 3)
+                                )
                             tokens, graph_embeddings = get_tokens_as_df_cb(
                                 batch["input_ids"],
                                 self.tokenizer,
@@ -1627,21 +1587,12 @@ class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
                             )
                             del all_attentions
                         if "hidden_states" in load_fields:
-                            all_hidden_states = np.concatenate(
-                                all_hidden_states, axis=1
-                            )
+                            all_hidden_states = np.concatenate(all_hidden_states)
                             np.save(
                                 HIDDEN_STATES_PROMPT_PATH.format(split, epoch),
                                 all_hidden_states,
                             )
                             del all_hidden_states
-                        if "graph_embeddings" in load_fields:
-                            all_graph_embeddings = np.concatenate(all_graph_embeddings)
-                            np.save(
-                                GRAPH_EMBEDDINGS_PROMPT_PATH.format(split, epoch),
-                                all_graph_embeddings,
-                            )
-                            del all_graph_embeddings
 
                 # all_tokens
                 all_tokens = []
@@ -1661,12 +1612,9 @@ class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
                             all_hidden_states.append(
                                 np.load(HIDDEN_STATES_PROMPT_PATH.format(split, epoch))
                             )
-                    all_hidden_states = np.concatenate(all_hidden_states, axis=1)
+                    all_hidden_states = np.concatenate(all_hidden_states)
                     np.save(self.hidden_states_path, all_hidden_states)
-                    all_hidden_states = torch.from_numpy(all_hidden_states).permute(
-                        (1, 0, 2, 3)
-                    )
-                    all_tokens["hidden_states"] = all_hidden_states.unbind()
+                    all_tokens["hidden_states"] = list(all_hidden_states)
                     del all_hidden_states
 
                 # attentions:
@@ -1679,41 +1627,15 @@ class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
                             )
                     attentions = np.concatenate(attentions)
                     np.save(self.attentions_path, attentions)
-                    attentions = torch.from_numpy(attentions)
-                    all_tokens["attentions"] = attentions.unbind()
-                    del attentions
-
-                # graph embeddings:
-                if "graph_embeddings" in load_fields:
-                    graph_embeddings = []
-                    for split in splits:
-                        for epoch in range(epochs):
-                            graph_embeddings.append(
-                                np.load(
-                                    GRAPH_EMBEDDINGS_PROMPT_PATH.format(split, epoch)
-                                )
-                            )
-                    graph_embeddings = np.concatenate(graph_embeddings)
-                    np.save(self.graph_embeddings_path, graph_embeddings)
-                    graph_embeddings = torch.from_numpy(graph_embeddings)
-                    all_tokens["graph_embeddings"] = graph_embeddings.unbind()
-                    del graph_embeddings
+                    all_tokens["attentions"] = list(attentions)
         else:
             all_tokens = pd.read_csv(self.tokens_path)
             if "hidden_states" in load_fields:
-                averaged_hidden_states = torch.from_numpy(
-                    np.load(self.hidden_states_path)
-                )
-                all_tokens["hidden_states"] = torch.unbind(averaged_hidden_states)
-                del averaged_hidden_states
+                all_hidden_states = np.load(self.hidden_states_path)
+                all_tokens["hidden_states"] = list(all_hidden_states)
             if "attentions" in load_fields:
-                averaged_attentions = torch.from_numpy(np.load(self.attentions_path))
-                all_tokens["attentions"] = torch.unbind(averaged_attentions)
-                del averaged_attentions
-            if "graph_embeddings" in load_fields:
-                graph_embeddings = torch.from_numpy(np.load(self.graph_embeddings_path))
-                all_tokens["graph_embeddings"] = torch.unbind(graph_embeddings)
-                del graph_embeddings
+                all_attentions = np.load(self.attentions_path)
+                all_tokens["attentions"] = list(all_attentions)
         all_tokens[all_tokens["split"].isin(splits)]
         return all_tokens
 
@@ -1734,7 +1656,7 @@ class VanillaBertClassifier(BertClassifierOriginalArchitectureBase):
         source_df,
         target_df,
         model_max_length=256,
-        false_ratio=2.0,
+        false_ratio=1.0,
         force_recompute=False,
     ) -> None:
         super().__init__(
@@ -1889,7 +1811,7 @@ class VanillaBertClassifier(BertClassifierOriginalArchitectureBase):
                                     hidden_states_on_layer = (
                                         self._avg_over_hidden_states(
                                             semantic_positional_encoding, hidden_states
-                                        ).permute((1, 0, 2))
+                                        )
                                     )
                                     hidden_states_on_each_layer.append(
                                         hidden_states_on_layer.numpy()
@@ -1898,7 +1820,9 @@ class VanillaBertClassifier(BertClassifierOriginalArchitectureBase):
                                 hidden_states_on_each_layer = np.stack(
                                     hidden_states_on_each_layer
                                 )
-                                all_hidden_states.append(hidden_states_on_each_layer)
+                                all_hidden_states.append(
+                                    hidden_states_on_each_layer.transpose(2, 0, 1, 3)
+                                )
                             tokens = get_tokens_as_df_cb(
                                 input_ids,
                                 self.tokenizer,
@@ -1922,9 +1846,7 @@ class VanillaBertClassifier(BertClassifierOriginalArchitectureBase):
                             )
                             del all_attentions
                         if "hidden_states" in load_fields:
-                            all_hidden_states = np.concatenate(
-                                all_hidden_states, axis=1
-                            )
+                            all_hidden_states = np.concatenate(all_hidden_states)
                             np.save(
                                 HIDDEN_STATES_VANILLA_PATH.format(split, epoch),
                                 all_hidden_states,
@@ -1949,12 +1871,9 @@ class VanillaBertClassifier(BertClassifierOriginalArchitectureBase):
                             all_hidden_states.append(
                                 np.load(HIDDEN_STATES_VANILLA_PATH.format(split, epoch))
                             )
-                    all_hidden_states = np.concatenate(all_hidden_states, axis=1)
+                    all_hidden_states = np.concatenate(all_hidden_states)
                     np.save(self.hidden_states_path, all_hidden_states)
-                    all_hidden_states = torch.from_numpy(all_hidden_states).permute(
-                        (1, 0, 2, 3)
-                    )
-                    all_tokens["hidden_states"] = all_hidden_states.unbind()
+                    all_tokens["hidden_states"] = list(all_hidden_states)
                     del all_hidden_states
 
                 # attentions:
@@ -1967,24 +1886,16 @@ class VanillaBertClassifier(BertClassifierOriginalArchitectureBase):
                             )
                     attentions = np.concatenate(attentions)
                     np.save(self.attentions_path, attentions)
-                    attentions = torch.from_numpy(attentions)
-                    all_tokens["attentions"] = attentions.unbind()
-                    del attentions
+                    all_tokens["attentions"] = list(attentions)
 
         else:
             all_tokens = pd.read_csv(self.tokens_path)
             if "hidden_states" in load_fields:
-                averaged_hidden_states = torch.from_numpy(
-                    np.load(self.hidden_states_path)
-                )
-                all_tokens["hidden_states"] = torch.unbind(
-                    averaged_hidden_states.permute(1, 0, 2, 3)
-                )
-                del averaged_hidden_states
+                all_hidden_states = np.load(self.hidden_states_path)
+                all_tokens["hidden_states"] = list(all_hidden_states)
             if "attentions" in load_fields:
-                averaged_attentions = torch.from_numpy(np.load(self.attentions_path))
-                all_tokens["attentions"] = torch.unbind(averaged_attentions)
-                del averaged_attentions
+                all_attentions = np.load(self.attentions_path)
+                all_tokens["attentions"] = list(all_attentions)
         all_tokens[all_tokens["split"].isin(splits)]
         return all_tokens
 
