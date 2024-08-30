@@ -67,7 +67,7 @@ def mean_over_ranges(
     return actual_means
 
 
-def row_to_attention_datapoint(
+def row_to_input_embeds_replace_datapoint(
     row: pd.Series,
     sep_token: str = "[SEP]",
     pad_token: str = "[PAD]",

@@ -12,9 +12,7 @@ from torch_geometric.loader import LinkNeighborLoader
 import tqdm
 from sklearn.metrics import roc_auc_score
 
-from dataset_manager import GNN_PATH
-
-GNN_MODEL_PATH = f"{GNN_PATH}/model_{{}}.pth"
+from dataset_manager import ROOT
 
 
 class GNN(torch.nn.Module):
@@ -75,7 +73,7 @@ class Model(torch.nn.Module):
         self.gnn = GNN(hidden_channels, output_channels)
         # Convert GNN model into a heterogeneous variant:
         self.gnn = to_hetero(self.gnn, metadata=data.metadata())
-        self.model_path = GNN_MODEL_PATH.format(output_channels)
+        self.model_path = f"{ROOT}/gnn/model_{{}}.pth".format(output_channels)
 
         self.classifier = Classifier()
 
@@ -146,7 +144,7 @@ class GraphRepresentationGenerator:
         data = data.clone()
         if not kge_dimension:
             kge_dimension = hidden_channels
-        self.model_path = GNN_MODEL_PATH.format(kge_dimension)
+        self.model_path = f"{ROOT}/gnn/model_{{}}.pth".format(kge_dimension)
         self.model = Model(
             hidden_channels=hidden_channels,
             output_channels=kge_dimension,
@@ -283,11 +281,11 @@ class GraphRepresentationGenerator:
         return row
 
     def get_saved_embeddings(self, model: str) -> Optional[DataFrame]:
-        source_path = f"{GNN_PATH}/{model}_source_embedding.pt"
+        source_path = f"{ROOT}/gnn/{model}_source_embedding.pt"
         if not os.path.exists(source_path):
             return None
         source_embeddings = torch.load(source_path)
-        target_path = f"{GNN_PATH}/{model}_target_embedding.pt"
+        target_path = f"{ROOT}/gnn/{model}_target_embedding.pt"
         if not os.path.exists(target_path):
             return None
         target_embeddings = torch.load(target_path)

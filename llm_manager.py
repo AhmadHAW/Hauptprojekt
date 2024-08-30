@@ -23,113 +23,23 @@ from transformers.modeling_outputs import SequenceClassifierOutput
 from transformers.utils import is_datasets_available
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 import matplotlib.pyplot as plt
-
-from dataset_manager import (
-    LLM_PROMPT_TRAINING_PATH,
-    LLM_ATTENTION_TRAINING_PATH,
-    LLM_VANILLA_TRAINING_PATH,
-    LLM_PROMPT_BEST_MODEL_PATH,
-    LLM_ATTENTION_BEST_MODEL_PATH,
-    LLM_VANILLA_BEST_MODEL_PATH,
-    LLM_VANILLA_PATH,
-    LLM_PROMPT_PATH,
-    LLM_ATTENTION_PATH,
-)
 from utils import (
     find_non_existing_source_target,
     mean_over_ranges,
     row_to_vanilla_datapoint,
     row_to_prompt_datapoint,
-    row_to_attention_datapoint,
+    row_to_input_embeds_replace_datapoint,
 )
 
 ID2LABEL = {0: "FALSE", 1: "TRUE"}
 LABEL2ID = {"FALSE": 0, "TRUE": 1}
-PROMPT_LOG_PATH = f"{LLM_PROMPT_TRAINING_PATH}/logs"
-EMBEDDING_LOG_PATH = f"{LLM_ATTENTION_TRAINING_PATH}/logs"
-VANILLA_LOG_PATH = f"{LLM_VANILLA_TRAINING_PATH}/logs"
-
-PROMPT_TRAINING_STATE_PATH = (
-    f"{LLM_PROMPT_TRAINING_PATH}/checkpoint-4420/trainer_state.json"
-)
-EMBEDDING_TRAINING_STATE_PATH = (
-    f"{LLM_ATTENTION_TRAINING_PATH}/checkpoint-4420/trainer_state.json"
-)
-VANILLA_TRAINING_STATE_PATH = (
-    f"{LLM_VANILLA_TRAINING_PATH}/checkpoint-4420/trainer_state.json"
-)
-
-VANILLA_ATTENTIONS_PATH = f"{LLM_VANILLA_PATH}/attentions.npy"
-PROMPT_ATTENTIONS_PATH = f"{LLM_PROMPT_PATH}/attentions.npy"
-EMBEDDING_ATTENTIONS_PATH = f"{LLM_ATTENTION_PATH}/attentions.npy"
-VANILLA_HIDDEN_STATES_PATH = f"{LLM_VANILLA_PATH}/hidden_states.npy"
-PROMPT_HIDDEN_STATES_PATH = f"{LLM_PROMPT_PATH}/hidden_states.npy"
-EMBEDDING_HIDDEN_STATES_PATH = f"{LLM_ATTENTION_PATH}/hidden_states.npy"
-PROMPT_GRAPH_EMBEDDINGS_PATH = f"{LLM_PROMPT_PATH}/graph_embeddings.npy"
-EMBEDDING_GRAPH_EMBEDDINGS_PATH = f"{LLM_ATTENTION_PATH}/graph_embeddings.npy"
-VANILLA_TOKENS_PATH = f"{LLM_VANILLA_PATH}/tokens.csv"
-PROMPT_TOKENS_PATH = f"{LLM_PROMPT_PATH}/tokens.csv"
-EMBEDDING_TOKENS_PATH = f"{LLM_ATTENTION_PATH}/tokens.csv"
 
 SPLIT_EPOCH_ENDING = f"/split_{{}}_epoch_{{}}.npy"
 TOKENS_ENDING = f"/tokens_{{}}_{{}}.csv"
 
-VANILLA_HIDDEN_STATES_DIR_PATH = f"{LLM_VANILLA_PATH}/hidden_states"
-HIDDEN_STATES_VANILLA_PATH = f"{VANILLA_HIDDEN_STATES_DIR_PATH}{SPLIT_EPOCH_ENDING}"
-
-VANILLA_RANGES_DIR_PATH = f"{LLM_VANILLA_PATH}/ranges"
-RANGES_VANILLA_PATH = f"{VANILLA_RANGES_DIR_PATH}{SPLIT_EPOCH_ENDING}"
-
-VANILLA_ATTENTIONS_DIR_PATH = f"{LLM_VANILLA_PATH}/attentions"
-ATTENTIONS_VANILLA_PATH = f"{VANILLA_ATTENTIONS_DIR_PATH}{SPLIT_EPOCH_ENDING}"
-
-VANILLA_INPUT_IDS_DIR_PATH = f"{LLM_VANILLA_PATH}/input_ids"
-INPUT_IDS_VANILLA_PATH = f"{VANILLA_INPUT_IDS_DIR_PATH}{SPLIT_EPOCH_ENDING}"
-
-VANILLA_SUB_TOKENS_DIR_PATH = f"{LLM_VANILLA_PATH}/tokens"
-VANILLA_SUB_TOKENS_PATH = f"{VANILLA_SUB_TOKENS_DIR_PATH}{TOKENS_ENDING}"
-
-PROMPT_HIDDEN_STATES_DIR_PATH = f"{LLM_PROMPT_PATH}/hidden_states"
-HIDDEN_STATES_PROMPT_PATH = f"{PROMPT_HIDDEN_STATES_DIR_PATH}{SPLIT_EPOCH_ENDING}"
-
-PROMPT_RANGES_DIR_PATH = f"{LLM_PROMPT_PATH}/ranges"
-RANGES_PROMPT_PATH = f"{PROMPT_RANGES_DIR_PATH}{SPLIT_EPOCH_ENDING}"
-
-PROMPT_ATTENTIONS_DIR_PATH = f"{LLM_PROMPT_PATH}/attentions"
-ATTENTIONS_PROMPT_PATH = f"{PROMPT_ATTENTIONS_DIR_PATH}{SPLIT_EPOCH_ENDING}"
-
-PROMPT_INPUT_IDS_DIR_PATH = f"{LLM_PROMPT_PATH}/input_ids"
-INPUT_IDS_PROMPT_PATH = f"{PROMPT_INPUT_IDS_DIR_PATH}{SPLIT_EPOCH_ENDING}"
-
-PROMPT_GRAPH_EMBEDDINGS_DIR_PATH = f"{LLM_PROMPT_PATH}/graph_embeddings"
-GRAPH_EMBEDDINGS_PROMPT_PATH = f"{PROMPT_GRAPH_EMBEDDINGS_DIR_PATH}{SPLIT_EPOCH_ENDING}"
-
-PROMPT_SUB_TOKENS_DIR_PATH = f"{LLM_PROMPT_PATH}/tokens"
-PROMPT_SUB_TOKENS_PATH = f"{PROMPT_SUB_TOKENS_DIR_PATH}{TOKENS_ENDING}"
-
-EMBEDDING_HIDDEN_STATES_DIR_PATH = f"{LLM_ATTENTION_PATH}/hidden_states"
-HIDDEN_STATES_EMBEDDING_PATH = f"{EMBEDDING_HIDDEN_STATES_DIR_PATH}{SPLIT_EPOCH_ENDING}"
-
-EMBEDDING_RANGES_DIR_PATH = f"{LLM_ATTENTION_PATH}/ranges"
-RANGES_EMBEDDING_PATH = f"{EMBEDDING_RANGES_DIR_PATH}{SPLIT_EPOCH_ENDING}"
-
-EMBEDDING_ATTENTIONS_DIR_PATH = f"{LLM_ATTENTION_PATH}/attentions"
-ATTENTIONS_EMBEDDING_PATH = f"{EMBEDDING_ATTENTIONS_DIR_PATH}{SPLIT_EPOCH_ENDING}"
-
-EMBEDDING_INPUT_IDS_DIR_PATH = f"{LLM_ATTENTION_PATH}/input_ids"
-INPUT_IDS_EMBEDDING_PATH = f"{EMBEDDING_INPUT_IDS_DIR_PATH}{SPLIT_EPOCH_ENDING}"
-
-EMBEDDING_GRAPH_EMBEDDINGS_DIR_PATH = f"{LLM_ATTENTION_PATH}/graph_embeddings"
-GRAPH_EMBEDDINGS_EMBEDDING_PATH = (
-    f"{EMBEDDING_GRAPH_EMBEDDINGS_DIR_PATH}{SPLIT_EPOCH_ENDING}"
-)
-
-EMBEDDING_SUB_TOKENS_DIR_PATH = f"{LLM_ATTENTION_PATH}/tokens"
-EMBEDDING_SUB_TOKENS_PATH = f"{EMBEDDING_SUB_TOKENS_DIR_PATH}{TOKENS_ENDING}"
-
 MODEL_NAME = "google/bert_uncased_L-2_H-128_A-2"
 ALL_SEMANTIC_TOKENS = ["cls", "user", "sep1", "title", "sep2", "genres", "sep3"]
-EMBEDDING_BASED_SEMANTIC_TOKENS = ALL_SEMANTIC_TOKENS + [
+EMBEDDINGS_BASED_SEMANTIC_TOKENS = ALL_SEMANTIC_TOKENS + [
     "user embedding",
     "sep4",
     "movie embedding",
@@ -290,7 +200,6 @@ class EmbeddingBasedDataCollator(DataCollatorBase):
         false_ratio=1.0,
     ):
         super().__init__(tokenizer, df, source_df, target_df, false_ratio=false_ratio)
-        self.device = device
         self.data = data
         self.get_embedding_cb = get_embedding_cb
 
@@ -340,7 +249,7 @@ class EmbeddingBasedDataCollator(DataCollatorBase):
         source_embedding, target_embedding = self.get_embedding_cb(
             self.data, source_id, target_id
         )
-        random_row["prompt"] = row_to_attention_datapoint(
+        random_row["prompt"] = row_to_input_embeds_replace_datapoint(
             random_row, self.tokenizer.sep_token, self.tokenizer.pad_token
         )
         tokenized = self.tokenizer(
@@ -504,7 +413,7 @@ class CustomTrainer(Trainer):
 
         Args:
             eval_dataset (`str` or `torch.utils.data.Dataset`, *optional*):
-                If a `str`, will use `self.eval_dataset[eval_dataset]` as the evaluation dataset. If a `Dataset`, will override `self.eval_dataset` and must implement `__len__`. If it is a [`~datasets.Dataset`], columns not accepted by the `model.forward()` method are automatically removed.
+                If a `str`, will use `self.val_dataset[eval_dataset]` as the evaluation dataset. If a `Dataset`, will override `self.val_dataset` and must implement `__len__`. If it is a [`~datasets.Dataset`], columns not accepted by the `model.forward()` method are automatically removed.
         """
         if eval_dataset is None and self.eval_dataset is None:
             raise ValueError("Trainer: evaluation requires an eval_dataset.")
@@ -670,7 +579,7 @@ class BertForSequenceClassificationRanges(BertForSequenceClassification):
         )
 
 
-class EmbeddingBertForSequenceClassification(BertForSequenceClassification):
+class InputEmbedsReplaceBertForSequenceClassification(BertForSequenceClassification):
     def forward(
         self,
         input_ids: Optional[torch.Tensor] = None,
@@ -696,7 +605,9 @@ class EmbeddingBertForSequenceClassification(BertForSequenceClassification):
             return_dict if return_dict is not None else self.config.use_return_dict
         )
         if inputs_embeds is None:
-            inputs_embeds = self.bert.embeddings(input_ids)
+            inputs_embeds = self.bert.embeddings(
+                input_ids
+            )  # we take the input embeds and later replace the positions where the padding tokens where placed as placeholder with the graph embeddings.
             assert isinstance(inputs_embeds, torch.Tensor)
         if graph_embeddings is not None and len(graph_embeddings) > 0:
             if attention_mask is not None:
@@ -709,10 +620,12 @@ class EmbeddingBertForSequenceClassification(BertForSequenceClassification):
                     )
                     .unsqueeze(2)
                     .repeat((1, 1, self.config.hidden_size))
-                )
-                inputs_embeds = inputs_embeds.to(self.device).scatter(
+                )  # basically a mask finding the last positions between the sep tokens (reshaped so they can be used in scatter)
+                inputs_embeds = inputs_embeds.to(
+                    self.device
+                ).scatter(
                     1, mask.to(self.device), graph_embeddings.to(self.device)
-                )
+                )  # replace the input embeds at the place holder positions with the KGEs.
         outputs = self.bert(
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
@@ -722,7 +635,7 @@ class EmbeddingBertForSequenceClassification(BertForSequenceClassification):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-        )
+        )  # feed forward the input embeds to the attention model
 
         pooled_output = outputs[1]
 
@@ -769,29 +682,93 @@ class ClassifierBase(ABC):
     def __init__(
         self,
         df,
+        model,
+        tokenizer,
+        train_data_collator,
+        test_data_collator,
+        val_data_collator,
+        model_max_length,
         semantic_datapoints,
-        best_model_path,
-        attentions_path,
-        hidden_states_path,
-        tokens_path,
+        root_path,
         force_recompute=False,
     ) -> None:
         self.predictions = None
         self.df = df
+        self.model = model
+        self.tokenizer = tokenizer
+        self.train_data_collator = train_data_collator
+        self.test_data_collator = test_data_collator
+        self.val_data_collator = val_data_collator
         self.semantic_datapoints = semantic_datapoints
-        self.best_model_path = best_model_path
-        self.attentions_path = attentions_path
-        self.hidden_states_path = hidden_states_path
-        self.tokens_path = tokens_path
+        self.attentions_path = f"{root_path}/attentions.npy"
+        self.hidden_states_path = f"{root_path}/hidden_states.npy"
+        self.tokens_path = f"{root_path}/tokens.csv"
+        self.training_path = f"{root_path}/training"
+        self.best_model_path = f"{self.training_path}/best"
+        self.training_state_path = f"{self.training_path}/checkpoint-4420/trainer_state.json"  # may change when changing
+        self.log_path = f"{self.training_path}/logs"
+        self.sub_attentions_dir_path = f"{root_path}/attentions"
+        self.sub_hidden_states_dir_path = f"{root_path}/hidden_states"
+        self.sub_attentions_path = (
+            f"{self.sub_attentions_dir_path}/{SPLIT_EPOCH_ENDING}"
+        )
+        self.sub_hidden_states_path = (
+            f"{self.sub_hidden_states_dir_path}/{SPLIT_EPOCH_ENDING}"
+        )
+        self.sub_tokens_dir_path = f"{root_path}/tokens"
+        self.sub_tokens_path = f"{self.sub_tokens_dir_path}/{SPLIT_EPOCH_ENDING}"
         self.force_recompute = force_recompute
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.tokenizer = BertTokenizer.from_pretrained(
+            MODEL_NAME, model_max_length=model_max_length
+        )
 
-    def _compute_metrics(self, eval_pred):
-        predictions, labels = eval_pred
-        predictions = np.argmax(predictions, axis=1)
-        return METRIC.compute(predictions=predictions, references=labels)
+    def _get_data_collator(self, split) -> DataCollatorForLanguageModeling:
+        return (
+            self.test_data_collator
+            if split == "test"
+            else self.val_data_collator
+            if split == "val"
+            else self.train_data_collator
+        )
 
-    @abstractmethod
+    def plot_confusion_matrix(
+        self,
+        split,
+        dataset,
+        tokenize=False,
+        batch_size: int = 64,
+        force_recompute=False,
+    ):
+        if split == "test":
+            trainer = self._get_trainer(
+                dataset, tokenize=tokenize, batch_size=batch_size
+            )
+            dataset = dataset["test"]
+        else:
+            trainer = self._get_trainer(
+                dataset,
+                tokenize=tokenize,
+                eval_data_collator=self.val_data_collator,
+                batch_size=batch_size,
+            )
+            dataset = dataset["val"]
+        if not self.predictions or force_recompute:
+            # Generate predictions
+            predictions = trainer.predict(dataset)
+            self.predictions = predictions
+        # Get predicted labels and true labels
+        preds = np.argmax(self.predictions.predictions, axis=-1)
+        labels = self.predictions.label_ids
+        # Compute confusion matrix
+        cm = confusion_matrix(labels, preds)  # type: ignore
+
+        # Display confusion matrix
+        disp = ConfusionMatrixDisplay(
+            confusion_matrix=cm, display_labels=["Negative", "Positive"]
+        )
+        disp.plot(cmap=plt.cm.Blues)  # type: ignore
+        plt.show()
+
     def _get_trainer(
         self,
         dataset,
@@ -799,7 +776,44 @@ class ClassifierBase(ABC):
         eval_data_collator=None,
         epochs=3,
         batch_size: int = 64,
-    ) -> Trainer:
+    ):
+        if tokenize:
+            tokenized_dataset = dataset.map(self.tokenize_function, batched=True)
+        else:
+            tokenized_dataset = dataset
+        training_args = TrainingArguments(
+            output_dir=self.training_path,
+            num_train_epochs=epochs,
+            per_device_train_batch_size=batch_size,
+            per_device_eval_batch_size=batch_size,
+            warmup_steps=500,
+            weight_decay=0.01,
+            logging_dir=self.log_path,
+            logging_steps=10,
+            save_strategy="epoch",
+            eval_strategy="epoch",
+            load_best_model_at_end=True,
+        )
+        if not eval_data_collator:
+            eval_data_collator = self.test_data_collator
+        # Initialize the Trainer
+        return CustomTrainer(
+            model=self.model,
+            args=training_args,
+            train_dataset=tokenized_dataset["train"],
+            eval_dataset=tokenized_dataset["test"],
+            data_collator=self.train_data_collator,
+            eval_data_collator=eval_data_collator,
+            compute_metrics=self._compute_metrics,
+        )
+
+    def _compute_metrics(self, eval_pred):
+        predictions, labels = eval_pred
+        predictions = np.argmax(predictions, axis=1)
+        return METRIC.compute(predictions=predictions, references=labels)
+
+    @abstractmethod
+    def tokenize_function(self, example, return_pt=False):
         pass
 
     def train_model_on_data(self, dataset, epochs=3, batch_size: int = 64):
@@ -811,8 +825,8 @@ class ClassifierBase(ABC):
         trainer.model.to(device="cpu").save_pretrained(self.best_model_path)  # type: ignore
         trainer.model.to(device=self.device)  # type: ignore
 
-    def _plot_training_loss_and_accuracy(self, path_to_trainer_state, model_type):
-        with open(path_to_trainer_state, "r") as f:
+    def _plot_training_loss_and_accuracy(self, model_type):
+        with open(self.training_state_path, "r") as f:
             trainer_state = json.load(f)
             # Extract loss values and corresponding steps
         losses = []
@@ -915,267 +929,6 @@ class ClassifierBase(ABC):
                     all_attentios_avgs[batch, from_, to_] = attention_avg
         return all_attentios_avgs
 
-
-class BertClassifierOriginalArchitectureBase(ClassifierBase):
-    def __init__(
-        self,
-        df,
-        semantic_datapoints,
-        best_model_path,
-        attentions_path,
-        hidden_states_path,
-        tokens_path,
-        model_max_length=256,
-        force_recompute=False,
-    ) -> None:
-        super().__init__(
-            df=df,
-            semantic_datapoints=semantic_datapoints,
-            best_model_path=best_model_path,
-            attentions_path=attentions_path,
-            hidden_states_path=hidden_states_path,
-            tokens_path=tokens_path,
-            force_recompute=force_recompute,
-        )
-
-        # Initialize the model and tokenizer
-        if os.path.exists(self.best_model_path) and not self.force_recompute:
-            self.model = BertForSequenceClassificationRanges.from_pretrained(
-                self.best_model_path, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID
-            )
-        else:
-            self.model = BertForSequenceClassificationRanges.from_pretrained(
-                MODEL_NAME, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID
-            )
-
-        self.tokenizer = BertTokenizer.from_pretrained(
-            MODEL_NAME, model_max_length=model_max_length
-        )
-
-    def tokenize_function(self, example, return_pt=False):
-        tokenized = self.tokenizer(
-            example["prompt"],
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt",
-        )
-        semantic_positional_encoding = get_semantic_positional_encoding(
-            tokenized["input_ids"], self.tokenizer.sep_token_id
-        )
-        semantic_positional_encoding = sort_ranges(semantic_positional_encoding)
-        if return_pt:
-            result = {
-                "input_ids": tokenized["input_ids"],
-                "attention_mask": tokenized["attention_mask"],
-                "labels": example["labels"],
-                "semantic_positional_encoding": semantic_positional_encoding,
-            }
-        else:
-            result = {
-                "input_ids": tokenized["input_ids"].detach().to("cpu").tolist(),
-                "attention_mask": tokenized["attention_mask"]
-                .detach()
-                .to("cpu")
-                .tolist(),
-                "labels": example["labels"],
-                "semantic_positional_encoding": semantic_positional_encoding.detach()
-                .to("cpu")
-                .tolist(),
-            }
-        return result
-
-
-class AttentionBertClassifierBase(ClassifierBase):
-    def __init__(
-        self,
-        kge_manager,
-        get_embedding_cb,
-        model_max_length=256,
-        false_ratio=1.0,
-        force_recompute=False,
-    ) -> None:
-        best_model_path = LLM_ATTENTION_BEST_MODEL_PATH
-        attentions_path = EMBEDDING_ATTENTIONS_PATH
-        hidden_states_path = EMBEDDING_HIDDEN_STATES_PATH
-        self.graph_embeddings_path = EMBEDDING_GRAPH_EMBEDDINGS_PATH
-        tokens_path = EMBEDDING_TOKENS_PATH
-        super().__init__(
-            df=kge_manager.llm_df,
-            semantic_datapoints=EMBEDDING_BASED_SEMANTIC_TOKENS,
-            best_model_path=best_model_path,
-            attentions_path=attentions_path,
-            hidden_states_path=hidden_states_path,
-            tokens_path=tokens_path,
-            force_recompute=force_recompute,
-        )
-
-        # Initialize the model and tokenizer
-        if os.path.exists(self.best_model_path) and not self.force_recompute:
-            self.model = EmbeddingBertForSequenceClassification.from_pretrained(
-                self.best_model_path, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID
-            )
-        else:
-            self.model = EmbeddingBertForSequenceClassification.from_pretrained(
-                MODEL_NAME, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID
-            )
-
-        self.tokenizer = BertTokenizer.from_pretrained(
-            MODEL_NAME, model_max_length=model_max_length
-        )
-        self.train_data_collator = EmbeddingBasedDataCollator(
-            self.tokenizer,
-            self.device,
-            kge_manager.llm_df,
-            kge_manager.source_df,
-            kge_manager.target_df,
-            kge_manager.gnn_train_data,
-            get_embedding_cb,
-            false_ratio=false_ratio,
-        )
-        self.test_data_collator = EmbeddingBasedDataCollator(
-            self.tokenizer,
-            self.device,
-            kge_manager.llm_df,
-            kge_manager.source_df,
-            kge_manager.target_df,
-            kge_manager.gnn_test_data,
-            get_embedding_cb,
-            false_ratio=-1.0,
-        )
-        self.eval_data_collator = EmbeddingBasedDataCollator(
-            self.tokenizer,
-            self.device,
-            kge_manager.llm_df,
-            kge_manager.source_df,
-            kge_manager.target_df,
-            kge_manager.gnn_val_data,
-            get_embedding_cb,
-            false_ratio=-1.0,
-        )
-
-    def _get_trainer(
-        self,
-        dataset,
-        tokenize=False,
-        eval_data_collator=None,
-        epochs=3,
-        batch_size: int = 64,
-    ):
-        if tokenize:
-            tokenized_dataset = dataset.map(self.tokenize_function, batched=True)
-        else:
-            tokenized_dataset = dataset
-        training_args = TrainingArguments(
-            output_dir=LLM_ATTENTION_TRAINING_PATH,
-            num_train_epochs=epochs,
-            per_device_train_batch_size=batch_size,
-            per_device_eval_batch_size=batch_size,
-            warmup_steps=500,
-            weight_decay=0.01,
-            logging_dir=EMBEDDING_LOG_PATH,
-            logging_steps=10,
-            save_strategy="epoch",
-            eval_strategy="epoch",
-            load_best_model_at_end=True,
-        )
-        if not eval_data_collator:
-            eval_data_collator = self.test_data_collator
-        # Initialize the Trainer
-        return CustomTrainer(
-            model=self.model,
-            args=training_args,
-            train_dataset=tokenized_dataset["train"],
-            eval_dataset=tokenized_dataset["test"],
-            data_collator=self.train_data_collator,
-            eval_data_collator=eval_data_collator,
-            compute_metrics=self._compute_metrics,
-        )
-
-    def tokenize_function(self, example, return_pt=False):
-        tokenized = self.tokenizer(
-            example["prompt"],
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt",
-        )
-        semantic_positional_encoding = get_semantic_positional_encoding(
-            tokenized["input_ids"], self.tokenizer.sep_token_id
-        )
-        semantic_positional_encoding = sort_ranges(semantic_positional_encoding)
-        if return_pt:
-            result = {
-                "input_ids": tokenized["input_ids"],
-                "attention_mask": tokenized["attention_mask"],
-                "labels": example["labels"],
-                "semantic_positional_encoding": semantic_positional_encoding,
-                "graph_embeddings": example["graph_embeddings"],
-            }
-        else:
-            result = {
-                "input_ids": tokenized["input_ids"].detach().to("cpu").tolist(),
-                "attention_mask": tokenized["attention_mask"]
-                .detach()
-                .to("cpu")
-                .tolist(),
-                "labels": example["labels"],
-                "semantic_positional_encoding": semantic_positional_encoding.detach()
-                .to("cpu")
-                .tolist(),
-                "graph_embeddings": example["graph_embeddings"],
-            }
-        return result
-
-    def plot_confusion_matrix(
-        self,
-        split,
-        dataset,
-        tokenize=False,
-        batch_size: int = 64,
-        force_recompute=False,
-    ):
-        if split == "test":
-            trainer = self._get_trainer(
-                dataset, tokenize=tokenize, batch_size=batch_size
-            )
-            dataset = dataset["test"]
-        else:
-            trainer = self._get_trainer(
-                dataset,
-                tokenize=tokenize,
-                eval_data_collator=self.eval_data_collator,
-                batch_size=batch_size,
-            )
-            dataset = dataset["val"]
-        if not self.predictions or force_recompute:
-            # Generate predictions
-            predictions = trainer.predict(dataset)
-            self.predictions = predictions
-        # Get predicted labels and true labels
-        preds = np.argmax(self.predictions.predictions, axis=-1)
-        labels = self.predictions.label_ids
-        # Compute confusion matrix
-        cm = confusion_matrix(labels, preds)  # type: ignore
-
-        # Display confusion matrix
-        disp = ConfusionMatrixDisplay(
-            confusion_matrix=cm, display_labels=["Negative", "Positive"]
-        )
-        disp.plot(cmap=plt.cm.Blues)  # type: ignore
-        plt.show()
-
-    def _get_data_collator(self, split):
-        return (
-            self.test_data_collator
-            if split == "test"
-            else self.eval_data_collator
-            if split == "val"
-            else self.train_data_collator
-        )
-
-    def plot_training_loss_and_accuracy(self):
-        model_type = "Embedding"
-        self._plot_training_loss_and_accuracy(EMBEDDING_TRAINING_STATE_PATH, model_type)
-
     def forward_dataset_and_save_outputs(
         self,
         dataset: datasets.Dataset | datasets.DatasetDict,
@@ -1186,34 +939,30 @@ class AttentionBertClassifierBase(ClassifierBase):
         load_fields: List[str] = ["attentions", "hidden_states"],
         force_recompute: bool = False,
     ):
+        add_hidden_states = "hidden_states" in load_fields
+        add_attentions = "attentions" in load_fields
+        print(self.attentions_path, self.hidden_states_path, self.tokens_path)
         if (
             force_recompute
             or not os.path.exists(self.attentions_path)
             or not os.path.exists(self.hidden_states_path)
             or not os.path.exists(self.tokens_path)
         ):
-            assert isinstance(self.model, EmbeddingBertForSequenceClassification)
+            assert isinstance(self.model, BertForSequenceClassification)
             self.model.eval()
-            Path(EMBEDDING_ATTENTIONS_DIR_PATH).mkdir(parents=True, exist_ok=True)
-            Path(EMBEDDING_HIDDEN_STATES_DIR_PATH).mkdir(parents=True, exist_ok=True)
-            Path(EMBEDDING_INPUT_IDS_DIR_PATH).mkdir(parents=True, exist_ok=True)
-            Path(EMBEDDING_RANGES_DIR_PATH).mkdir(parents=True, exist_ok=True)
-            Path(EMBEDDING_SUB_TOKENS_DIR_PATH).mkdir(parents=True, exist_ok=True)
-            Path(EMBEDDING_GRAPH_EMBEDDINGS_DIR_PATH).mkdir(parents=True, exist_ok=True)
-            add_hidden_states = "hidden_states" in load_fields
-            add_attentions = "attentions" in load_fields
-            add_graph_embeddings = "graph_embeddings" in load_fields
+            Path(self.sub_attentions_dir_path).mkdir(parents=True, exist_ok=True)
+            Path(self.sub_hidden_states_dir_path).mkdir(parents=True, exist_ok=True)
+            Path(self.sub_tokens_dir_path).mkdir(parents=True, exist_ok=True)
             with torch.no_grad():
                 for split in splits:
                     data_collator = self._get_data_collator(split)
                     for epoch in range(epochs):
                         all_hidden_states = []
                         all_attentions = []
-                        all_graph_embeddings = []
                         all_tokens = []
-                        print(f"Adding {split} Forward Epoch {epoch + 1} from {epochs}")
+                        print(f"{split} Forward Epoch {epoch + 1} from {epochs}")
                         data_loader = DataLoader(
-                            dataset=dataset[split],
+                            dataset=dataset[split],  # type: ignore
                             batch_size=batch_size,
                             collate_fn=data_collator,
                         )
@@ -1222,19 +971,14 @@ class AttentionBertClassifierBase(ClassifierBase):
                             #    batch = next(iter(data_loader))
                             splits_ = [split] * len(batch["input_ids"])
                             outputs = self.model(
-                                input_ids=batch["input_ids"],
-                                attention_mask=batch["attention_mask"],
-                                graph_embeddings=batch["graph_embeddings"],
-                                semantic_positional_encoding=batch[
-                                    "semantic_positional_encoding"
-                                ],
+                                **batch,
                                 output_hidden_states=add_hidden_states,
                                 output_attentions=add_attentions,
                             )
                             semantic_positional_encoding = batch[
                                 "semantic_positional_encoding"
                             ]
-                            if "attentions" in load_fields:
+                            if add_attentions:
                                 attentions = outputs.attentions
                                 attentions = [
                                     torch.sum(layer, dim=1) for layer in attentions
@@ -1245,7 +989,7 @@ class AttentionBertClassifierBase(ClassifierBase):
                                 )
                                 all_attentions.append(attentions.numpy())
                                 del attentions
-                            if "hidden_states" in load_fields:
+                            if add_hidden_states:
                                 hidden_states_on_each_layer = []
                                 for hidden_states in outputs.hidden_states:
                                     hidden_states_on_layer = (
@@ -1275,21 +1019,21 @@ class AttentionBertClassifierBase(ClassifierBase):
                         # Concatenate all hidden states across batches
                         all_tokens = pd.concat(all_tokens).reset_index(drop=True)
                         all_tokens.to_csv(
-                            EMBEDDING_SUB_TOKENS_PATH.format(split, epoch),
+                            self.sub_tokens_path.format(split, epoch),
                             index=False,
                         )
                         del all_tokens
-                        if "attentions" in load_fields:
+                        if add_attentions:
                             all_attentions = np.concatenate(all_attentions)
                             np.save(
-                                ATTENTIONS_EMBEDDING_PATH.format(split, epoch),
+                                self.sub_attentions_path.format(split, epoch),
                                 all_attentions,
                             )
                             del all_attentions
-                        if "hidden_states" in load_fields:
+                        if add_hidden_states:
                             all_hidden_states = np.concatenate(all_hidden_states)
                             np.save(
-                                HIDDEN_STATES_EMBEDDING_PATH.format(split, epoch),
+                                self.sub_hidden_states_path.format(split, epoch),
                                 all_hidden_states,
                             )
                             del all_hidden_states
@@ -1299,19 +1043,19 @@ class AttentionBertClassifierBase(ClassifierBase):
                 for split in splits:
                     for epoch in range(epochs):
                         all_tokens.append(
-                            pd.read_csv(EMBEDDING_SUB_TOKENS_PATH.format(split, epoch))
+                            pd.read_csv(self.sub_tokens_path.format(split, epoch))
                         )
                 all_tokens = pd.concat(all_tokens).reset_index(drop=True)
                 all_tokens.to_csv(self.tokens_path, index=False)
 
                 # hidden states:
-                if "hidden_states" in load_fields:
+                if add_hidden_states:
                     all_hidden_states = []
                     for split in splits:
                         for epoch in range(epochs):
                             all_hidden_states.append(
                                 np.load(
-                                    HIDDEN_STATES_EMBEDDING_PATH.format(split, epoch)
+                                    self.sub_hidden_states_path.format(split, epoch)
                                 )
                             )
                     all_hidden_states = np.concatenate(all_hidden_states)
@@ -1320,54 +1064,130 @@ class AttentionBertClassifierBase(ClassifierBase):
                     del all_hidden_states
 
                 # attentions:
-                if "attentions" in load_fields:
+                if add_attentions:
                     attentions = []
                     for split in splits:
                         for epoch in range(epochs):
                             attentions.append(
-                                np.load(ATTENTIONS_EMBEDDING_PATH.format(split, epoch))
+                                np.load(self.sub_attentions_path.format(split, epoch))
                             )
                     attentions = np.concatenate(attentions)
                     np.save(self.attentions_path, attentions)
                     all_tokens["attentions"] = list(attentions)
         else:
             all_tokens = pd.read_csv(self.tokens_path)
-            if "hidden_states" in load_fields:
+            if add_hidden_states:
                 all_hidden_states = np.load(self.hidden_states_path)
                 all_tokens["hidden_states"] = list(all_hidden_states)
-            if "attentions" in load_fields:
+            if add_attentions:
                 all_attentions = np.load(self.attentions_path)
                 all_tokens["attentions"] = list(all_attentions)
         all_tokens[all_tokens["split"].isin(splits)]
         return all_tokens
 
+    @staticmethod
+    def read_forward_dataset(root: str, splits: List[str] = ["train", "test", "val"]):
+        tokens_path = f"{root}/tokens.csv"
+        hidden_states_path = f"{root}/hidden_states.npy"
+        attentions_path = f"{root}/attentions.npy"
+        all_tokens = pd.read_csv(tokens_path)
+        all_hidden_states = np.load(hidden_states_path)
+        all_tokens["hidden_states"] = list(all_hidden_states)
+        all_attentions = np.load(attentions_path)
+        all_tokens["attentions"] = list(all_attentions)
+        all_tokens[all_tokens["split"].isin(splits)]
+        return all_tokens
 
-class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
+
+class BertClassifierOriginalArchitectureBase(ClassifierBase):
+    def __init__(
+        self,
+        df,
+        tokenizer,
+        train_data_collator,
+        test_data_collator,
+        val_data_collator,
+        model_max_length,
+        semantic_datapoints,
+        root_path,
+        model_name,
+        force_recompute=False,
+    ) -> None:
+        best_model_path = f"{root_path}/training/best"
+        # Initialize the model and tokenizer
+        if os.path.exists(best_model_path) and not force_recompute:
+            model = BertForSequenceClassificationRanges.from_pretrained(
+                best_model_path, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID
+            )
+        else:
+            model = BertForSequenceClassificationRanges.from_pretrained(
+                model_name, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID
+            )
+        super().__init__(
+            df=df,
+            model=model,
+            tokenizer=tokenizer,
+            train_data_collator=train_data_collator,
+            test_data_collator=test_data_collator,
+            val_data_collator=val_data_collator,
+            model_max_length=model_max_length,
+            semantic_datapoints=semantic_datapoints,
+            root_path=root_path,
+            force_recompute=force_recompute,
+        )
+
+    def tokenize_function(self, example, return_pt=False):
+        tokenized = self.tokenizer(
+            example["prompt"],
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
+        )
+        semantic_positional_encoding = get_semantic_positional_encoding(
+            tokenized["input_ids"], self.tokenizer.sep_token_id
+        )
+        semantic_positional_encoding = sort_ranges(semantic_positional_encoding)
+        if return_pt:
+            result = {
+                "input_ids": tokenized["input_ids"],
+                "attention_mask": tokenized["attention_mask"],
+                "labels": example["labels"],
+                "semantic_positional_encoding": semantic_positional_encoding,
+            }
+        else:
+            result = {
+                "input_ids": tokenized["input_ids"].detach().to("cpu").tolist(),
+                "attention_mask": tokenized["attention_mask"]
+                .detach()
+                .to("cpu")
+                .tolist(),
+                "labels": example["labels"],
+                "semantic_positional_encoding": semantic_positional_encoding.detach()
+                .to("cpu")
+                .tolist(),
+            }
+        return result
+
+
+class EmbeddingBasedClassifier(ClassifierBase):
     def __init__(
         self,
         kge_manager,
         get_embedding_cb,
+        root_path: str,
+        model: BertForSequenceClassification,
+        model_name: str,
         model_max_length=256,
         false_ratio=1.0,
         force_recompute=False,
     ) -> None:
-        best_model_path = LLM_PROMPT_BEST_MODEL_PATH
-        attentions_path = PROMPT_ATTENTIONS_PATH
-        hidden_states_path = PROMPT_HIDDEN_STATES_PATH
-        self.graph_embeddings_path = PROMPT_GRAPH_EMBEDDINGS_PATH
-        tokens_path = PROMPT_TOKENS_PATH
-        super().__init__(
-            df=kge_manager.llm_df,
-            semantic_datapoints=EMBEDDING_BASED_SEMANTIC_TOKENS,
-            best_model_path=best_model_path,
-            attentions_path=attentions_path,
-            hidden_states_path=hidden_states_path,
-            tokens_path=tokens_path,
-            force_recompute=force_recompute,
-            model_max_length=model_max_length,
+        tokenizer = BertTokenizer.from_pretrained(
+            model_name, model_max_length=model_max_length
         )
-        self.train_data_collator = PromptEmbeddingDataCollator(
-            self.tokenizer,
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        train_data_collator = EmbeddingBasedDataCollator(
+            tokenizer,
+            self.device,
             kge_manager.llm_df,
             kge_manager.source_df,
             kge_manager.target_df,
@@ -1375,8 +1195,9 @@ class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
             get_embedding_cb,
             false_ratio=false_ratio,
         )
-        self.test_data_collator = PromptEmbeddingDataCollator(
-            self.tokenizer,
+        test_data_collator = EmbeddingBasedDataCollator(
+            tokenizer,
+            self.device,
             kge_manager.llm_df,
             kge_manager.source_df,
             kge_manager.target_df,
@@ -1384,8 +1205,9 @@ class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
             get_embedding_cb,
             false_ratio=-1.0,
         )
-        self.eval_data_collator = PromptEmbeddingDataCollator(
-            self.tokenizer,
+        val_data_collator = EmbeddingBasedDataCollator(
+            tokenizer,
+            self.device,
             kge_manager.llm_df,
             kge_manager.source_df,
             kge_manager.target_df,
@@ -1393,260 +1215,154 @@ class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
             get_embedding_cb,
             false_ratio=-1.0,
         )
+        ClassifierBase.__init__(
+            self,
+            df=kge_manager.llm_df,
+            model=model,
+            tokenizer=tokenizer,
+            train_data_collator=train_data_collator,
+            test_data_collator=test_data_collator,
+            val_data_collator=val_data_collator,
+            model_max_length=model_max_length,
+            semantic_datapoints=EMBEDDINGS_BASED_SEMANTIC_TOKENS,
+            root_path=root_path,
+            force_recompute=force_recompute,
+        )
 
-    def _get_trainer(
-        self,
-        dataset,
-        tokenize=False,
-        eval_data_collator=None,
-        epochs=3,
-        batch_size: int = 64,
-    ):
-        if tokenize:
-            tokenized_dataset = dataset.map(self.tokenize_function, batched=True)
+    def tokenize_function(self, example, return_pt=False):
+        tokenized = self.tokenizer(
+            example["prompt"],
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
+        )
+        semantic_positional_encoding = get_semantic_positional_encoding(
+            tokenized["input_ids"], self.tokenizer.sep_token_id
+        )
+        semantic_positional_encoding = sort_ranges(semantic_positional_encoding)
+        if return_pt:
+            result = {
+                "input_ids": tokenized["input_ids"],
+                "attention_mask": tokenized["attention_mask"],
+                "labels": example["labels"],
+                "semantic_positional_encoding": semantic_positional_encoding,
+                "graph_embeddings": example["graph_embeddings"],
+            }
         else:
-            tokenized_dataset = dataset
-        training_args = TrainingArguments(
-            output_dir=LLM_PROMPT_TRAINING_PATH,
-            num_train_epochs=epochs,
-            per_device_train_batch_size=batch_size,
-            per_device_eval_batch_size=batch_size,
-            warmup_steps=500,
-            weight_decay=0.01,
-            logging_dir=PROMPT_LOG_PATH,
-            logging_steps=10,
-            save_strategy="epoch",
-            eval_strategy="epoch",
-            load_best_model_at_end=True,
-        )
-        if not eval_data_collator:
-            eval_data_collator = self.test_data_collator
-        # Initialize the Trainer
-        return CustomTrainer(
-            model=self.model,
-            args=training_args,
-            train_dataset=tokenized_dataset["train"],
-            eval_dataset=tokenized_dataset["test"],
-            data_collator=self.train_data_collator,
-            eval_data_collator=eval_data_collator,
-            compute_metrics=self._compute_metrics,
-        )
+            result = {
+                "input_ids": tokenized["input_ids"].detach().to("cpu").tolist(),
+                "attention_mask": tokenized["attention_mask"]
+                .detach()
+                .to("cpu")
+                .tolist(),
+                "labels": example["labels"],
+                "semantic_positional_encoding": semantic_positional_encoding.detach()
+                .to("cpu")
+                .tolist(),
+                "graph_embeddings": example["graph_embeddings"],
+            }
+        return result
 
-    def plot_confusion_matrix(
+
+class InputEmbedsReplaceClassifier(EmbeddingBasedClassifier):
+    def __init__(
         self,
-        split,
-        dataset,
-        tokenize=False,
-        batch_size: int = 64,
+        kge_manager,
+        get_embedding_cb,
+        root_path,
+        model_name=MODEL_NAME,
+        model_max_length=256,
+        false_ratio: float = 1.0,
         force_recompute=False,
-    ):
-        if split == "test":
-            trainer = self._get_trainer(
-                dataset, tokenize=tokenize, batch_size=batch_size
-            )
-            dataset = dataset["test"]
-        else:
-            trainer = self._get_trainer(
-                dataset,
-                tokenize=tokenize,
-                eval_data_collator=self.eval_data_collator,
-                batch_size=batch_size,
-            )
-            dataset = dataset["val"]
-        if not self.predictions or force_recompute:
-            # Generate predictions
-            predictions = trainer.predict(dataset)
-            self.predictions = predictions
-        # Get predicted labels and true labels
-        preds = np.argmax(self.predictions.predictions, axis=-1)
-        labels = self.predictions.label_ids
-        # Compute confusion matrix
-        cm = confusion_matrix(labels, preds)  # type: ignore
+    ) -> None:
+        training_path = f"{root_path}/training"
+        model_path = f"{training_path}/best"
 
-        # Display confusion matrix
-        disp = ConfusionMatrixDisplay(
-            confusion_matrix=cm, display_labels=["Negative", "Positive"]
+        if os.path.exists(model_path) and not force_recompute:
+            model = InputEmbedsReplaceBertForSequenceClassification.from_pretrained(
+                model_path,
+                num_labels=2,
+                id2label=ID2LABEL,
+                label2id=LABEL2ID,
+            )
+        else:
+            model = InputEmbedsReplaceBertForSequenceClassification.from_pretrained(
+                model_name, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID
+            )
+        assert isinstance(model, BertForSequenceClassification)
+        super().__init__(
+            kge_manager,
+            get_embedding_cb,
+            root_path,
+            model,
+            model_name,
+            model_max_length,
+            false_ratio,
+            force_recompute,
         )
-        disp.plot(cmap=plt.cm.Blues)  # type: ignore
-        plt.show()
+
+    def plot_training_loss_and_accuracy(self):
+        model_type = "Input Embeds Replace"
+        self._plot_training_loss_and_accuracy(model_type)
+
+
+class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
+    def __init__(
+        self,
+        kge_manager,
+        get_embedding_cb,
+        root_path,
+        model_name=MODEL_NAME,
+        model_max_length=256,
+        false_ratio=1.0,
+        force_recompute=False,
+    ) -> None:
+        tokenizer = BertTokenizer.from_pretrained(
+            model_name, model_max_length=model_max_length
+        )
+        train_data_collator = PromptEmbeddingDataCollator(
+            tokenizer,
+            kge_manager.llm_df,
+            kge_manager.source_df,
+            kge_manager.target_df,
+            kge_manager.gnn_train_data,
+            get_embedding_cb,
+            false_ratio=false_ratio,
+        )
+        test_data_collator = PromptEmbeddingDataCollator(
+            tokenizer,
+            kge_manager.llm_df,
+            kge_manager.source_df,
+            kge_manager.target_df,
+            kge_manager.gnn_test_data,
+            get_embedding_cb,
+            false_ratio=-1.0,
+        )
+        val_data_collator = PromptEmbeddingDataCollator(
+            tokenizer,
+            kge_manager.llm_df,
+            kge_manager.source_df,
+            kge_manager.target_df,
+            kge_manager.gnn_val_data,
+            get_embedding_cb,
+            false_ratio=-1.0,
+        )
+        super().__init__(
+            df=kge_manager.llm_df,
+            tokenizer=tokenizer,
+            train_data_collator=train_data_collator,
+            test_data_collator=test_data_collator,
+            val_data_collator=val_data_collator,
+            model_max_length=model_max_length,
+            semantic_datapoints=EMBEDDINGS_BASED_SEMANTIC_TOKENS,
+            root_path=root_path,
+            model_name=model_name,
+            force_recompute=force_recompute,
+        )
 
     def plot_training_loss_and_accuracy(self):
         model_type = "Prompt"
-        self._plot_training_loss_and_accuracy(PROMPT_TRAINING_STATE_PATH, model_type)
-
-    def forward_dataset_and_save_outputs(
-        self,
-        dataset: datasets.Dataset | datasets.DatasetDict,
-        get_tokens_as_df_cb: Callable,
-        splits: List[str] = ["train", "test", "val"],
-        batch_size: int = 64,
-        epochs: int = 1,
-        load_fields: List[str] = ["attentions", "hidden_states", "graph_embeddings"],
-        force_recompute: bool = False,
-    ):
-        if (
-            force_recompute
-            or not os.path.exists(self.attentions_path)
-            or not os.path.exists(self.hidden_states_path)
-            or not os.path.exists(self.tokens_path)
-        ):
-            assert isinstance(self.model, BertForSequenceClassificationRanges)
-            self.model.eval()
-            Path(PROMPT_ATTENTIONS_DIR_PATH).mkdir(parents=True, exist_ok=True)
-            Path(PROMPT_HIDDEN_STATES_DIR_PATH).mkdir(parents=True, exist_ok=True)
-            Path(PROMPT_INPUT_IDS_DIR_PATH).mkdir(parents=True, exist_ok=True)
-            Path(PROMPT_RANGES_DIR_PATH).mkdir(parents=True, exist_ok=True)
-            Path(PROMPT_SUB_TOKENS_DIR_PATH).mkdir(parents=True, exist_ok=True)
-            Path(PROMPT_GRAPH_EMBEDDINGS_DIR_PATH).mkdir(parents=True, exist_ok=True)
-            add_hidden_states = "hidden_states" in load_fields
-            add_attentions = "attentions" in load_fields
-            add_graph_embeddings = "graph_embeddings" in load_fields
-            with torch.no_grad():
-                for split in splits:
-                    data_collator = self._get_data_collator(split)
-                    for epoch in range(epochs):
-                        all_hidden_states = []
-                        all_attentions = []
-                        all_graph_embeddings = []
-                        all_tokens = []
-                        print(f"Prompt {split} Forward Epoch {epoch + 1} from {epochs}")
-                        data_loader = DataLoader(
-                            dataset=dataset[split],
-                            batch_size=batch_size,
-                            collate_fn=data_collator,
-                        )
-                        for idx, batch in enumerate(data_loader):
-                            # if True:
-                            #    batch = next(iter(data_loader))
-                            splits_ = [split] * len(batch["input_ids"])
-                            outputs = self.model(
-                                input_ids=batch["input_ids"],
-                                attention_mask=batch["attention_mask"],
-                                semantic_positional_encoding=batch[
-                                    "semantic_positional_encoding"
-                                ],
-                                output_hidden_states=add_hidden_states,
-                                output_attentions=add_attentions,
-                            )
-                            semantic_positional_encoding = batch[
-                                "semantic_positional_encoding"
-                            ]
-                            if "attentions" in load_fields:
-                                attentions = outputs.attentions
-                                attentions = [
-                                    torch.sum(layer, dim=1) for layer in attentions
-                                ]
-                                attentions = torch.stack(attentions).permute(1, 2, 3, 0)
-                                attentions = self._means_over_ranges_cross(
-                                    semantic_positional_encoding, attentions
-                                )
-                                all_attentions.append(attentions.numpy())
-                                del attentions
-                            if "hidden_states" in load_fields:
-                                hidden_states_on_each_layer = []
-                                for hidden_states in outputs.hidden_states:
-                                    hidden_states_on_layer = (
-                                        self._avg_over_hidden_states(
-                                            semantic_positional_encoding, hidden_states
-                                        )
-                                    )
-                                    hidden_states_on_each_layer.append(
-                                        hidden_states_on_layer.numpy()
-                                    )
-                                    del hidden_states
-                                hidden_states_on_each_layer = np.stack(
-                                    hidden_states_on_each_layer
-                                )
-                                all_hidden_states.append(
-                                    hidden_states_on_each_layer.transpose(2, 0, 1, 3)
-                                )
-                            tokens, graph_embeddings = get_tokens_as_df_cb(
-                                batch["input_ids"],
-                                self.tokenizer,
-                                semantic_positional_encoding,
-                            )
-                            if add_graph_embeddings:
-                                all_graph_embeddings.append(graph_embeddings.numpy())
-                            del graph_embeddings
-                            tokens["labels"] = batch["labels"].tolist()
-                            tokens["split"] = splits_
-                            all_tokens.append(tokens)
-
-                        # Concatenate all hidden states across batches
-                        all_tokens = pd.concat(all_tokens).reset_index(drop=True)
-                        all_tokens.to_csv(
-                            PROMPT_SUB_TOKENS_PATH.format(split, epoch),
-                            index=False,
-                        )
-                        del all_tokens
-                        if "attentions" in load_fields:
-                            all_attentions = np.concatenate(all_attentions)
-                            np.save(
-                                ATTENTIONS_PROMPT_PATH.format(split, epoch),
-                                all_attentions,
-                            )
-                            del all_attentions
-                        if "hidden_states" in load_fields:
-                            all_hidden_states = np.concatenate(all_hidden_states)
-                            np.save(
-                                HIDDEN_STATES_PROMPT_PATH.format(split, epoch),
-                                all_hidden_states,
-                            )
-                            del all_hidden_states
-
-                # all_tokens
-                all_tokens = []
-                for split in splits:
-                    for epoch in range(epochs):
-                        all_tokens.append(
-                            pd.read_csv(PROMPT_SUB_TOKENS_PATH.format(split, epoch))
-                        )
-                all_tokens = pd.concat(all_tokens).reset_index(drop=True)
-                all_tokens.to_csv(self.tokens_path, index=False)
-
-                # hidden states:
-                if "hidden_states" in load_fields:
-                    all_hidden_states = []
-                    for split in splits:
-                        for epoch in range(epochs):
-                            all_hidden_states.append(
-                                np.load(HIDDEN_STATES_PROMPT_PATH.format(split, epoch))
-                            )
-                    all_hidden_states = np.concatenate(all_hidden_states)
-                    np.save(self.hidden_states_path, all_hidden_states)
-                    all_tokens["hidden_states"] = list(all_hidden_states)
-                    del all_hidden_states
-
-                # attentions:
-                if "attentions" in load_fields:
-                    attentions = []
-                    for split in splits:
-                        for epoch in range(epochs):
-                            attentions.append(
-                                np.load(ATTENTIONS_PROMPT_PATH.format(split, epoch))
-                            )
-                    attentions = np.concatenate(attentions)
-                    np.save(self.attentions_path, attentions)
-                    all_tokens["attentions"] = list(attentions)
-        else:
-            all_tokens = pd.read_csv(self.tokens_path)
-            if "hidden_states" in load_fields:
-                all_hidden_states = np.load(self.hidden_states_path)
-                all_tokens["hidden_states"] = list(all_hidden_states)
-            if "attentions" in load_fields:
-                all_attentions = np.load(self.attentions_path)
-                all_tokens["attentions"] = list(all_attentions)
-        all_tokens[all_tokens["split"].isin(splits)]
-        return all_tokens
-
-    def _get_data_collator(self, split):
-        return (
-            self.test_data_collator
-            if split == "test"
-            else self.eval_data_collator
-            if split == "val"
-            else self.train_data_collator
-        )
+        self._plot_training_loss_and_accuracy(model_type)
 
 
 class VanillaBertClassifier(BertClassifierOriginalArchitectureBase):
@@ -1655,252 +1371,34 @@ class VanillaBertClassifier(BertClassifierOriginalArchitectureBase):
         df,
         source_df,
         target_df,
+        root_path,
+        model_name=MODEL_NAME,
         model_max_length=256,
         false_ratio=1.0,
         force_recompute=False,
     ) -> None:
+        tokenizer = BertTokenizer.from_pretrained(
+            MODEL_NAME, model_max_length=model_max_length
+        )
+        train_data_collator = VanillaEmbeddingDataCollator(
+            tokenizer, df, source_df, target_df, false_ratio=false_ratio
+        )
+        val_data_collator = VanillaEmbeddingDataCollator(
+            tokenizer, df, source_df, target_df, false_ratio=-1.0
+        )
         super().__init__(
             df=df,
-            semantic_datapoints=ALL_SEMANTIC_TOKENS,
-            best_model_path=LLM_VANILLA_BEST_MODEL_PATH,
-            attentions_path=VANILLA_ATTENTIONS_PATH,
-            hidden_states_path=VANILLA_HIDDEN_STATES_PATH,
-            tokens_path=VANILLA_TOKENS_PATH,
+            tokenizer=tokenizer,
+            train_data_collator=train_data_collator,
+            test_data_collator=val_data_collator,
+            val_data_collator=val_data_collator,
             model_max_length=model_max_length,
+            semantic_datapoints=ALL_SEMANTIC_TOKENS,
+            root_path=root_path,
+            model_name=model_name,
             force_recompute=force_recompute,
         )
-        self.train_data_collator = VanillaEmbeddingDataCollator(
-            self.tokenizer, df, source_df, target_df, false_ratio=false_ratio
-        )
-        self.eval_data_collator = VanillaEmbeddingDataCollator(
-            self.tokenizer, df, source_df, target_df, false_ratio=-1.0
-        )
-
-    def _get_trainer(
-        self, dataset, tokenize: bool = False, epochs: int = 3, batch_size: int = 64
-    ) -> Trainer:
-        if tokenize:
-            tokenized_dataset = dataset.map(self.tokenize_function, batched=True)
-        else:
-            tokenized_dataset = dataset
-        training_args = TrainingArguments(
-            output_dir=LLM_VANILLA_TRAINING_PATH,
-            num_train_epochs=epochs,
-            per_device_train_batch_size=batch_size,
-            per_device_eval_batch_size=batch_size,
-            warmup_steps=500,
-            weight_decay=0.01,
-            logging_dir=VANILLA_LOG_PATH,
-            logging_steps=10,
-            save_strategy="epoch",
-            eval_strategy="epoch",
-            load_best_model_at_end=True,
-        )
-        assert isinstance(self.model, BertForSequenceClassificationRanges)
-        # Initialize the Trainer
-        return CustomTrainer(
-            model=self.model,
-            args=training_args,
-            train_dataset=tokenized_dataset["train"],
-            eval_dataset=tokenized_dataset["test"],
-            data_collator=self.train_data_collator,
-            eval_data_collator=self.eval_data_collator,
-            compute_metrics=self._compute_metrics,  # type: ignore
-        )
-
-    def plot_confusion_matrix(
-        self, split, dataset, tokenize=False, batch_size=64, force_recompute=False
-    ):
-        trainer = self._get_trainer(dataset, tokenize=tokenize, batch_size=batch_size)
-        if split == "test":
-            dataset = dataset["test"]
-        else:
-            dataset = dataset["val"]
-        if not self.predictions or force_recompute:
-            # Generate predictions
-            predictions = trainer.predict(dataset)
-            self.predictions = predictions
-        # Get predicted labels and true labels
-        preds = np.argmax(self.predictions.predictions, axis=-1)
-        labels = self.predictions.label_ids
-        # Compute confusion matrix
-        cm = confusion_matrix(labels, preds)  # type: ignore
-
-        # Display confusion matrix
-        disp = ConfusionMatrixDisplay(
-            confusion_matrix=cm, display_labels=["Negative", "Positive"]
-        )
-        disp.plot(cmap=plt.cm.Blues)  # type: ignore
-        plt.show()
 
     def plot_training_loss_and_accuracy(self):
         model_type = "Vanilla"
-        self._plot_training_loss_and_accuracy(VANILLA_TRAINING_STATE_PATH, model_type)
-
-    def forward_dataset_and_save_outputs(
-        self,
-        dataset: datasets.Dataset | datasets.DatasetDict,
-        get_tokens_as_df_cb: Callable,
-        splits: List[str] = ["train", "test", "val"],
-        batch_size: int = 64,
-        epochs: int = 1,
-        load_fields: List[str] = ["attentions", "hidden_states"],
-        force_recompute: bool = False,
-    ):
-        if (
-            force_recompute
-            or not os.path.exists(self.attentions_path)
-            or not os.path.exists(self.hidden_states_path)
-            or not os.path.exists(self.tokens_path)
-        ):
-            assert isinstance(self.model, BertForSequenceClassificationRanges)
-            self.model.eval()
-            Path(VANILLA_ATTENTIONS_DIR_PATH).mkdir(parents=True, exist_ok=True)
-            Path(VANILLA_HIDDEN_STATES_DIR_PATH).mkdir(parents=True, exist_ok=True)
-            Path(VANILLA_INPUT_IDS_DIR_PATH).mkdir(parents=True, exist_ok=True)
-            Path(VANILLA_RANGES_DIR_PATH).mkdir(parents=True, exist_ok=True)
-            Path(VANILLA_SUB_TOKENS_DIR_PATH).mkdir(parents=True, exist_ok=True)
-            add_hidden_states = "hidden_states" in load_fields
-            add_attentions = "attentions" in load_fields
-            with torch.no_grad():
-                for split in splits:
-                    data_collator = self._get_data_collator(split)
-                    for epoch in range(epochs):
-                        all_hidden_states = []
-                        all_attentions = []
-                        all_tokens = []
-                        print(
-                            f"Vanilla {split} Forward Epoch {epoch + 1} from {epochs}"
-                        )
-                        data_loader = DataLoader(
-                            dataset=dataset[split],
-                            batch_size=batch_size,
-                            collate_fn=data_collator,
-                        )
-                        for idx, batch in enumerate(data_loader):
-                            # if True:
-                            #    batch = next(iter(data_loader))
-                            input_ids = batch["input_ids"]
-                            splits_ = [split] * len(input_ids)
-                            outputs = self.model(
-                                input_ids=input_ids,
-                                attention_mask=batch["attention_mask"],
-                                semantic_positional_encoding=batch[
-                                    "semantic_positional_encoding"
-                                ],
-                                output_hidden_states=add_hidden_states,
-                                output_attentions=add_attentions,
-                            )
-                            semantic_positional_encoding = batch[
-                                "semantic_positional_encoding"
-                            ]
-                            if "attentions" in load_fields:
-                                attentions = outputs.attentions
-                                attentions = [
-                                    torch.sum(layer, dim=1) for layer in attentions
-                                ]
-                                attentions = torch.stack(attentions).permute(1, 2, 3, 0)
-                                attentions = self._means_over_ranges_cross(
-                                    semantic_positional_encoding, attentions
-                                )
-                                all_attentions.append(attentions.numpy())
-                                del attentions
-                            if "hidden_states" in load_fields:
-                                hidden_states_on_each_layer = []
-                                for hidden_states in outputs.hidden_states:
-                                    hidden_states_on_layer = (
-                                        self._avg_over_hidden_states(
-                                            semantic_positional_encoding, hidden_states
-                                        )
-                                    )
-                                    hidden_states_on_each_layer.append(
-                                        hidden_states_on_layer.numpy()
-                                    )
-                                    del hidden_states
-                                hidden_states_on_each_layer = np.stack(
-                                    hidden_states_on_each_layer
-                                )
-                                all_hidden_states.append(
-                                    hidden_states_on_each_layer.transpose(2, 0, 1, 3)
-                                )
-                            tokens = get_tokens_as_df_cb(
-                                input_ids,
-                                self.tokenizer,
-                                semantic_positional_encoding,
-                            )
-                            tokens["labels"] = batch["labels"].tolist()
-                            tokens["split"] = splits_
-                            all_tokens.append(tokens)
-
-                        # Concatenate all hidden states across batches
-                        all_tokens = pd.concat(all_tokens).reset_index(drop=True)
-                        all_tokens.to_csv(
-                            VANILLA_SUB_TOKENS_PATH.format(split, epoch), index=False
-                        )
-                        del all_tokens
-                        if "attentions" in load_fields:
-                            all_attentions = np.concatenate(all_attentions)
-                            np.save(
-                                ATTENTIONS_VANILLA_PATH.format(split, epoch),
-                                all_attentions,
-                            )
-                            del all_attentions
-                        if "hidden_states" in load_fields:
-                            all_hidden_states = np.concatenate(all_hidden_states)
-                            np.save(
-                                HIDDEN_STATES_VANILLA_PATH.format(split, epoch),
-                                all_hidden_states,
-                            )
-                            del all_hidden_states
-
-                # all_tokens
-                all_tokens = []
-                for split in splits:
-                    for epoch in range(epochs):
-                        all_tokens.append(
-                            pd.read_csv(VANILLA_SUB_TOKENS_PATH.format(split, epoch))
-                        )
-                all_tokens = pd.concat(all_tokens).reset_index(drop=True)
-                all_tokens.to_csv(self.tokens_path, index=False)
-
-                # hidden states:
-                if "hidden_states" in load_fields:
-                    all_hidden_states = []
-                    for split in splits:
-                        for epoch in range(epochs):
-                            all_hidden_states.append(
-                                np.load(HIDDEN_STATES_VANILLA_PATH.format(split, epoch))
-                            )
-                    all_hidden_states = np.concatenate(all_hidden_states)
-                    np.save(self.hidden_states_path, all_hidden_states)
-                    all_tokens["hidden_states"] = list(all_hidden_states)
-                    del all_hidden_states
-
-                # attentions:
-                if "attentions" in load_fields:
-                    attentions = []
-                    for split in splits:
-                        for epoch in range(epochs):
-                            attentions.append(
-                                np.load(ATTENTIONS_VANILLA_PATH.format(split, epoch))
-                            )
-                    attentions = np.concatenate(attentions)
-                    np.save(self.attentions_path, attentions)
-                    all_tokens["attentions"] = list(attentions)
-
-        else:
-            all_tokens = pd.read_csv(self.tokens_path)
-            if "hidden_states" in load_fields:
-                all_hidden_states = np.load(self.hidden_states_path)
-                all_tokens["hidden_states"] = list(all_hidden_states)
-            if "attentions" in load_fields:
-                all_attentions = np.load(self.attentions_path)
-                all_tokens["attentions"] = list(all_attentions)
-        all_tokens[all_tokens["split"].isin(splits)]
-        return all_tokens
-
-    def _get_data_collator(self, split: str = "train") -> VanillaEmbeddingDataCollator:
-        if split == "train":
-            return self.train_data_collator
-        else:
-            return self.eval_data_collator
+        self._plot_training_loss_and_accuracy(model_type)

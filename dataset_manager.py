@@ -17,63 +17,14 @@ from utils import (
     find_non_existing_source_target,
     row_to_vanilla_datapoint,
     row_to_prompt_datapoint,
-    row_to_attention_datapoint,
+    row_to_input_embeds_replace_datapoint,
 )
 
 
 ROOT = "./data"  # The root path where models and datasets are saved at.
 
-GNN_PATH = f"{ROOT}/gnn"  # The path, where gnn datasets and models are saved at.
-GNN_TRAIN_DATASET_PATH = (
-    f"{GNN_PATH}/train"  # The path where the gnn training dataset is saved at.
-)
-GNN_TEST_DATASET_PATH = (
-    f"{GNN_PATH}/test"  # The path where the gnn test dataset is saved at.
-)
-GNN_VAL_DATASET_PATH = (
-    f"{GNN_PATH}/val"  # The path where the gnn validation dataset is saved at.
-)
-GNN_COMPLETE_DATASET_PATH = (
-    f"{GNN_PATH}/complete"  # The path where the complete gnn dataset is saved at.
-)
-
-LLM_PATH = f"{ROOT}/llm"  # The path, where LLM datasets and models are saved at.
-LLM_DATASET_PATH = (
-    f"{LLM_PATH}/dataset.csv"  # The path where the LLM dataset is saved at.
-)
-LLM_SOURCE_DF_PATH = (
-    f"{LLM_PATH}/source.csv"  # The path where the LLM sources dataset is saved at.
-)
-LLM_TARGET_DF_PATH = (
-    f"{LLM_PATH}/target.csv"  # The path where the LLM targets dataset is saved at.
-)
 PROMPT_KGE_DIMENSION = 4
-ATTENTION_KGE_DIMENSION = 128
-LLM_PROMPT_PATH = f"{LLM_PATH}/prompt"
-LLM_ATTENTION_PATH = f"{LLM_PATH}/embedding"
-LLM_VANILLA_PATH = f"{LLM_PATH}/vanilla"
-LLM_PROMPT_TRAINING_PATH = f"{LLM_PROMPT_PATH}/training"  # The path where the LLM training outputs are saved at.
-LLM_ATTENTION_TRAINING_PATH = f"{LLM_ATTENTION_PATH}/training"  # The path where the LLM training outputs are saved at.
-LLM_VANILLA_TRAINING_PATH = f"{LLM_VANILLA_PATH}/training"  # The path where the LLM training outputs are saved at.
-LLM_PROMPT_BEST_MODEL_PATH = f"{LLM_PROMPT_TRAINING_PATH}/best"  # The path where the best trained LLM model is saved at.
-LLM_ATTENTION_BEST_MODEL_PATH = f"{LLM_ATTENTION_TRAINING_PATH}/best"  # The path where the best trained LLM model is saved at.
-LLM_VANILLA_BEST_MODEL_PATH = f"{LLM_VANILLA_TRAINING_PATH}/best"  # The path where the best trained LLM model is saved at.
-LLM_PROMPT_DATASET_PATH = f"{LLM_PATH}/prompt_dataset"  # The path where the huggingface prompt dataset (tokenized) is saved at.
-LLM_ATTENTION_DATASET_PATH = f"{LLM_PATH}/attention_dataset"  # The path where the huggingface prompt dataset (tokenized) is saved at.
-LLM_VANILLA_DATASET_PATH = f"{LLM_PATH}/vanilla_dataset"  # The path where the huggingface vanilla dataset (tokenized) is saved at.
-LLM_PROMPT_FIXED_DATASET_PATH = f"{LLM_PATH}/prompt_fixed_dataset"  # The path where the huggingface prompt dataset (tokenized) is saved at.
-LLM_ATTENTION_FIXED_DATASET_PATH = f"{LLM_PATH}/attention_fixed_dataset"  # The path where the huggingface prompt dataset (tokenized) is saved at.
-LLM_VANILLA_FIXED_DATASET_PATH = f"{LLM_PATH}/vanilla_fixed_dataset"  # The path where the huggingface vanilla dataset (tokenized) is saved at.
-
-PCA_PATH = f"{ROOT}/pca"
-
-DIRS_TO_INIT = [
-    LLM_PROMPT_PATH,
-    LLM_ATTENTION_PATH,
-    GNN_PATH,
-    LLM_VANILLA_PATH,
-    PCA_PATH,
-]
+INPUT_EMBEDS_REPLACE_KGE_DIMENSION = 128
 
 
 class KGManger(ABC):
@@ -127,36 +78,42 @@ class KGManger(ABC):
             # generate pandas dataframe with prompts and labels for LLM
             self.generate_llm_dataset()
 
-            self.source_df.to_csv(LLM_SOURCE_DF_PATH, index=False)
-            self.target_df.to_csv(LLM_TARGET_DF_PATH, index=False)
+            self.source_df.to_csv(f"{ROOT}/llm/source.csv", index=False)
+            self.target_df.to_csv(f"{ROOT}/llm/target.csv", index=False)
         else:
             self.load_datasets_from_disk()
 
     def data_present(self) -> bool:
-        """Returns True, if GNN_TRAIN_DATASET_PATH, GNN_TEST_DATASET_PATH, GNN_VAL_DATASET_PATH, LLM_DATASET_PATH are files."""
+        """Returns True, if GNN_TRAIN_DATASET_PATH, f"{ROOT}/gnn/test", f"{ROOT}/gnn/val", f"{ROOT}/llm/dataset.csv" are files."""
         return (
-            os.path.isfile(GNN_TRAIN_DATASET_PATH)
-            and os.path.isfile(GNN_TEST_DATASET_PATH)
-            and os.path.isfile(GNN_VAL_DATASET_PATH)
-            and os.path.isfile(LLM_DATASET_PATH)
-            and os.path.isfile(LLM_SOURCE_DF_PATH)
-            and os.path.isfile(LLM_TARGET_DF_PATH)
+            os.path.isfile(f"{ROOT}/gnn/train")
+            and os.path.isfile(f"{ROOT}/gnn/test")
+            and os.path.isfile(f"{ROOT}/gnn/val")
+            and os.path.isfile(f"{ROOT}/llm/dataset.csv")
+            and os.path.isfile(f"{ROOT}/llm/source.csv")
+            and os.path.isfile(f"{ROOT}/llm/target.csv")
         )
 
     def load_datasets_from_disk(self):
-        self.gnn_train_data = torch.load(GNN_TRAIN_DATASET_PATH)
-        self.gnn_val_data = torch.load(GNN_VAL_DATASET_PATH)
-        self.gnn_test_data = torch.load(GNN_TEST_DATASET_PATH)
-        self.data = torch.load(GNN_COMPLETE_DATASET_PATH)
-        self.llm_df = pd.read_csv(LLM_DATASET_PATH)
-        self.source_df = pd.read_csv(LLM_SOURCE_DF_PATH)
-        self.target_df = pd.read_csv(LLM_TARGET_DF_PATH)
+        self.gnn_train_data = torch.load(f"{ROOT}/gnn/train")
+        self.gnn_val_data = torch.load(f"{ROOT}/gnn/val")
+        self.gnn_test_data = torch.load(f"{ROOT}/gnn/test")
+        self.data = torch.load(f"{ROOT}/gnn/complete")
+        self.llm_df = pd.read_csv(f"{ROOT}/llm/dataset.csv")
+        self.source_df = pd.read_csv(f"{ROOT}/llm/source.csv")
+        self.target_df = pd.read_csv(f"{ROOT}/llm/target.csv")
 
     def __create_dirs(self) -> None:
         """
         Create dir system if not exist
         """
-        for directory in DIRS_TO_INIT:
+        for directory_suffix in [
+            "gnn",
+            "llm/vanilla",
+            "llm/prompt",
+            "llm/input_embeds_replace",
+        ]:
+            directory = f"{ROOT}/{directory_suffix}"
             if not os.path.exists(directory):
                 os.makedirs(directory)
 
@@ -237,7 +194,7 @@ class KGManger(ABC):
             Note that we also need to specify the reverse edge type `("movie", "rev_rates", "user")`.
             This allows the `RandomLinkSplit` transform to drop reverse edges accordingly to not leak any information into the training phase.
         Additional:
-            We are expecting for this methiod the constants GNN_TRAIN_DATASET_PATH, GNN_VAL_DATASET_PATH, GNN_TEST_DATASET_PATH and GNN_COMPLETE_DATASET_PATH
+            We are expecting for this method the constants the plits of the dataset to be present and
             to be defined as valid paths for large torch tensors.
         """
         # For this, we first split the set of edges into
@@ -263,10 +220,10 @@ class KGManger(ABC):
         self.gnn_train_data: HeteroData = self.gnn_train_data
         self.gnn_val_data: HeteroData = self.gnn_val_data
         self.gnn_test_data: HeteroData = self.gnn_test_data
-        torch.save(self.gnn_train_data, GNN_TRAIN_DATASET_PATH)
-        torch.save(self.gnn_val_data, GNN_VAL_DATASET_PATH)
-        torch.save(self.gnn_test_data, GNN_TEST_DATASET_PATH)
-        torch.save(self.data, GNN_COMPLETE_DATASET_PATH)
+        torch.save(self.gnn_train_data, f"{ROOT}/gnn/train")
+        torch.save(self.gnn_val_data, f"{ROOT}/gnn/val")
+        torch.save(self.gnn_test_data, f"{ROOT}/gnn/test")
+        torch.save(self.data, f"{ROOT}/gnn/complete")
 
     def generate_llm_dataset(self, sep_token="[SEP]") -> None:
         """
@@ -287,12 +244,16 @@ class KGManger(ABC):
         if save:
             self.save_llm_df()
 
-    def append_attention_graph_embeddings(
+    def append_input_embeds_replace_graph_embeddings(
         self, graph_embeddings: pd.DataFrame, save: bool = True
     ):
         assert len(self.llm_df) == len(graph_embeddings)
-        self.llm_df["attention_source_embedding"] = graph_embeddings["source_embedding"]
-        self.llm_df["attention_target_embedding"] = graph_embeddings["target_embedding"]
+        self.llm_df["input_embeds_replace_source_embedding"] = graph_embeddings[
+            "source_embedding"
+        ]
+        self.llm_df["input_embeds_replace_target_embedding"] = graph_embeddings[
+            "target_embedding"
+        ]
         if save:
             self.save_llm_df()
 
@@ -350,7 +311,7 @@ class KGManger(ABC):
 
     def save_llm_df(self):
         """
-        We expect the the constant LLM_DATASET_PATH to be a valid path for a csv file and GNN_PATH a valid dir to where large torch tensors can be saved.
+        We expect the the constant f"{ROOT}/llm/dataset.csv" to be a valid path for a csv file and GNN_PATH a valid dir to where large torch tensors can be saved.
         """
         columns_without_embeddings = list(
             filter(lambda column: "embedding" not in column, self.llm_df.columns)
@@ -358,10 +319,12 @@ class KGManger(ABC):
         columns_with_embeddings = list(
             filter(lambda column: "embedding" in column, self.llm_df.columns)
         )
-        self.llm_df[columns_without_embeddings].to_csv(LLM_DATASET_PATH, index=False)
+        self.llm_df[columns_without_embeddings].to_csv(
+            f"{ROOT}/llm/dataset.csv", index=False
+        )
         for column in columns_with_embeddings:
             torch.save(
-                torch.tensor(self.llm_df[column].tolist()), f"{GNN_PATH}/{column}.pt"
+                torch.tensor(self.llm_df[column].tolist()), f"{ROOT}/gnn/{column}.pt"
             )
 
     def generate_prompt_embedding_dataset(
@@ -369,6 +332,7 @@ class KGManger(ABC):
         tokenize_function: Optional[Callable] = None,
         sep_token: str = "[SEP]",
         suffix="",
+        df: Optional[pd.DataFrame] = None,
         force_recompute: bool = False,
     ) -> Union[DatasetDict, Dataset]:
         """
@@ -376,7 +340,7 @@ class KGManger(ABC):
         by passing the tokenizer.tokenize function and
         the embedding dimension of the target prompt model.
         """
-        llm_prompt_dataset_path = LLM_PROMPT_DATASET_PATH + suffix
+        llm_prompt_dataset_path = f"{ROOT}/llm/prompt{suffix}/dataset"
         if os.path.exists(llm_prompt_dataset_path) and not force_recompute:
             dataset = datasets.load_from_disk(llm_prompt_dataset_path)
         else:
@@ -384,7 +348,10 @@ class KGManger(ABC):
             assert "prompt_target_embedding" in self.llm_df
             assert self.llm_df["prompt_source_embedding"].notna().all()
             assert self.llm_df["prompt_target_embedding"].notna().all()
-            llm_df = self.llm_df.copy(deep=True)
+            if isinstance(df, pd.DataFrame):
+                llm_df = df.copy(deep=True)
+            else:
+                llm_df = self.llm_df.copy(deep=True)
             llm_df["prompt"] = self.llm_df.apply(
                 lambda row: row_to_prompt_datapoint(row, sep_token=sep_token),
                 axis=1,
@@ -397,17 +364,18 @@ class KGManger(ABC):
         return dataset
 
     def __generate_embeddings(self, row) -> torch.Tensor:
-        source_embeddings = row["attention_source_embedding"]
-        target_embeddings = row["attention_target_embedding"]
+        source_embeddings = row["input_embeds_replace_source_embedding"]
+        target_embeddings = row["input_embeds_replace_target_embedding"]
         embeddings = torch.tensor([source_embeddings, target_embeddings])
         return embeddings
 
-    def generate_attention_embedding_dataset(
+    def generate_input_embeds_replace_embedding_dataset(
         self,
         sep_token,
         pad_token,
         tokenize_function: Optional[Callable] = None,
         suffix="",
+        df: Optional[pd.DataFrame] = None,
         force_recompute: bool = False,
     ) -> Union[DatasetDict, Dataset]:
         """
@@ -415,17 +383,22 @@ class KGManger(ABC):
         by passing the tokenizer.tokenize function and
         the embedding dimension of the target adding model.
         """
-        llm_adding_dataset_path = LLM_ATTENTION_DATASET_PATH + suffix
+        llm_adding_dataset_path = f"{ROOT}/llm/input_embeds_replace{suffix}/dataset"
         if os.path.exists(llm_adding_dataset_path) and not force_recompute:
             dataset = datasets.load_from_disk(llm_adding_dataset_path)
         else:
-            assert "attention_source_embedding" in self.llm_df
-            assert "attention_target_embedding" in self.llm_df
-            assert self.llm_df["attention_source_embedding"].notna().all()
-            assert self.llm_df["attention_target_embedding"].notna().all()
-            llm_df = self.llm_df.copy(deep=True)
+            assert "input_embeds_replace_source_embedding" in self.llm_df
+            assert "input_embeds_replace_target_embedding" in self.llm_df
+            assert self.llm_df["input_embeds_replace_source_embedding"].notna().all()
+            assert self.llm_df["input_embeds_replace_target_embedding"].notna().all()
+            if isinstance(df, pd.DataFrame):
+                llm_df = df.copy(deep=True)
+            else:
+                llm_df = self.llm_df.copy(deep=True)
             llm_df["prompt"] = llm_df.apply(
-                lambda row: row_to_attention_datapoint(row, sep_token, pad_token),
+                lambda row: row_to_input_embeds_replace_datapoint(
+                    row, sep_token, pad_token
+                ),
                 axis=1,
             )
             llm_df["graph_embeddings"] = llm_df.apply(
@@ -446,17 +419,21 @@ class KGManger(ABC):
         tokenize_function: Optional[Callable] = None,
         sep_token="[SEP]",
         suffix="",
+        df: Optional[pd.DataFrame] = None,
         force_recompute: bool = False,
     ) -> Union[DatasetDict, Dataset]:
         """
         Generates the dataset for training the vanilla model,
         by passing the tokenizer.tokenize function.
         """
-        filepath = LLM_VANILLA_DATASET_PATH + suffix
+        filepath = f"{ROOT}/llm/vanilla{suffix}/dataset"
         if os.path.exists(filepath) and not force_recompute:
             dataset = datasets.load_from_disk(filepath)
         else:
-            llm_df = self.llm_df.copy(deep=True)
+            if isinstance(df, pd.DataFrame):
+                llm_df = df.copy(deep=True)
+            else:
+                llm_df = self.llm_df.copy(deep=True)
             llm_df["prompt"] = self.llm_df.apply(
                 lambda row: row_to_vanilla_datapoint(row, sep_token=sep_token),
                 axis=1,
@@ -477,25 +454,29 @@ class KGManger(ABC):
         split = row["split"]
         source_id = row["source_id"]
         target_id = row["target_id"]
-        data = (
-            self.gnn_train_data
-            if split == "train"
-            else self.gnn_val_data
-            if split == "val"
-            else self.gnn_test_data
-            if split == "test"
-            else self.data
-        )
+        data = None
+        if split == "train":
+            data = self.gnn_train_data
+        elif split == "val":
+            data = self.gnn_val_data
+        elif split == "test":
+            data = self.gnn_test_data
+        else:
+            raise Exception("no split found where it should have")
         prompt_source_embedding, prompt_target_embedding = get_prompt_embedding_cb(
             data, source_id, target_id
         )
         row["prompt_source_embedding"] = prompt_source_embedding.detach().tolist()
         row["prompt_target_embedding"] = prompt_target_embedding.detach().tolist()
-        attention_source_embedding, attention_target_embedding = (
+        input_embeds_replace_source_embedding, input_embeds_replace_target_embedding = (
             get_attention_embedding_cb(data, source_id, target_id)
         )
-        row["attention_source_embedding"] = attention_source_embedding.detach().tolist()
-        row["attention_target_embedding"] = attention_target_embedding.detach().tolist()
+        row["input_embeds_replace_source_embedding"] = (
+            input_embeds_replace_source_embedding.detach().tolist()
+        )
+        row["input_embeds_replace_target_embedding"] = (
+            input_embeds_replace_target_embedding.detach().tolist()
+        )
         return row
 
     def add_false_edges(
@@ -509,11 +490,8 @@ class KGManger(ABC):
         df = self.llm_df.copy()
         already_added_pairs = set()
         new_rows = []
-
-        split_proportions = [
-            int(len(df[df["split"] == split]) * false_ratio) for split in splits
-        ]
-        for split_proportion, split in zip(split_proportions, splits):
+        for split in splits:
+            split_proportion = int((df["split"] == split).sum() * false_ratio)
             print(f"Adding {split_proportion} false edges for {split}.")
             for idx in range(split_proportion):
                 source_id, target_id = find_non_existing_source_target(
@@ -532,7 +510,6 @@ class KGManger(ABC):
                     .reset_index(drop=True)
                 )
                 random_row = pd.concat([random_source, random_target], axis=1).iloc[0]
-                random_row["target_id"] = target_id
                 random_row["labels"] = 0
                 random_row["split"] = split
                 if prompt_get_embedding_cb and attention_get_embedding_cb:
@@ -541,23 +518,25 @@ class KGManger(ABC):
                         prompt_get_embedding_cb,
                         attention_get_embedding_cb,
                     )
-                new_rows.append(new_rows)
-
-            df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
-            df["prompt"] = df.apply(
-                lambda row: row_to_vanilla_datapoint(row, sep_token=sep_token),
-                axis=1,
-            )
-            self.replace_llm_df(df)
-        return self.llm_df
+                new_rows.append(random_row)
+        new_rows_df = pd.DataFrame(new_rows)
+        df = pd.concat([df, new_rows_df], ignore_index=True)
+        df["prompt"] = df.apply(
+            lambda row: row_to_vanilla_datapoint(row, sep_token=sep_token),
+            axis=1,
+        )
+        self.replace_llm_df(df)
+        return df
 
     def generate_huggingface_dataset(
         self,
-        vanilla_df: pd.DataFrame,
-        prompt_df: pd.DataFrame,
-        attention_df: pd.DataFrame,
+        dfs: List[pd.DataFrame],
+        df_prefix_list: List[str],
     ) -> DatasetDict:
-        for df in [vanilla_df, prompt_df, attention_df]:
+        assert len(dfs) == len(df_prefix_list)
+        len_df = len(dfs[0])
+        for df in dfs:
+            assert len(df) == len_df
             df["attentions_original_shape"] = df["attentions"].apply(
                 lambda attention: attention.shape
             )
@@ -570,66 +549,28 @@ class KGManger(ABC):
             df["hidden_states"] = df["hidden_states"].apply(
                 lambda attention: attention.flatten()
             )
-        export_llm = self.llm_df.merge(
-            vanilla_df[
-                [
-                    "source_id",
-                    "target_id",
-                    "attentions",
-                    "hidden_states",
-                    "attentions_original_shape",
-                    "hidden_states_original_shape",
-                ]
-            ].rename(
-                columns={
-                    "attentions": "vanilla_attentions",
-                    "hidden_states": "vanilla_hidden_states",
-                    "attentions_original_shape": "vanilla_attentions_original_shape",
-                    "hidden_states_original_shape": "vanilla_hidden_states_original_shape",
-                }
-            ),
-            on=["source_id", "target_id"],
-        )
-        export_llm = export_llm.merge(
-            prompt_df[
-                [
-                    "source_id",
-                    "target_id",
-                    "attentions",
-                    "hidden_states",
-                    "attentions_original_shape",
-                    "hidden_states_original_shape",
-                ]
-            ].rename(
-                columns={
-                    "attentions": "prompt_attentions",
-                    "hidden_states": "prompt_hidden_states",
-                    "attentions_original_shape": "prompt_attentions_original_shape",
-                    "hidden_states_original_shape": "prompt_hidden_states_original_shape",
-                }
-            ),
-            on=["source_id", "target_id"],
-        )
-        export_llm = export_llm.merge(
-            attention_df[
-                [
-                    "source_id",
-                    "target_id",
-                    "attentions",
-                    "hidden_states",
-                    "attentions_original_shape",
-                    "hidden_states_original_shape",
-                ]
-            ].rename(
-                columns={
-                    "attentions": "attention_attentions",
-                    "hidden_states": "attention_hidden_states",
-                    "attentions_original_shape": "attention_attentions_original_shape",
-                    "hidden_states_original_shape": "attention_hidden_states_original_shape",
-                }
-            ),
-            on=["source_id", "target_id"],
-        )
+        export_llm = self.llm_df
+        for df, df_prefix in zip(dfs, df_prefix_list):
+            export_llm = export_llm.merge(
+                df[
+                    [
+                        "source_id",
+                        "target_id",
+                        "attentions",
+                        "hidden_states",
+                        "attentions_original_shape",
+                        "hidden_states_original_shape",
+                    ]
+                ].rename(
+                    columns={
+                        "attentions": f"{df_prefix}_attentions",
+                        "hidden_states": f"{df_prefix}_hidden_states",
+                        "attentions_original_shape": f"{df_prefix}_attentions_original_shape",
+                        "hidden_states_original_shape": f"{df_prefix}_hidden_states_original_shape",
+                    }
+                ),
+                on=["source_id", "target_id"],
+            )
         dataset = self.__dataset_from_df(export_llm)
         return dataset
 
@@ -886,7 +827,7 @@ class MovieLensManager(KGManger):
             df = dataset[split].to_pandas()
             dfs.append(df)
         df = pd.concat(dfs)
-        for attention_column in ["vanilla", "prompt", "attention"]:
+        for attention_column in ["vanilla", "prompt", "input_embeds_replace"]:
             df[f"{attention_column}_attentions"] = df.apply(
                 lambda row: row[f"{attention_column}_attentions"].reshape(
                     row[f"{attention_column}_attentions_original_shape"]
@@ -894,7 +835,7 @@ class MovieLensManager(KGManger):
                 axis=1,
             )
 
-        for hidden_state_column in ["vanilla", "prompt", "attention"]:
+        for hidden_state_column in ["vanilla", "prompt", "input_embeds_replace"]:
             df[f"{hidden_state_column}_hidden_states"] = df.apply(
                 lambda row: row[f"{hidden_state_column}_hidden_states"].reshape(
                     row[f"{hidden_state_column}_hidden_states_original_shape"]
@@ -911,7 +852,7 @@ class MovieLensManager(KGManger):
             df = dataset[split].to_pandas()
             dfs.append(df)
         df = pd.concat(dfs)
-        for attention_column in ["vanilla", "prompt", "attention"]:
+        for attention_column in ["vanilla", "prompt", "input_embeds_replace"]:
             df[f"{attention_column}_attentions"] = df.apply(
                 lambda row: row[f"{attention_column}_attentions"].reshape(
                     row[f"{attention_column}_attentions_original_shape"]
@@ -919,7 +860,7 @@ class MovieLensManager(KGManger):
                 axis=1,
             )
 
-        for hidden_state_column in ["vanilla", "prompt", "attention"]:
+        for hidden_state_column in ["vanilla", "prompt", "input_embeds_replace"]:
             df[f"{hidden_state_column}_hidden_states"] = df.apply(
                 lambda row: row[f"{hidden_state_column}_hidden_states"].reshape(
                     row[f"{hidden_state_column}_hidden_states_original_shape"]

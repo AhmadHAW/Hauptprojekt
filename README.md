@@ -61,7 +61,7 @@ And print its content in a way, that we display all columns with numpy content a
 print(exp.get_verbose_df(n = 5))
 ```
 
-|   | source_id | target_id | id_x | id_y | prompt_feature_title        | prompt_feature_genres                                       | labels | split | prompt                                                                                       | prompt_source_embedding | prompt_target_embedding | attention_source_embedding | attention_target_embedding | vanilla_attentions | vanilla_hidden_states | vanilla_attentions_original_shape | vanilla_hidden_states_original_shape | prompt_attentions    | prompt_hidden_states  | prompt_attentions_original_shape | prompt_hidden_states_original_shape | attention_attentions | attention_hidden_states | attention_attentions_original_shape | attention_hidden_states_original_shape |
+|   | source_id | target_id | id_x | id_y | prompt_feature_title        | prompt_feature_genres                                       | labels | split | prompt                                                                                       | prompt_source_embedding | prompt_target_embedding | input_embeds_replace_source_embedding | input_embeds_replace_target_embedding | vanilla_attentions | vanilla_hidden_states | vanilla_attentions_original_shape | vanilla_hidden_states_original_shape | prompt_attentions    | prompt_hidden_states  | prompt_attentions_original_shape | prompt_hidden_states_original_shape | input_embeds_replace_attentions | input_embeds_replace_hidden_states | input_embeds_replace_attentions_original_shape | input_embeds_replace_hidden_states_original_shape |
 |---|-----------|-----------|------|------|-----------------------------|-------------------------------------------------------------|--------|-------|----------------------------------------------------------------------------------------------|-------------------------|-------------------------|----------------------------|----------------------------|--------------------|-----------------------|-----------------------------------|--------------------------------------|----------------------|-----------------------|----------------------------------|-------------------------------------|----------------------|-------------------------|-------------------------------------|----------------------------------------|
 | 0 | 0         | 0         | 0    | 0    | Toy Story (1995)            | ['Adventure', 'Animation', 'Children', 'Comedy', 'Fantasy'] | 1      | train | 0[SEP]0[SEP]Toy Story [1995][SEP]('Adventure', 'Animation', 'Children', 'Comedy', 'Fantasy') | float64: (4,)           | float64: (4,)           | float64: (128,)            | float64: (128,)            | float32: (9, 9, 2) | float32: (3, 9, 128)  | int64: (3,)                       | int64: (3,)                          | float32: (13, 13, 2) | float32: (3, 13, 128) | int64: (3,)                      | int64: (3,)                         | float32: (13, 13, 2) | float32: (3, 13, 128)   | int64: (3,)                         | int64: (3,)                            |
 | 1 | 0         | 2         | 0    | 2    | Grumpier Old Men (1995)     | ['Comedy', 'Romance']                                       | 1      | train | 0[SEP]2[SEP]Grumpier Old Men [1995][SEP]('Comedy', 'Romance')                                | float64: (4,)           | float64: (4,)           | float64: (128,)            | float64: (128,)            | float32: (9, 9, 2) | float32: (3, 9, 128)  | int64: (3,)                       | int64: (3,)                          | float32: (13, 13, 2) | float32: (3, 13, 128) | int64: (3,)                      | int64: (3,)                         | float32: (13, 13, 2) | float32: (3, 13, 128)   | int64: (3,)                         | int64: (3,)                            |
@@ -72,9 +72,9 @@ print(exp.get_verbose_df(n = 5))
 As we can see this dataset contains source and target ids of nodes, in context of the MovieLens dataset **user id** and **movie id**. Then there are the natural language features, like prompt_feature_**title** and prompt_feature_**genres**. Labels *1* are existing edges, naming the user has in fact rated the movie. **Prompt** stands for the *Vanilla Prompt* The kind of prompt that does not include KGEs. Every prompt is build the same way: ```source_id[SEP]movie_id[SEP]prompt_feature_1[SEP]prompt_feature_2[SEP]...```
 While the prompt for the model that includes KGEs in the prompt adds
 ```prompt_source_embedding[SEP]prompt_target_embedding[SEP]``` with both embeddings being of dtype float 16 with length 4.
-The *attention_source_embedding* and *attention_target_embedding* are not passed in the prompt but in the input embeddings of the LLM, replacing the placeholder *[PAD]* tokens. Both are of dtype float64 and 128 length, because the Bert model this was produced with has a hidden state size of 128.
+The *input_embeds_replace_source_embedding* and *input_embeds_replace_target_embedding* are not passed in the prompt but in the input embeddings of the LLM, replacing the placeholder *[PAD]* tokens. Both are of dtype float64 and 128 length, because the Bert model this was produced with has a hidden state size of 128.
 
-We are more interested in the *vanilla_attentions*, *prompt_attentions* and *attention_attentions*. These arrays give us for the respective strategy the averaged attentions over the prompt positions. So ones we plot these attentions, we will see the attentions the model puts on each individual feature in total. Other then the special tokens *[SEP]* we will also the the beginning token *[CLS]* which is added by the Bert classifier. This token is passed to the classifier header and summarizes the entire models extracted features.
+We are more interested in the *vanilla_attentions*, *prompt_attentions* and *input_embeds_replace_attentions*. These arrays give us for the respective strategy the averaged attentions over the prompt positions. So ones we plot these attentions, we will see the attentions the model puts on each individual feature in total. Other then the special tokens *[SEP]* we will also the the beginning token *[CLS]* which is added by the Bert classifier. This token is passed to the classifier header and summarizes the entire models extracted features.
 
 We now plot the attentions over all models with:
 
@@ -82,9 +82,9 @@ We now plot the attentions over all models with:
 exp.plot_all_attention_graphs()
 ```
 
-Vanilla Model             |  Prompt Model             |  Attention Model
+Vanilla Model             |  Prompt Model             |  Input Embeds Replace Model
 :-------------------------:|:-------------------------:|:-------------------------:
-![Vanilla Attentions](/images/Vanilla_Model_Attentions.png)  |  ![Prompt Attentions](/images/Prompt_Model_Attentions.png)|![Embedding Attentions](/images/Attention_model_Attentions.png)
+![Vanilla Attentions](/images/Vanilla_Model_Attentions.png)  |  ![Prompt Attentions](/images/Prompt_Model_Attentions.png)|![Embedding Attentions](/images/Input_Embeds_Replace_model_Attentions.png)
 
 By not going to deep into the interpretation of the plots, we can see the common behaviour, where in the last layer, all features influense the *[CLS]* token the most. For more insights and interpretation feel free to check my master thesis [...] which will be released soon.
 
@@ -113,28 +113,92 @@ exp.plot_cls_embeddings(samples=1000)
 
 We plot the 2 dimensional embeddings of cls tokens, seperated by colour for each model.
 ![CLS Token Hidden States](/images/cls_token_embeddings.png)
+Or we can plot all cls tokens seperating the model by shape and the label *edge (does not) exist* by color.
 
 ## Toolsuite Components
 
-The toolsuite is divided into four main components: **Knowledge Graph Manager**, **Graph Representation Generator**, **LLM Manager** and **Explainability Module**.
-The Knowledge Graph Manager preprocesses given dataset and manages its distribution and persistence.
+The toolsuite is divided into four main components: **Dataset Manager**, **Graph Representation Generator**, **LLM Manager** and **Explainability Module**.
+The Dataset Manager preprocesses given dataset and manages its distribution and persistence.
 The Graph Representation Generator manages the Graph Models to produe KGEs.
 The LLM Manager enables the LLMs to process KGE empowered datasets.
 Explainability Module produces manageable plots of the inner workings of the LLMs. The components are defined as following.
 
-### Knowledge Graph Manager
+### Dataset Manager
 
 #### Initialization
 
 The Knowledge Graph Manager is initialized with a standartized form of the Knowledge Graph. First the manager genereates a dir structure for all upcomming files to be saved. The dataset is then transformed into a Torch Geometric [6] Hetero data object ("A data object describing a heterogeneous graph, holding multiple node and/or edge types in disjunct storage objects."). This data object is then split into *train*, *test* and *validation* data objects. The same split is then applied on the original standartized form of the dataset. Last, prompts are generated, that can be used by LLMs for the downstream *link prediction* task **without** including *KGEs*.
 
+```python
+def __init__(
+    self,
+    source_df: pd.DataFrame,
+    target_df: pd.DataFrame,
+    edge_df: pd.DataFrame,
+    force_recompute: bool = False,
+)
+```
+
+[link to code](dataset_manager.py#L35-L41)
+
+Every dataset manager that inherets form the KGManger to pass the source, target and edge dataframes in the initialization process. The MovieLensManager who inherets from the KGManager generates the dataframes from the automaticaly downloaded MovieLens dataset.
+
 #### Dataset Distributions
 
-Every other component receives their datas from this manager but also provides new data to this manager, to be included in a standartized form. Once the KGEs are produced, they can be appended to the original standartized dataset.
+Every other component receives their datas from this manager but also provides new data to this manager, to be included in a standartized form. Once the KGEs are produced, they can be appended to the original standartized dataset. The KGManager manages the following 4 datasets
+
+```python
+kg_manager.data, # the fill Graph Hetero Data object 
+kg_manager.gnn_train_data, # the train split of the Hetero Data object
+kg_manager.gnn_val_data,
+kg_manager.gnn_test_data,
+kg_manager.llm_df # The LLM dataframe with labels, prompts and embeddings
+kg_manager.source_df # The LLM dataframe with source_ids and their features
+kg_manager.target_df # The LLM dataframe with target_ids and their features
+```
+
+[link to llm dataframes](/dataset_manager.py#L97-L104), [link to graph datasets](/dataset_manager.py#L220-L222)
 
 #### Dataset Persistence
 
 The standartized original form of the dataset are tabular data and saved as *csv*. Every additional Embeddings, while persisting are first transformed into torch-Tensors and saved seperatly. The saved csv do not contain any embeddings on the disk, but only in memory.
+
+The actual code for saving the llm_df datafrane is checking first if there are torch tensors or numpy array to be expected.
+
+```python
+columns_without_embeddings = list(
+    filter(lambda column: "embedding" not in column, self.llm_df.columns)
+)
+columns_with_embeddings = list(
+    filter(lambda column: "embedding" in column, self.llm_df.columns)
+)
+self.llm_df[columns_without_embeddings].to_csv(LLM_DATASET_PATH, index=False)
+for column in columns_with_embeddings:
+    torch.save(
+        torch.tensor(self.llm_df[column].tolist()), f"{GNN_PATH}/{column}.pt"
+    )
+```
+
+[save_llm_df](/dataset_manager.py#L312)
+
+While in the huggingface dataset format, nested numpy arrays are first flattened and then saved, becaue huggingface does not allow nested numpy arrays. For restoration purpuses later, we also save the original shapes of the numpy arrays.
+
+```python
+df["attentions_original_shape"] = df["attentions"].apply(
+    lambda attention: attention.shape
+)
+df["attentions"] = df["attentions"].apply(
+    lambda attention: attention.flatten()
+)
+df["hidden_states_original_shape"] = df["hidden_states"].apply(
+    lambda hidden_states: hidden_states.shape
+)
+df["hidden_states"] = df["hidden_states"].apply(
+    lambda attention: attention.flatten()
+)
+```
+
+[from generate_huggingface_dataset](/dataset_manager.py#L550)
 
 ### Graph Representation Generator
 
@@ -142,7 +206,35 @@ The graph representation generators are managing the underlying graph convolutio
 
 #### Graph Convolutional Network Training
 
-Ones the Knowledge Graph Manager is initialized the Graph Representation Generator picks up the Hetero data object and trains the graph convolutional networks on the **link prediction** task. While training, **non-existing edges are produced on the fly** with a factor of 2:3, so for every existing edge, two non-existing edges are trained on.
+Ones the Knowledge Graph Manager is initialized the Graph Representation Generator picks up the Hetero data object and trains the graph convolutional networks on the **link prediction** task. While training, **non-existing edges are produced on the fly** with a factor of 1:1, so for every existing edge, one non-existing edge is trained on.
+
+```python
+'''
+Init and training the graph representation learner
+for the LLm where embeddings are passed in the prompt
+'''
+graph_representation_generator_prompt = GraphRepresentationGenerator(
+    kg_manager.data,
+    kg_manager.gnn_train_data,
+    kg_manager.gnn_val_data,
+    kg_manager.gnn_test_data,
+    kge_dimension=PROMPT_KGE_DIMENSION,
+)
+graph_representation_generator_prompt.train_model(
+    kg_manager.gnn_train_data, EPOCHS, BATCH_SIZE
+)
+```
+
+#### Generate Embeddings
+
+Once the datasets are ready, and the KGManager are trained, we produce the embeddings for every datapoint in the LLM dataset and assign them.
+
+```python
+prompt_embeddings = graph_representation_generator_prompt.generate_embeddings(
+    kg_manager.llm_df
+)
+kg_manager.append_prompt_graph_embeddings(prompt_embeddings)
+```
 
 #### KGE Callback Function
 
@@ -156,17 +248,112 @@ The llm manager provide the nessecary tools to include KGEs into LLMs (currently
 
 Every Bert Classifier manages the way, KGEs are included into the prediction process. For that the input parameters are expanded by a semantic positional encoding and in one case by the KGEs. To expand the input parameters, all classifier hold customized DataLoader and tokenize procedure.
 
+```python
+if inputs_embeds is None:
+    inputs_embeds = self.bert.embeddings(
+        input_ids
+    )  # we take the input embeds and later replace the positions where the padding tokens where placed as placeholder with the graph embeddings.
+    assert isinstance(inputs_embeds, torch.Tensor)
+if graph_embeddings is not None and len(graph_embeddings) > 0:
+    if attention_mask is not None:
+        mask = (
+            (
+                (attention_mask.to(self.device).sum(dim=1) - 1)
+                .unsqueeze(1)
+                .repeat((1, 2))
+                - torch.tensor([3, 1], device=self.device)
+            )
+            .unsqueeze(2)
+            .repeat((1, 1, self.config.hidden_size))
+        )  # basically a mask finding the last positions between the sep tokens (reshaped so they can be used in scatter)
+        inputs_embeds = inputs_embeds.to(
+            self.device
+        ).scatter(
+            1, mask.to(self.device), graph_embeddings.to(self.device)
+        )  # replace the input embeds at the place holder positions with the KGEs.
+outputs = self.bert(
+    attention_mask=attention_mask,
+    token_type_ids=token_type_ids,
+    position_ids=position_ids,
+    head_mask=head_mask,
+    inputs_embeds=inputs_embeds,
+    output_attentions=output_attentions,
+    output_hidden_states=output_hidden_states,
+    return_dict=return_dict,
+)  # feed forward the input embeds to the attention model
+```
+
+[from](/llm_manager.py#L607-638)
+[tutorial change feed forward](/customize_input_embeds_replace_model.ipynb)
+
 #### Data Loader
 
 The data loaders are based on the Graph Representation Learner and are able to produce non-existing edges on the fly. They also manage the KGEs and values to be passed in the correct format. A data loader can be initialized in a way, that no non-existing edges are produced on the fly.
+
+```python
+new_features = []
+for feature in features:
+    # Every datapoint has a chance to be replaced by a negative datapoint, based on the false_ratio.
+    # The _transform_to_false_exmample methods have to be implemented by the inheriting class.
+    # For the prompt classifier, every new datapoint also contains embeddings of the nodes.
+    # If the false ratio is -1 this step will be skipped (for validation)
+    if self.false_ratio != -1 and rd.uniform(0, 1) >= (
+        1 / (self.false_ratio + 1)
+    ):
+        new_feature = self._transform_to_false_example()
+        new_features.append(new_feature)
+    else:
+        new_features.append(feature)
+```
+
+[from](/llm_manager.py#L144-156)
 
 #### Tokenize Procedure
 
 The tokenize procedure is not only defining the mapping of prompts to input ids and attention masks, but also the generation of the semantic positional encodings. These encodings are used to summarize hidden states and attentions over the entire input positions.
 
+```python
+'''
+Every tokenize function receives the example to tokenize. The result are
+not only the ids, attention mask and labels, but also the
+semantic positional encoding, which are basically positions of all 
+features over the datapoint.
+'''
+def tokenize_function(self, example, return_pt=False):
+    tokenized = self.tokenizer(
+        example["prompt"],
+        padding="max_length",
+        truncation=True,
+        return_tensors="pt",
+    )
+    ...
+    result = {
+        "input_ids": tokenized["input_ids"],
+        "attention_mask": tokenized["attention_mask"],
+        "labels": example["labels"],
+        "semantic_positional_encoding": semantic_positional_encoding,
+    }
+```
+
+[example1](/llm_manager.py#1140-1156), [example2](/llm_manager.py#L1233-1249)
+
 #### Producing the fixed Validation dataset
 
 The LLM Manager produces a fixed dataset with existing and non-existing edges. For every sample forwarded, the hidden states and attentions are summarized over the semantic positional encodings and then saved for later use. This results in a validation dataset that can be examined in the Explainability Module.
+
+```python
+'''
+This method produces non-existing edges for the splits "val" and "test"
+so that they do not have to generate non-existing edges on the fly and
+make the validation process more repeadable.
+'''
+df = kg_manager.add_false_edges(
+    1.0,
+    graph_representation_generator_prompt.get_embedding, #passing the callback function for producing the embedding for any given datapoint.
+    graph_representation_generator_attention.get_embedding,
+    splits=["val", "test"],
+)
+```
 
 ### Explainability Module
 
@@ -179,16 +366,6 @@ This module allows to plot the attentions over all input features over all atten
 #### Hidden States View
 
 This module allows the user to display the internal LLM embeddings on a 2d view, using principal component analysis. For every feature and KGE, the summarized hidden states are transformed to two dimensions. The user can examine the differences of the models with corresponding filtering, coloring and shaping of the scatter plot.
-
-### Example Plots
-
-Vanilla Model             |  Prompt Model             |  Attention Model
-:-------------------------:|:-------------------------:|:-------------------------:
-![Vanilla Attentions](/images/Vanilla_Attentions.png)  |  ![Prompt Attentions](/images/Prompt_Attentions.png)|![Embedding Attentions](/images/Embedding_Attentions.png)
-![Vanilla Hidden States](/images/Vanilla_Hidden_States.png)  |  ![Prompt Hidden States](/images/Prompt_Hidden_States_user_title_genre.png)|![Embedding Hidden States](/images/Embedding_Hidden_States_user_title_genre.png)
-||![Prompt Hidden States](/images/Prompt_Hidden_States.png)|![Embedding Hidden States](/images/Embedding_Hidden_States.png)
-
-Here we see the attention views (top) and the hidden states views (middle and bottom) for three different KGE strategies: *no KGE included* (left), *KGE passed in prompt* (middle) and *KGE passed in the input embeddings* (right). We can see which features in the two layerd models influence the models behaviour most and how the internal embeddings store information.
 
 ## Related Work
 
