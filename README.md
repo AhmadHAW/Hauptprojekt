@@ -84,7 +84,7 @@ exp.plot_all_attention_graphs()
 
 Vanilla Model             |  Prompt Model             |  Input Embeds Replace Model
 :-------------------------:|:-------------------------:|:-------------------------:
-![Vanilla Attentions](/images/Vanilla_Model_Attentions.png)  |  ![Prompt Attentions](/images/Prompt_Model_Attentions.png)|![Embedding Attentions](/images/Input_Embeds_Replace_model_Attentions.png)
+![Vanilla Attentions](/images/Vanilla_Model_Attentions.png)  |  ![Prompt Attentions](/images/Prompt_Model_Attentions.png)|![Embedding Attentions](/images/Input_Embeds_Replace_Model_Attentions.png)
 
 By not going to deep into the interpretation of the plots, we can see the common behaviour, where in the last layer, all features influense the *[CLS]* token the most. For more insights and interpretation feel free to check my master thesis [...] which will be released soon.
 
