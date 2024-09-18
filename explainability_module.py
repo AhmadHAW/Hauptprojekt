@@ -1,5 +1,4 @@
-from dataset_manager import MovieLensManager
-
+import json
 from typing import List, Tuple, Optional
 import random as rd
 from pathlib import Path
@@ -27,6 +26,104 @@ class ExplainabilityModule:
         self.additional_embedding_tokens = additional_embedding_tokens
         if init_pcas:
             self.init_pcas()
+
+    def plot_training_losses(
+        self,
+        root_path: str = "./data/llm",
+        model_types: List[str] = [
+            "vanilla",
+            "prompt",
+            "input_embeds_replace",
+            "input_embeds_replace_frozen",
+        ],
+        save_path=None,
+    ):
+        for model_type in model_types:
+            model_type_verbose = model_type.replace("_", " ").capitalize()
+            path_to_json = (
+                f"{root_path}/{model_type}/training/checkpoint-4420/trainer_state.json"
+            )
+            with open(path_to_json, "r") as f:
+                data = json.load(f)
+            # Extract the loss values
+            loss_values = data["log_history"]
+            losses = [entry["loss"] for entry in loss_values if "loss" in entry]
+            # Plot the loss curve
+            (line,) = plt.plot(losses, label=model_type_verbose)
+            color = line.get_color()
+            min_loss = min(losses)
+            min_loss_index = losses.index(min_loss)
+            plt.plot(
+                min_loss_index,
+                min_loss,
+                "o",
+                color=color,
+                label=f"Min {model_type_verbose}: {min_loss:.4f}",
+                markersize=8,
+            )
+        # Add title and labels
+        plt.title("Loss Curves of Different Models")
+        plt.xlabel("Training Steps")
+        plt.ylabel("Loss")
+
+        # Add legend
+        plt.legend()
+        if save_path:
+            plt.savefig(save_path)
+
+        # Show plot
+        plt.show()
+
+    def plot_training_accuracies(
+        self,
+        root_path: str = "./data/llm",
+        model_types: List[str] = [
+            "vanilla",
+            "prompt",
+            "input_embeds_replace",
+            "input_embeds_replace_frozen",
+        ],
+        save_path=None,
+    ):
+        for model_type in model_types:
+            model_type_verbose = model_type.replace("_", " ").capitalize()
+            path_to_json = (
+                f"{root_path}/{model_type}/training/checkpoint-4420/trainer_state.json"
+            )
+            with open(path_to_json, "r") as f:
+                data = json.load(f)
+            # Extract the loss values
+            accuracy_values = data["log_history"]
+            accuracies = [
+                entry["eval_accuracy"]
+                for entry in accuracy_values
+                if "eval_accuracy" in entry
+            ]
+            # Plot the loss curve
+            (line,) = plt.plot(accuracies, label=model_type_verbose)
+            color = line.get_color()
+            max_accuracy = max(accuracies)
+            max_accuracy_index = accuracies.index(max_accuracy)
+            plt.plot(
+                max_accuracy_index,
+                max_accuracy,
+                "o",
+                color=color,
+                label=f"Max {model_type_verbose}: {max_accuracy:.4f}",
+                markersize=8,
+            )
+        # Add title and labels
+        plt.title("Accuracy Curves of Different Models")
+        plt.xlabel("Training Epochs")
+        plt.ylabel("Accuracy")
+
+        # Add legend
+        plt.legend()
+        if save_path:
+            plt.savefig(save_path)
+
+        # Show plot
+        plt.show()
 
     def plot_attention_graph(
         self,
@@ -112,6 +209,15 @@ class ExplainabilityModule:
         )
         self.plot_attention_graph(
             torch.Tensor(self.llm_df["input_embeds_replace_attentions"].tolist()),
+            self.vanilla_tokens + self.additional_embedding_tokens,
+            "Input Embeds Replace Model Attentions Plot",
+            weight_coef=weight_coef,
+            save_path=save_paths[2] if save_paths else None,
+        )
+        self.plot_attention_graph(
+            torch.Tensor(
+                self.llm_df["input_embeds_replace_frozen_attentions"].tolist()
+            ),
             self.vanilla_tokens + self.additional_embedding_tokens,
             "Input Embeds Replace Model Attentions Plot",
             weight_coef=weight_coef,

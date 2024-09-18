@@ -2,6 +2,7 @@ import os
 from typing import List, Tuple, Callable, Optional, Dict, Union, Set, Union
 from abc import ABC
 import ast
+import re
 
 import torch
 from torch_geometric.data import download_url, extract_zip
@@ -257,49 +258,101 @@ class KGManger(ABC):
         if save:
             self.save_llm_df()
 
-    def __is_in_split(self, edge_index, source_id, target_id) -> bool:
-        """
-        This methods returns the True if the current gnn dataset split contains the edge between given user and movie.
-        """
-        test_tensor = torch.Tensor([source_id, target_id])
-        return len(torch.nonzero(torch.all(edge_index == test_tensor, dim=1))) > 0
-
-    def __find_split(
-        self, row, train_edge_index, val_edge_index, test_edge_index
-    ) -> str:
-        """
-        Returns the split train, test, val or rest if the given edge is found in either gnn dataset split.
-        the datapoint is assigned to train if present or if overlapping between val and test in a 50/50 proportion.
-        """
-        source_id = row["source_id"]
-        target_id = row["target_id"]
-        if self.__is_in_split(train_edge_index, source_id, target_id):
-            split = "train"
-        elif self.__is_in_split(val_edge_index, source_id, target_id):
-            split = "val" if self.__last == "test" else "test"
-            self.__last = split
-        elif self.__is_in_split(test_edge_index, source_id, target_id):
-            split = "test"
-        else:
-            split = "rest"
-        return split
-
     def __split_llm_dataset(self) -> None:
         """
         This method assigns all datapoints in the LLM dataset to the same split as they are found in the gnn dataset split.
         """
-        train_edge_index = self.gnn_train_data["source", "edge", "target"][
+        train_edge_index: torch.Tensor = self.gnn_train_data[
+            "source", "edge", "target"
+        ]["edge_index"].T
+        test_edge_index: torch.Tensor = self.gnn_val_data["source", "edge", "target"][
             "edge_index"
         ].T
-        test_edge_index = self.gnn_val_data["source", "edge", "target"]["edge_index"].T
-        val_edge_index = self.gnn_test_data["source", "edge", "target"]["edge_index"].T
-        self.__last = "test"
+        val_edge_index: torch.Tensor = self.gnn_test_data["source", "edge", "target"][
+            "edge_index"
+        ].T
         print("splitting LLM dataset")
-        self.llm_df["split"] = self.llm_df.apply(
-            lambda row: self.__find_split(
-                row, train_edge_index, val_edge_index, test_edge_index
-            ),
-            axis=1,
+        print(train_edge_index.shape)
+        df_train = pd.DataFrame(
+            {
+                "source_id": train_edge_index[:, 0].numpy(),
+                "target_id": train_edge_index[:, 1].numpy(),
+                "split": "train",
+            }
+        )
+        df_test = pd.DataFrame(
+            {
+                "source_id": test_edge_index[:, 0].numpy(),
+                "target_id": test_edge_index[:, 1].numpy(),
+                "split": "test",
+            }
+        )
+        df_val = pd.DataFrame(
+            {
+                "source_id": val_edge_index[:, 0].numpy(),
+                "target_id": val_edge_index[:, 1].numpy(),
+                "split": "val",
+            }
+        )
+        print(test_edge_index.shape, self.data)
+        print(len(df_train), len(df_test), len(df_val), df_train)
+        # this df split was written by chatGPT
+        # Combine all DataFrames into one
+        df_train_val = df_train.merge(
+            df_val, on=["source_id", "target_id"], how="left", indicator=True
+        )
+        df_val = df_val.merge(df_train_val, on=["source_id", "target_id"], how="left")
+        print(df_val)
+        combined_df = pd.concat([df_train, df_test, df_val])
+        print(len(combined_df))
+
+        # Drop duplicates but prioritize 'train' if a pair exists there
+
+        # Separate pairs that are still duplicated between 'test' and 'val'
+        test_val_df = combined_df[combined_df["split"].isin(["test", "val"])].copy()
+
+        # Identify pairs that are in both 'test' and 'val'
+        duplicated_pairs = test_val_df[
+            test_val_df.duplicated(subset=["source_id", "target_id"], keep=False)
+        ]
+
+        # Now let's shuffle the duplicated pairs and split them 50:50 between 'test' and 'val'
+        duplicated_pairs_unique = duplicated_pairs[
+            ["source_id", "target_id"]
+        ].drop_duplicates()
+        # Randomly shuffle the duplicated pairs
+        duplicated_pairs_unique = duplicated_pairs_unique.sample(frac=1)
+
+        # Split 50:50 into 'test' and 'val'
+        midpoint = len(duplicated_pairs_unique) // 2
+        duplicated_pairs_unique["split"] = ["test"] * midpoint + ["val"] * (
+            len(duplicated_pairs_unique) - midpoint
+        )
+
+        # Now merge back the duplicated_pairs_unique into the rest of the dataframe
+        # First, we filter out any rows in the original test/val dataframe that were duplicated
+        non_duplicated_test_val = test_val_df.drop(duplicated_pairs.index)
+        print(
+            "all",
+            len(combined_df[combined_df["split"] == "train"]),
+            len(non_duplicated_test_val),
+            len(duplicated_pairs_unique),
+        )
+        # Combine everything: train rows, non-duplicated test/val rows, and the split 50:50 test/val rows
+        final_df = pd.concat(
+            [
+                combined_df[combined_df["split"] == "train"],
+                non_duplicated_test_val,
+                duplicated_pairs_unique,
+            ]
+        )
+        # Reset index for clean output
+        final_df = final_df.reset_index(drop=True)
+        print("last", len(final_df))
+        print(final_df.info(verbose=True), self.llm_df.info(verbose=True))
+        # end of chatGPT
+        self.llm_df = self.llm_df.merge(
+            final_df, on=["source_id", "target_id"], how="inner"
         )
         self.save_llm_df()
 
@@ -528,72 +581,96 @@ class KGManger(ABC):
         self.replace_llm_df(df)
         return df
 
+    def __flatten_and_rename_if_present(
+        self, df: pd.DataFrame, prefix: str, add_tokens: bool = False
+    ):
+        df = df.copy(deep=True)
+        non_token_columns = {"source_id", "target_id", "split"}
+
+        for field in ["attentions", "hidden_states"]:
+            if field in df.columns:
+                df[f"{field}_original_shape"] = df[field].apply(
+                    lambda field: field.shape
+                )
+                df[field] = df[field].apply(lambda field: field.flatten())
+        if "hidden_states" in df.columns:
+            df = df.rename(
+                columns={
+                    "logits": f"{prefix}_logits",
+                    "predictions": f"{prefix}_predictions",
+                }
+            )
+            non_token_columns = non_token_columns.union(
+                {f"{prefix}_logits", f"{prefix}_predictions"}
+            )
+        for field in ["attentions", "hidden_states"]:
+            if field in df.columns:
+                new_column_name = f"{prefix}_{field}"
+                new_column_shape_name = f"{prefix}_{field}_original_shape"
+                df = df.rename(
+                    columns={
+                        field: new_column_name,
+                        f"{field}_original_shape": new_column_shape_name,
+                    }
+                )
+                non_token_columns.add(new_column_name)
+                non_token_columns.add(new_column_shape_name)
+        if add_tokens:
+            columns_to_return = list(df.columns)
+        else:
+            columns_to_return = list(non_token_columns)
+        return df[columns_to_return]
+
     def generate_huggingface_dataset(
-        self,
-        dfs: List[pd.DataFrame],
-        df_prefix_list: List[str],
+        self, dfs: List[pd.DataFrame], df_prefix_list: List[str], add_tokens=False
     ) -> DatasetDict:
+        assert len(dfs) > 1
         assert len(dfs) == len(df_prefix_list)
-        len_df = len(dfs[0])
+        df_0 = dfs[0]
+        dfs = dfs[1:]
+        df_prefix_0 = df_prefix_list[0]
+        df_prefix_list = df_prefix_list[1:]
+        df_columns = set(df_0.columns)
+        len_df = len(df_0)
         for df in dfs:
             assert len(df) == len_df
-            df["attentions_original_shape"] = df["attentions"].apply(
-                lambda attention: attention.shape
-            )
-            df["attentions"] = df["attentions"].apply(
-                lambda attention: attention.flatten()
-            )
-            df["hidden_states_original_shape"] = df["hidden_states"].apply(
-                lambda hidden_states: hidden_states.shape
-            )
-            df["hidden_states"] = df["hidden_states"].apply(
-                lambda attention: attention.flatten()
-            )
-        export_llm = self.llm_df
+            for field in ["attentions", "hidden_states", "logits"]:
+                if field in df_columns:
+                    assert field in df.columns
+
+        df_0 = self.__flatten_and_rename_if_present(
+            df_0.copy(deep=True), df_prefix_0, add_tokens=add_tokens
+        )
         for df, df_prefix in zip(dfs, df_prefix_list):
-            export_llm = export_llm.merge(
-                df[
-                    [
-                        "source_id",
-                        "target_id",
-                        "attentions",
-                        "hidden_states",
-                        "attentions_original_shape",
-                        "hidden_states_original_shape",
-                    ]
-                ].rename(
-                    columns={
-                        "attentions": f"{df_prefix}_attentions",
-                        "hidden_states": f"{df_prefix}_hidden_states",
-                        "attentions_original_shape": f"{df_prefix}_attentions_original_shape",
-                        "hidden_states_original_shape": f"{df_prefix}_hidden_states_original_shape",
-                    }
-                ),
-                on=["source_id", "target_id"],
+            df_0 = df_0.merge(
+                self.__flatten_and_rename_if_present(df, df_prefix, add_tokens=False),
+                on=["source_id", "target_id", "split"],
             )
-        dataset = self.__dataset_from_df(export_llm)
+        if not add_tokens:
+            df_0 = df_0.drop(columns=["source_id", "target_id"])
+        dataset = self.__dataset_from_df(df_0)
         return dataset
 
     def __dataset_from_df(self, df: pd.DataFrame) -> DatasetDict:
         """
         Generates the LLM datasets from the pandas dataframe.
         """
-        dataset_train = Dataset.from_pandas(
-            df[df["split"] == "train"], preserve_index=False
-        )
-        dataset_val = Dataset.from_pandas(
-            df[df["split"] == "val"], preserve_index=False
-        )
-        dataset_test = Dataset.from_pandas(
-            df[df["split"] == "test"], preserve_index=False
-        )
-        return DatasetDict(
-            {
-                "train": dataset_train,
-                "val": dataset_val,
-                "test": dataset_test,
-            }
-        )
+        dataset_dict = {}
+        if "train" in df["split"].unique():
+            dataset_dict["train"] = Dataset.from_pandas(
+                df[df["split"] == "train"], preserve_index=False
+            )
+        if "val" in df["split"].unique():
+            dataset_dict["val"] = Dataset.from_pandas(
+                df[df["split"] == "val"], preserve_index=False
+            )
+        if "test" in df["split"].unique():
+            dataset_dict["test"] = Dataset.from_pandas(
+                df[df["split"] == "test"], preserve_index=False
+            )
+        if len(dataset_dict) == 0:
+            raise Exception("not enough splits in datasets found.")
+        return DatasetDict(dataset_dict)
 
     def fill_all_semantic_tokens(
         self,
@@ -664,11 +741,11 @@ class MovieLensManager(KGManger):
             self.load_datasets_from_disk()
 
     def __download_dataset(self) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        """Downloads the https://files.grouplens.org/datasets/movielens/ml-latest-small.zip dataset and
-        extracts the content into ROOT//ml-latest-small/"""
-        movies_path = f"{ROOT}/ml-latest-small/movies.csv"
-        ratings_path = f"{ROOT}/ml-latest-small/ratings.csv"
-        url = "https://files.grouplens.org/datasets/movielens/ml-latest-small.zip"
+        """Downloads the https://files.grouplens.org/datasets/movielens/ml-32m.zip dataset and
+        extracts the content into ROOT//ml-32m/"""
+        movies_path = f"{ROOT}/ml-32m/movies.csv"
+        ratings_path = f"{ROOT}/ml-32m/ratings.csv"
+        url = "https://files.grouplens.org/datasets/movielens/ml-32m.zip"
         extract_zip(download_url(url, ROOT), ROOT)
         movies_df = pd.read_csv(movies_path, index_col="movieId")
         movies_llm_df = pd.read_csv(movies_path, index_col="movieId")
@@ -778,7 +855,7 @@ class MovieLensManager(KGManger):
         input_ids: torch.Tensor,
         tokenizer: PreTrainedTokenizer,
         all_semantic_positional_encoding: torch.Tensor,
-    ) -> Tuple[pd.DataFrame, torch.Tensor]:
+    ) -> pd.DataFrame:
         all_semantic_positional_encoding = all_semantic_positional_encoding[
             :, [1, 3, 5, 7, 9, 11]
         ]
@@ -791,25 +868,6 @@ class MovieLensManager(KGManger):
         all_semantic_tokens[3] = [
             ast.literal_eval(string_list) for string_list in all_semantic_tokens[3]
         ]
-        all_semantic_tokens[4] = [
-            [
-                float(str_float)
-                for str_float in ast.literal_eval(string_list.replace(" ", ""))
-            ]
-            for string_list in all_semantic_tokens[4]
-        ]
-        all_semantic_tokens[5] = [
-            [
-                float(str_float)
-                for str_float in ast.literal_eval(string_list.replace(" ", ""))
-            ]
-            for string_list in all_semantic_tokens[5]
-        ]
-        user_embeddings = torch.tensor(all_semantic_tokens[4])
-        movie_embeddings = torch.tensor(all_semantic_tokens[5])
-        graph_embeddings = torch.stack([user_embeddings, movie_embeddings]).permute(
-            (1, 0, 2)
-        )
         data = {
             "source_id": all_semantic_tokens[0],
             "target_id": all_semantic_tokens[1],
@@ -817,7 +875,7 @@ class MovieLensManager(KGManger):
             "genres": all_semantic_tokens[3],
         }
         df = pd.DataFrame(data)
-        return df, graph_embeddings
+        return df
 
     @staticmethod
     def load_dataset_from_disk(path_to_hf_dataset: str) -> pd.DataFrame:
@@ -827,7 +885,13 @@ class MovieLensManager(KGManger):
             df = dataset[split].to_pandas()
             dfs.append(df)
         df = pd.concat(dfs)
-        for attention_column in ["vanilla", "prompt", "input_embeds_replace"]:
+        regex = r"(vanilla|prompt|input_embeds_replace|input_embeds_replace_frozen)_attentions_original_shape"
+        model_types: List = []
+        for column in df.columns:
+            match = re.search(regex, column)
+            if match:
+                model_types.append(match.group(1))
+        for attention_column in model_types:
             df[f"{attention_column}_attentions"] = df.apply(
                 lambda row: row[f"{attention_column}_attentions"].reshape(
                     row[f"{attention_column}_attentions_original_shape"]
@@ -835,7 +899,7 @@ class MovieLensManager(KGManger):
                 axis=1,
             )
 
-        for hidden_state_column in ["vanilla", "prompt", "input_embeds_replace"]:
+        for hidden_state_column in model_types:
             df[f"{hidden_state_column}_hidden_states"] = df.apply(
                 lambda row: row[f"{hidden_state_column}_hidden_states"].reshape(
                     row[f"{hidden_state_column}_hidden_states_original_shape"]
@@ -852,7 +916,13 @@ class MovieLensManager(KGManger):
             df = dataset[split].to_pandas()
             dfs.append(df)
         df = pd.concat(dfs)
-        for attention_column in ["vanilla", "prompt", "input_embeds_replace"]:
+        regex = r"(vanilla|prompt|input_embeds_replace|input_embeds_replace_frozen)_attentions_original_shape"
+        model_types: List = []
+        for column in df.columns:
+            match = re.search(regex, column)
+            if match:
+                model_types.append(match.group(1))
+        for attention_column in model_types:
             df[f"{attention_column}_attentions"] = df.apply(
                 lambda row: row[f"{attention_column}_attentions"].reshape(
                     row[f"{attention_column}_attentions_original_shape"]
@@ -860,7 +930,7 @@ class MovieLensManager(KGManger):
                 axis=1,
             )
 
-        for hidden_state_column in ["vanilla", "prompt", "input_embeds_replace"]:
+        for hidden_state_column in model_types:
             df[f"{hidden_state_column}_hidden_states"] = df.apply(
                 lambda row: row[f"{hidden_state_column}_hidden_states"].reshape(
                     row[f"{hidden_state_column}_hidden_states_original_shape"]

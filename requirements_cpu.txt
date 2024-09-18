@@ -11,6 +11,7 @@ accelerate
 networkx
 ipykernel
 torch_geometric
+shap
 -f https://download.pytorch.org/whl/cpu
 torch
 torchvision

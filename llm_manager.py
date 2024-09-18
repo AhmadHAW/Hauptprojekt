@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import torch
+from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 import datasets
 import numpy as np
@@ -19,6 +20,12 @@ from transformers import (
     Trainer,
     TrainingArguments,
 )
+from transformers.models.bert.modeling_bert import (
+    BertModel,
+    BertEmbeddings,
+    BertEncoder,
+    BertPooler,
+)
 from transformers.modeling_outputs import SequenceClassifierOutput
 from transformers.utils import is_datasets_available
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
@@ -29,12 +36,13 @@ from utils import (
     row_to_vanilla_datapoint,
     row_to_prompt_datapoint,
     row_to_input_embeds_replace_datapoint,
+    replace_ranges,
 )
 
 ID2LABEL = {0: "FALSE", 1: "TRUE"}
 LABEL2ID = {"FALSE": 0, "TRUE": 1}
 
-SPLIT_EPOCH_ENDING = f"/split_{{}}_epoch_{{}}.npy"
+SPLIT_EPOCH_ENDING = f"/split_{{}}_epoch_{{}}_pos_{{}}.npy"
 TOKENS_ENDING = f"/tokens_{{}}_{{}}.csv"
 
 MODEL_NAME = "google/bert_uncased_L-2_H-128_A-2"
@@ -579,7 +587,131 @@ class BertForSequenceClassificationRanges(BertForSequenceClassification):
         )
 
 
+class InputEmbedsReplaceBertEmbeddings(BertEmbeddings):
+    """Construct the embeddings from word, position and token_type embeddings."""
+
+    """
+    Addition by this works context author: We add the semantic positional encodings and graph embeddings, so that we can replace
+    the padding placeholders with the KGEs, before adding the positional or type encodings.
+    """
+
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        token_type_ids: Optional[torch.LongTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        graph_embeddings: Optional[torch.FloatTensor] = None,
+        semantic_positional_encoding: Optional[torch.Tensor] = None,
+        past_key_values_length: int = 0,
+    ) -> torch.Tensor:
+        if input_ids is not None:
+            input_shape = input_ids.size()
+        else:
+            input_shape = inputs_embeds.size()[:-1]
+
+        seq_length = input_shape[1]
+
+        if position_ids is None:
+            position_ids = self.position_ids[
+                :, past_key_values_length : seq_length + past_key_values_length
+            ]
+
+        # Setting the token_type_ids to the registered buffer in constructor where it is all zeros, which usually occurs
+        # when its auto-generated, registered buffer helps users when tracing the model without passing token_type_ids, solves
+        # issue #5664
+        if token_type_ids is None:
+            if hasattr(self, "token_type_ids"):
+                buffered_token_type_ids = self.token_type_ids[:, :seq_length]
+                buffered_token_type_ids_expanded = buffered_token_type_ids.expand(
+                    input_shape[0], seq_length
+                )
+                token_type_ids = buffered_token_type_ids_expanded
+            else:
+                token_type_ids = torch.zeros(
+                    input_shape, dtype=torch.long, device=self.position_ids.device
+                )
+
+        if inputs_embeds is None:
+            inputs_embeds = self.word_embeddings(input_ids)
+            if (
+                semantic_positional_encoding is not None
+                and graph_embeddings is not None
+                and inputs_embeds is not None
+            ):
+                mask = (
+                    semantic_positional_encoding[:, [-4, -2], 0]
+                    .unsqueeze(-1)
+                    .repeat((1, 1, inputs_embeds.shape[-1]))
+                )
+                inputs_embeds = inputs_embeds.scatter(
+                    1, mask, graph_embeddings
+                )  # replace the input embeds at the place holder positions with the KGEs.
+        token_type_embeddings = self.token_type_embeddings(token_type_ids)
+
+        embeddings = inputs_embeds + token_type_embeddings
+        if self.position_embedding_type == "absolute":
+            position_embeddings = self.position_embeddings(position_ids)
+            embeddings += position_embeddings
+        embeddings = self.LayerNorm(embeddings)
+        embeddings = self.dropout(embeddings)
+        return embeddings
+
+
+class InputEmbedsReplaceBertModel(BertModel):
+    """
+
+    The model can behave as an encoder (with only self-attention) as well as a decoder, in which case a layer of
+    cross-attention is added between the self-attention layers, following the architecture described in [Attention is
+    all you need](https://arxiv.org/abs/1706.03762) by Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit,
+    Llion Jones, Aidan N. Gomez, Lukasz Kaiser and Illia Polosukhin.
+
+    To behave as an decoder the model needs to be initialized with the `is_decoder` argument of the configuration set
+    to `True`. To be used in a Seq2Seq model, the model needs to initialized with both `is_decoder` argument and
+    `add_cross_attention` set to `True`; an `encoder_hidden_states` is then expected as an input to the forward pass.
+    """
+
+    """
+    Addition by this works context author: We add the semantic positional encodings and graph embeddings, so that we can replace
+    the padding placeholders with the KGEs, before adding the positional or type encodings.
+    """
+
+    def __init__(self, config, add_pooling_layer=True):
+        super().__init__(config)
+        self.config = config
+
+        self.embeddings = InputEmbedsReplaceBertEmbeddings(config)
+        self.encoder = BertEncoder(config)
+
+        self.pooler = BertPooler(config) if add_pooling_layer else None
+
+        self.attn_implementation = config._attn_implementation
+        self.position_embedding_type = config.position_embedding_type
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+
 class InputEmbedsReplaceBertForSequenceClassification(BertForSequenceClassification):
+    """The bert base model has been adjusted so it also takes SPEs and KGEs."""
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.num_labels = config.num_labels
+        self.config = config
+
+        self.bert = InputEmbedsReplaceBertModel(config)
+        classifier_dropout = (
+            config.classifier_dropout
+            if config.classifier_dropout is not None
+            else config.hidden_dropout_prob
+        )
+        self.dropout = nn.Dropout(classifier_dropout)
+        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
     def forward(
         self,
         input_ids: Optional[torch.Tensor] = None,
@@ -606,26 +738,11 @@ class InputEmbedsReplaceBertForSequenceClassification(BertForSequenceClassificat
         )
         if inputs_embeds is None:
             inputs_embeds = self.bert.embeddings(
-                input_ids
+                input_ids,
+                semantic_positional_encoding=semantic_positional_encoding,
+                graph_embeddings=graph_embeddings,
             )  # we take the input embeds and later replace the positions where the padding tokens where placed as placeholder with the graph embeddings.
             assert isinstance(inputs_embeds, torch.Tensor)
-        if graph_embeddings is not None and len(graph_embeddings) > 0:
-            if attention_mask is not None:
-                mask = (
-                    (
-                        (attention_mask.to(self.device).sum(dim=1) - 1)
-                        .unsqueeze(1)
-                        .repeat((1, 2))
-                        - torch.tensor([3, 1], device=self.device)
-                    )
-                    .unsqueeze(2)
-                    .repeat((1, 1, self.config.hidden_size))
-                )  # basically a mask finding the last positions between the sep tokens (reshaped so they can be used in scatter)
-                inputs_embeds = inputs_embeds.to(
-                    self.device
-                ).scatter(
-                    1, mask.to(self.device), graph_embeddings.to(self.device)
-                )  # replace the input embeds at the place holder positions with the KGEs.
         outputs = self.bert(
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
@@ -701,22 +818,22 @@ class ClassifierBase(ABC):
         self.val_data_collator = val_data_collator
         self.semantic_datapoints = semantic_datapoints
         self.attentions_path = f"{root_path}/attentions.npy"
-        self.hidden_states_path = f"{root_path}/hidden_states.npy"
+        self.logits_path = f"{root_path}/logits.npy"
+        self.hidden_states_path = f"{root_path}/hidden_states_{{}}.npy"
         self.tokens_path = f"{root_path}/tokens.csv"
         self.training_path = f"{root_path}/training"
         self.best_model_path = f"{self.training_path}/best"
-        self.training_state_path = f"{self.training_path}/checkpoint-4420/trainer_state.json"  # may change when changing
         self.log_path = f"{self.training_path}/logs"
         self.sub_attentions_dir_path = f"{root_path}/attentions"
+        self.sub_logits_dir_path = f"{root_path}/logits"
         self.sub_hidden_states_dir_path = f"{root_path}/hidden_states"
-        self.sub_attentions_path = (
-            f"{self.sub_attentions_dir_path}/{SPLIT_EPOCH_ENDING}"
-        )
+        self.sub_attentions_path = f"{self.sub_attentions_dir_path}{SPLIT_EPOCH_ENDING}"
+        self.sub_logits_path = f"{self.sub_logits_dir_path}{SPLIT_EPOCH_ENDING}"
         self.sub_hidden_states_path = (
-            f"{self.sub_hidden_states_dir_path}/{SPLIT_EPOCH_ENDING}"
+            f"{self.sub_hidden_states_dir_path}{SPLIT_EPOCH_ENDING}"
         )
         self.sub_tokens_dir_path = f"{root_path}/tokens"
-        self.sub_tokens_path = f"{self.sub_tokens_dir_path}/{SPLIT_EPOCH_ENDING}"
+        self.sub_tokens_path = f"{self.sub_tokens_dir_path}{TOKENS_ENDING}"
         self.force_recompute = force_recompute
         self.tokenizer = BertTokenizer.from_pretrained(
             MODEL_NAME, model_max_length=model_max_length
@@ -825,8 +942,12 @@ class ClassifierBase(ABC):
         trainer.model.to(device="cpu").save_pretrained(self.best_model_path)  # type: ignore
         trainer.model.to(device=self.device)  # type: ignore
 
-    def _plot_training_loss_and_accuracy(self, model_type):
-        with open(self.training_state_path, "r") as f:
+    @staticmethod
+    def _plot_training_loss_and_accuracy(model_type: str, root: str = "./data/llm"):
+        training_state_path = (
+            f"{root}/{model_type}/training/checkpoint-4420/trainer_state.json"
+        )
+        with open(training_state_path, "r") as f:
             trainer_state = json.load(f)
             # Extract loss values and corresponding steps
         losses = []
@@ -936,30 +1057,44 @@ class ClassifierBase(ABC):
         splits: List[str] = ["train", "test", "val"],
         batch_size: int = 64,
         epochs: int = 1,
-        load_fields: List[str] = ["attentions", "hidden_states"],
+        load_fields: List[str] = ["attentions", "hidden_states", "logits"],
+        hidden_state_position: Optional[int] = None,
+        include_graph_embeddings=True,
         force_recompute: bool = False,
     ):
         add_hidden_states = "hidden_states" in load_fields
+
         add_attentions = "attentions" in load_fields
-        print(self.attentions_path, self.hidden_states_path, self.tokens_path)
+        add_logits = "logits" in load_fields
+        num_positions = len(dataset["train"][0]["semantic_positional_encoding"]) + 2
+        num_positions += 1 if include_graph_embeddings else 0
+        hidden_states_exist = True
+        if hidden_state_position is not None:
+            assert add_hidden_states
+            hidden_states_exist = hidden_states_exist and os.path.exists(
+                self.hidden_states_path.format(hidden_state_position)
+            )
         if (
             force_recompute
             or not os.path.exists(self.attentions_path)
-            or not os.path.exists(self.hidden_states_path)
+            or not hidden_states_exist
             or not os.path.exists(self.tokens_path)
         ):
             assert isinstance(self.model, BertForSequenceClassification)
             self.model.eval()
             Path(self.sub_attentions_dir_path).mkdir(parents=True, exist_ok=True)
+            Path(self.sub_logits_dir_path).mkdir(parents=True, exist_ok=True)
             Path(self.sub_hidden_states_dir_path).mkdir(parents=True, exist_ok=True)
             Path(self.sub_tokens_dir_path).mkdir(parents=True, exist_ok=True)
             with torch.no_grad():
                 for split in splits:
                     data_collator = self._get_data_collator(split)
                     for epoch in range(epochs):
-                        all_hidden_states = []
-                        all_attentions = []
+                        all_hidden_states = [[] for x in range(num_positions + 1)]
+                        all_attentions = [[] for x in range(num_positions + 1)]
                         all_tokens = []
+                        all_logits = [[] for x in range(num_positions + 1)]
+
                         print(f"{split} Forward Epoch {epoch + 1} from {epochs}")
                         data_loader = DataLoader(
                             dataset=dataset[split],  # type: ignore
@@ -987,26 +1122,38 @@ class ClassifierBase(ABC):
                                 attentions = self._means_over_ranges_cross(
                                     semantic_positional_encoding, attentions
                                 )
-                                all_attentions.append(attentions.numpy())
+                                all_attentions[0].append(attentions.numpy())
                                 del attentions
+                            if add_logits:
+                                logits = outputs.logits
+                                predictions = [np.argmax(all_logits, axis=1).tolist()]
+                                all_logits[0].append(logits.numpy())
+                                del logits
                             if add_hidden_states:
-                                hidden_states_on_each_layer = []
-                                for hidden_states in outputs.hidden_states:
-                                    hidden_states_on_layer = (
-                                        self._avg_over_hidden_states(
-                                            semantic_positional_encoding, hidden_states
+                                if (
+                                    hidden_state_position is None
+                                    or hidden_state_position == 0
+                                ):
+                                    hidden_states_on_each_layer = []
+                                    for hidden_states in outputs.hidden_states:
+                                        hidden_states_on_layer = (
+                                            self._avg_over_hidden_states(
+                                                semantic_positional_encoding,
+                                                hidden_states,
+                                            )
+                                        )
+                                        hidden_states_on_each_layer.append(
+                                            hidden_states_on_layer.numpy()
+                                        )
+                                        del hidden_states
+                                    hidden_states_on_each_layer = np.stack(
+                                        hidden_states_on_each_layer
+                                    )
+                                    all_hidden_states[0].append(
+                                        hidden_states_on_each_layer.transpose(
+                                            2, 0, 1, 3
                                         )
                                     )
-                                    hidden_states_on_each_layer.append(
-                                        hidden_states_on_layer.numpy()
-                                    )
-                                    del hidden_states
-                                hidden_states_on_each_layer = np.stack(
-                                    hidden_states_on_each_layer
-                                )
-                                all_hidden_states.append(
-                                    hidden_states_on_each_layer.transpose(2, 0, 1, 3)
-                                )
                             tokens = get_tokens_as_df_cb(
                                 batch["input_ids"],
                                 self.tokenizer,
@@ -1016,6 +1163,96 @@ class ClassifierBase(ABC):
                             tokens["split"] = splits_
                             all_tokens.append(tokens)
 
+                            all_positions = [
+                                [pos]
+                                for pos in range(len(semantic_positional_encoding[0]))
+                            ]
+                            all_positions.extend([[1, 3, 5, 7], [2, 4, 6, 8]])
+                            if include_graph_embeddings:
+                                all_positions[-1].extend([10, 12])
+                                all_positions.append([9, 11])
+
+                            for pos, positions in enumerate(all_positions):
+                                masked_input_ids = replace_ranges(
+                                    batch["input_ids"],
+                                    batch["attention_mask"],
+                                    semantic_positional_encoding[:, positions],
+                                    self.tokenizer.mask_token_id,
+                                )
+
+                                batch["input_ids"] = masked_input_ids
+                                if isinstance(
+                                    self.model,
+                                    InputEmbedsReplaceBertForSequenceClassification,
+                                ):
+                                    skip_replacing_source_embedding = (
+                                        len(semantic_positional_encoding[0]) - 4
+                                        in positions
+                                    )
+                                    skip_replacing_target_embedding = (
+                                        len(semantic_positional_encoding[0]) - 2
+                                        in positions
+                                    )
+                                    outputs_masked = self.model(
+                                        **batch,
+                                        output_hidden_states=add_hidden_states,
+                                        output_attentions=add_attentions,
+                                        skip_replacing_source_embedding=skip_replacing_source_embedding,
+                                        skip_replacing_target_embedding=skip_replacing_target_embedding,
+                                    )
+                                else:
+                                    outputs_masked = self.model(
+                                        **batch,
+                                        output_hidden_states=add_hidden_states,
+                                        output_attentions=add_attentions,
+                                    )
+                                if add_attentions:
+                                    attentions = outputs_masked.attentions
+                                    attentions = [
+                                        torch.sum(layer, dim=1) for layer in attentions
+                                    ]
+                                    attentions = torch.stack(attentions).permute(
+                                        1, 2, 3, 0
+                                    )
+                                    attentions = self._means_over_ranges_cross(
+                                        semantic_positional_encoding, attentions
+                                    )
+                                    all_attentions[pos + 1].append(attentions.numpy())
+                                    del attentions
+                                if add_logits:
+                                    logits = outputs_masked.logits
+                                    predictions.append(
+                                        np.argmax(all_logits, axis=1).tolist()
+                                    )
+                                    all_logits[pos + 1].append(logits.numpy())
+                                    del logits
+                                if add_hidden_states and (
+                                    hidden_state_position is None
+                                    or pos == hidden_state_position
+                                ):
+                                    hidden_states_on_each_layer = []
+                                    for hidden_states in outputs_masked.hidden_states:
+                                        hidden_states_on_layer = (
+                                            self._avg_over_hidden_states(
+                                                semantic_positional_encoding,
+                                                hidden_states,
+                                            )
+                                        )
+                                        hidden_states_on_each_layer.append(
+                                            hidden_states_on_layer.numpy()
+                                        )
+                                        del hidden_states
+                                    hidden_states_on_each_layer = np.stack(
+                                        hidden_states_on_each_layer
+                                    )
+                                    all_hidden_states[pos + 1].append(
+                                        hidden_states_on_each_layer.transpose(
+                                            2, 0, 1, 3
+                                        )
+                                    )
+                            if add_logits:
+                                tokens["predictions"] = predictions
+
                         # Concatenate all hidden states across batches
                         all_tokens = pd.concat(all_tokens).reset_index(drop=True)
                         all_tokens.to_csv(
@@ -1024,18 +1261,35 @@ class ClassifierBase(ABC):
                         )
                         del all_tokens
                         if add_attentions:
-                            all_attentions = np.concatenate(all_attentions)
-                            np.save(
-                                self.sub_attentions_path.format(split, epoch),
-                                all_attentions,
-                            )
+                            for pos, pos_attentions in enumerate(all_attentions):
+                                attentions = np.concatenate(pos_attentions)
+                                np.save(
+                                    self.sub_attentions_path.format(split, epoch, pos),
+                                    attentions,
+                                )
                             del all_attentions
+
+                        if add_logits:
+                            for pos, pos_logits in enumerate(all_logits):
+                                logits = np.concatenate(pos_logits)
+                                np.save(
+                                    self.sub_logits_path.format(split, epoch, pos),
+                                    logits,
+                                )
+                            del all_logits
                         if add_hidden_states:
-                            all_hidden_states = np.concatenate(all_hidden_states)
-                            np.save(
-                                self.sub_hidden_states_path.format(split, epoch),
-                                all_hidden_states,
-                            )
+                            for pos, pos_hidden_states in enumerate(all_hidden_states):
+                                if (
+                                    hidden_state_position is None
+                                    or pos == hidden_state_position
+                                ):
+                                    hidden_states = np.concatenate(pos_hidden_states)
+                                    np.save(
+                                        self.sub_hidden_states_path.format(
+                                            split, epoch, pos
+                                        ),
+                                        hidden_states,
+                                    )
                             del all_hidden_states
 
                 # all_tokens
@@ -1051,38 +1305,105 @@ class ClassifierBase(ABC):
                 # hidden states:
                 if add_hidden_states:
                     all_hidden_states = []
-                    for split in splits:
-                        for epoch in range(epochs):
-                            all_hidden_states.append(
-                                np.load(
-                                    self.sub_hidden_states_path.format(split, epoch)
-                                )
-                            )
-                    all_hidden_states = np.concatenate(all_hidden_states)
-                    np.save(self.hidden_states_path, all_hidden_states)
+                    for pos, pos_hidden_states in enumerate(
+                        [[] for x in range(num_positions + 1)]
+                    ):
+                        if (
+                            hidden_state_position is None
+                            or pos == hidden_state_position
+                        ):
+                            for split in splits:
+                                for epoch in range(epochs):
+                                    pos_hidden_states.append(
+                                        np.load(
+                                            self.sub_hidden_states_path.format(
+                                                split, epoch, pos
+                                            )
+                                        )
+                                    )
+                            pos_hidden_states = np.concatenate(pos_hidden_states)
+                            all_hidden_states.append(pos_hidden_states)
+                    all_hidden_states = np.stack(all_hidden_states).transpose(
+                        1, 0, 2, 3, 4
+                    )
+                    np.save(self.hidden_states_path.format(), all_hidden_states)
                     all_tokens["hidden_states"] = list(all_hidden_states)
                     del all_hidden_states
 
                 # attentions:
                 if add_attentions:
-                    attentions = []
-                    for split in splits:
-                        for epoch in range(epochs):
-                            attentions.append(
-                                np.load(self.sub_attentions_path.format(split, epoch))
-                            )
-                    attentions = np.concatenate(attentions)
-                    np.save(self.attentions_path, attentions)
-                    all_tokens["attentions"] = list(attentions)
+                    all_attentions = []
+                    for pos, pos_attentions in enumerate(
+                        [[] for x in range(num_positions + 1)]
+                    ):
+                        for split in splits:
+                            for epoch in range(epochs):
+                                pos_attentions.append(
+                                    np.load(
+                                        self.sub_attentions_path.format(
+                                            split, epoch, pos
+                                        )
+                                    )
+                                )
+                        pos_attentions = np.concatenate(pos_attentions)
+                        all_attentions.append(pos_attentions)
+                    all_attentions = np.stack(all_attentions).transpose(1, 0, 2, 3, 4)
+                    np.save(self.attentions_path, all_attentions)
+                    all_tokens["attentions"] = list(all_attentions)
+                # attentions:
+                if add_logits:
+                    all_logits = []
+                    for pos, pos_logits in enumerate(
+                        [[] for x in range(num_positions + 1)]
+                    ):
+                        if (
+                            hidden_state_position is None
+                            or pos == hidden_state_position
+                        ):
+                            for split in splits:
+                                for epoch in range(epochs):
+                                    pos_logits.append(
+                                        np.load(
+                                            self.sub_logits_path.format(
+                                                split, epoch, pos
+                                            )
+                                        )
+                                    )
+                            pos_logits = np.concatenate(pos_logits)
+                            all_logits.append(pos_logits)
+                    all_logits = np.stack(all_logits).transpose(1, 0, 2)
+                    np.save(self.logits_path, all_logits)
+                    all_tokens["logits"] = list(all_logits)
+
         else:
             all_tokens = pd.read_csv(self.tokens_path)
             if add_hidden_states:
-                all_hidden_states = np.load(self.hidden_states_path)
-                all_tokens["hidden_states"] = list(all_hidden_states)
+                all_hidden_states = []
+                for pos, pos_attentions in enumerate(
+                    [[] for x in range(num_positions + 1)]
+                ):
+                    if hidden_state_position is None or pos == hidden_state_position:
+                        all_hidden_states.append(
+                            np.load(self.hidden_states_path.format(pos))
+                        )
+                all_hidden_states = np.stack(all_hidden_states).transpose(1, 0, 2, 3, 4)
+                if hidden_state_position is None:
+                    all_tokens["hidden_states"] = list(all_hidden_states)
+                else:
+                    all_tokens["hidden_states"] = list(all_hidden_states.squeeze(1))
             if add_attentions:
                 all_attentions = np.load(self.attentions_path)
                 all_tokens["attentions"] = list(all_attentions)
-        all_tokens[all_tokens["split"].isin(splits)]
+            if add_logits:
+                all_logits = np.load(self.logits_path)
+                if hidden_state_position is None:
+                    predictions = np.argmax(all_logits, axis=2).tolist()
+                else:
+                    all_logits = all_logits[:, hidden_state_position]
+                    predictions = np.argmax(all_logits, axis=1).tolist()
+                all_tokens["logits"] = list(all_logits)
+                all_tokens["predictions"] = predictions
+        all_tokens = all_tokens.loc[all_tokens["split"].isin(splits)]
         return all_tokens
 
     @staticmethod
@@ -1095,7 +1416,7 @@ class ClassifierBase(ABC):
         all_tokens["hidden_states"] = list(all_hidden_states)
         all_attentions = np.load(attentions_path)
         all_tokens["attentions"] = list(all_attentions)
-        all_tokens[all_tokens["split"].isin(splits)]
+        all_tokens = all_tokens[all_tokens["split"].isin(splits)]
         return all_tokens
 
 

@@ -155,7 +155,7 @@ class GraphRepresentationGenerator:
         if os.path.isfile(self.model_path) and not force_recompute:
             print("loading pretrained model")
             self.model.load_state_dict(torch.load(self.model_path))
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cpu")
         print(f"Device: '{self.device}'")
         self.model.to(self.device)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
@@ -312,7 +312,7 @@ class GraphRepresentationGenerator:
         print(f"Computing embeddings for embedding dimension {self.kge_dimension}.")
         return llm_df.apply(self.__get_embedding, axis=1)
 
-    def validate_model(self, data):
+    def validate_model(self, data, batch_size=64):
         # Define the validation seed edges:
         edge_label_index = data["source", "edge", "target"].edge_label_index
         edge_label = data["source", "edge", "target"].edge_label
@@ -322,7 +322,7 @@ class GraphRepresentationGenerator:
             num_neighbors=[20, 10],
             edge_label_index=(("source", "edge", "target"), edge_label_index),
             edge_label=edge_label,
-            batch_size=3 * 128,
+            batch_size=batch_size,
             shuffle=False,
         )
         preds = []

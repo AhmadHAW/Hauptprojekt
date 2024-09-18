@@ -101,3 +101,28 @@ def row_to_vanilla_datapoint(row: pd.Series, sep_token: str = "[SEP]") -> str:
 
 def transform_embeddings_to_string(embeddings: torch.Tensor, float_numbers: int = 16):
     return str([format(embedding, f".{float_numbers}f") for embedding in embeddings])
+
+
+def replace_ranges(
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    semantic_positional_encodings: torch.Tensor,
+    replace_value: int,
+) -> torch.Tensor:
+    assert attention_mask.count_nonzero(dim=1).max() < attention_mask.shape[1]
+    for pos in range(semantic_positional_encodings.shape[1]):
+        semantic_positional_encoding = semantic_positional_encodings[:, pos]
+        zero_index = attention_mask.sum(dim=1).unsqueeze(1)
+        starts = semantic_positional_encoding[:, 0]
+        ends = semantic_positional_encoding[:, 1]
+        max_length = (ends - starts).max().item()
+        range_tensor = torch.arange(max_length).unsqueeze(0)
+        ranges = starts.unsqueeze(1) + range_tensor
+        mask = ranges >= ends.unsqueeze(1)
+        diffs = zero_index.repeat((1, ranges.shape[1])) - ranges
+        diffs_masked = diffs * mask
+        ranges_masked = ranges + diffs_masked
+        input_ids = input_ids.detach().clone()
+        replace_tensor = torch.tensor(replace_value).repeat(input_ids.shape)
+        input_ids = input_ids.scatter(1, ranges_masked, replace_tensor)
+    return input_ids
