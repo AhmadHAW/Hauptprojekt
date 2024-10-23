@@ -384,6 +384,8 @@ class KGManger(ABC):
         tokenize_function: Optional[Callable] = None,
         suffix="",
         df: Optional[pd.DataFrame] = None,
+        splits: List[str] = ["train", "test", "val"],
+        add_embeddings: bool = True,
         force_recompute: bool = False,
     ) -> Union[DatasetDict, Dataset]:
         """
@@ -391,7 +393,7 @@ class KGManger(ABC):
         by passing the tokenizer.tokenize function and
         the embedding dimension of the target adding model.
         """
-        llm_adding_dataset_path = f"{ROOT}/llm/input_embeds_replace{suffix}/dataset"
+        llm_adding_dataset_path = f"{ROOT}/llm/input_embeds_replace/dataset{suffix}"
         if os.path.exists(llm_adding_dataset_path) and not force_recompute:
             dataset = datasets.load_from_disk(llm_adding_dataset_path)
         else:
@@ -399,19 +401,21 @@ class KGManger(ABC):
                 llm_df = df.copy(deep=True)
             else:
                 llm_df = self.llm_df.copy(deep=True)
+            llm_df = llm_df[llm_df["split"] in splits]
             llm_df["prompt"] = llm_df.apply(
                 lambda row: row_to_input_embeds_replace_datapoint(
                     row, sep_token, pad_token
                 ),
                 axis=1,
             )
-            """ llm_df["graph_embeddings"] = llm_df.apply(
-                lambda row: self.__generate_embeddings(row),  # type: ignore
-                axis=1,
-            )  # type: ignore
-            llm_df["graph_embeddings"] = llm_df["graph_embeddings"].apply(
-                lambda embeddings: embeddings.detach().to("cpu").tolist()
-            ) """
+            if add_embeddings:
+                llm_df["graph_embeddings"] = llm_df.apply(
+                    lambda row: self.__generate_embeddings(row),  # type: ignore
+                    axis=1,
+                )  # type: ignore
+                llm_df["graph_embeddings"] = llm_df["graph_embeddings"].apply(
+                    lambda embeddings: embeddings.detach().to("cpu").tolist()
+                )
             dataset = self.__dataset_from_df(llm_df)
             if tokenize_function:
                 dataset = dataset.map(tokenize_function, batched=True)
@@ -424,6 +428,7 @@ class KGManger(ABC):
         sep_token="[SEP]",
         suffix="",
         df: Optional[pd.DataFrame] = None,
+        splits: List[str] = ["train", "test", "val"],
         force_recompute: bool = False,
     ) -> Union[DatasetDict, Dataset]:
         """
@@ -438,6 +443,7 @@ class KGManger(ABC):
                 llm_df = df.copy(deep=True)
             else:
                 llm_df = self.llm_df.copy(deep=True)
+            llm_df = llm_df[llm_df["split"] in splits]
             llm_df["prompt"] = llm_df.apply(
                 lambda row: row_to_vanilla_datapoint(row, sep_token=sep_token),
                 axis=1,

@@ -242,6 +242,7 @@ class EmbeddingBasedDataCollator(DataCollatorBase):
         semantic_positional_encoding = []
         source_ids = []
         target_ids = []
+        graph_embeddings = []
         for f in features:
             input_ids.append(f["input_ids"])
             attention_mask.append(f["attention_mask"])
@@ -249,17 +250,24 @@ class EmbeddingBasedDataCollator(DataCollatorBase):
             semantic_positional_encoding.append(f["semantic_positional_encoding"])
             source_ids.append(f["source_id"])
             target_ids.append(f["target_id"])
+            if "graph_embeddings" in f:
+                graph_embeddings.append(f["graph_embeddings"])
         input_ids = torch.tensor(input_ids, dtype=torch.long)
         attention_mask = torch.tensor(attention_mask, dtype=torch.long)
         labels = torch.tensor(labels, dtype=torch.long)
         semantic_positional_encoding = torch.tensor(
             semantic_positional_encoding, dtype=torch.long
         )
-        source_embeddings, target_embeddings = self.get_embeddings_cb(
-            self.data, source_ids, target_ids
-        )
-        graph_embeddings = torch.stack([source_embeddings, target_embeddings], dim=1)
-        del source_embeddings, target_embeddings
+        if len(graph_embeddings) == 0:
+            source_embeddings, target_embeddings = self.get_embeddings_cb(
+                self.data, source_ids, target_ids
+            )
+            graph_embeddings = torch.stack(
+                [source_embeddings, target_embeddings], dim=1
+            )
+            del source_embeddings, target_embeddings
+        else:
+            graph_embeddings = torch.tensor(graph_embeddings)
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
@@ -973,7 +981,7 @@ class ClassifierBase(ABC):
         self.sub_logits_dir_path = f"{root_path}/logits"
         self.sub_hidden_states_dir_path = f"{root_path}/hidden_states"
         self.sub_attentions_path = f"{self.sub_attentions_dir_path}{SPLIT_EPOCH_ENDING}"
-        self.sub_logits_path = f"{self.sub_logits_dir_path}{SPLIT_EPOCH_ENDING}"
+        self.sub_logits_path = f"{self.sub_logits_dir_path}/split_{{}}_com_{{}}.npy"
         self.sub_hidden_states_path = (
             f"{self.sub_hidden_states_dir_path}{SPLIT_EPOCH_ENDING}"
         )
@@ -1180,6 +1188,7 @@ class ClassifierBase(ABC):
         load_fields: List[str] = ["attentions", "hidden_states", "logits"],
         is_test: bool = False,
         force_recompute: bool = False,
+        combination_boundaries: Optional[Tuple[int, int]] = None,
     ) -> None:
         add_hidden_states = "hidden_states" in load_fields
 
@@ -1220,8 +1229,20 @@ class ClassifierBase(ABC):
                 sep_list.append("seps")
             tokens_collected = False
             all_tokens = []
-            all_logits = []
             key_combinations = get_combinations(sep_list)
+            if combination_boundaries:
+                assert (
+                    combination_boundaries[0] < len(key_combinations)
+                ), f"Expected boundaries to be smaller then the amount of combinations, but got {combination_boundaries[0]} at position 0 for {len(key_combinations)}"
+                assert (
+                    combination_boundaries[1] < len(key_combinations)
+                ), f"Expected boundaries to be smaller then the amount of combinations, but got {combination_boundaries[1]} at position 1 for {len(key_combinations)}"
+                assert (
+                    combination_boundaries[0] < combination_boundaries[1]
+                ), f"Expected boundaries at position 0 to be smaller then boundary at position 1, but got {combination_boundaries}"
+                key_combinations = key_combinations[
+                    combination_boundaries[0] : combination_boundaries[1]
+                ]
             with torch.no_grad():
                 for split in splits:
                     data_collator = self._get_data_collator(split)
@@ -1242,7 +1263,6 @@ class ClassifierBase(ABC):
                         logits_of_combination = []
                         attentions_collected = []
                         hidden_states_collected = []
-                        all_logits.append(logits_of_combination)
                         for idx, batch in enumerate(data_loader):
                             print(f"batch {idx}, combination {combination_string}")
                             # idx = 0
@@ -1354,13 +1374,15 @@ class ClassifierBase(ABC):
                                 )
                             del all_tokens
                             tokens_collected = True
-            logit_arrays = []
-            for logits in all_logits:
-                logit_array = np.concatenate(logits)
-                logit_arrays.append(logit_array)
-            all_logits = np.stack(logit_arrays)
-            if not is_test:
-                np.save(self.logits_path, all_logits)
+
+                        if add_logits:
+                            logits_of_combination = np.concatenate(
+                                logits_of_combination
+                            )
+                            np.save(
+                                self.sub_logits_path.format(split, combination_string),
+                                logits_of_combination,
+                            )
 
     @staticmethod
     def read_forward_dataset(root: str, splits: List[str] = ["train", "test", "val"]):
