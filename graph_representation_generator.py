@@ -1,5 +1,5 @@
 import os
-from typing import Optional
+from typing import Optional, List
 
 from pandas import DataFrame, Series
 import torch
@@ -11,6 +11,7 @@ import torch_geometric.transforms as T
 from torch_geometric.loader import LinkNeighborLoader
 import tqdm
 from sklearn.metrics import roc_auc_score
+import pandas as pd
 
 from dataset_manager import ROOT
 
@@ -62,7 +63,7 @@ class Model(torch.nn.Module):
     and simply add their shallow embeddings to the pre-defined genre features.
     """
 
-    def __init__(self, hidden_channels, output_channels, data, force_recompute=False):
+    def __init__(self, hidden_channels, output_channels, data):
         super().__init__()
         # Since the dataset does not come with rich features, we also learn two
         # embedding matrices for sources and targets:
@@ -127,6 +128,7 @@ class GraphRepresentationGenerator:
         force_recompute: bool = False,
         kge_dimension: Optional[int] = None,
         hidden_channels: int = 64,
+        device: Optional[str] = None,
     ) -> None:
         """
         The constructor of the GraphRepresentationGenerator initializes the model in the corresponding dimensions, the optimizer for the training and data set splits.
@@ -144,7 +146,7 @@ class GraphRepresentationGenerator:
         data = data.clone()
         if not kge_dimension:
             kge_dimension = hidden_channels
-        self.model_path = f"{ROOT}/gnn/model_{{}}.pth".format(kge_dimension)
+        self.model_path = f"{ROOT}/gnn/model_{kge_dimension}.pth"
         self.model = Model(
             hidden_channels=hidden_channels,
             output_channels=kge_dimension,
@@ -155,7 +157,7 @@ class GraphRepresentationGenerator:
         if os.path.isfile(self.model_path) and not force_recompute:
             print("loading pretrained model")
             self.model.load_state_dict(torch.load(self.model_path))
-        self.device = torch.device("cpu")
+        self.device = torch.device("cpu") if not device else torch.device(device)
         print(f"Device: '{self.device}'")
         self.model.to(self.device)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
@@ -163,6 +165,12 @@ class GraphRepresentationGenerator:
         self.gnn_val_data = gnn_val_data
         self.gnn_test_data = gnn_test_data
         self.kge_dimension = kge_dimension
+        self.source_embedding_path = (
+            f"{ROOT}/gnn/model_{kge_dimension}_source_embedding_split_{{}}.pth"
+        )
+        self.target_embedding_path = (
+            f"{ROOT}/gnn/model_{kge_dimension}_target_embedding_split_{{}}.pth"
+        )
         self.force_recompute = force_recompute
 
     def train_model(self, data, epochs, batch_size=64):
@@ -220,20 +228,23 @@ class GraphRepresentationGenerator:
         torch.save(self.model.to(device="cpu").state_dict(), self.model_path)
         self.model.to(self.device)
 
-    def __link_neighbor_sampling(self, data, source_id, target_id):
-        edge_label_index = torch.tensor([[source_id], [target_id]])
-        edge_label = torch.tensor([1])
+    def __link_neighbor_sampling(self, data, source_ids, target_ids):
+        edge_label_index = torch.tensor([source_ids, target_ids])
+        edge_label = torch.ones(len(source_ids))
 
         loader = LinkNeighborLoader(
             data=data,
             num_neighbors=[20, 10],
             edge_label_index=(("source", "edge", "target"), edge_label_index),
             edge_label=edge_label,
-            batch_size=1,
+            batch_size=int(len(source_ids) / 4),
             shuffle=False,
         )
+        all_sampled_data = []
         for sampled_data in tqdm.tqdm(loader, disable=True):
-            return sampled_data
+            all_sampled_data.append(sampled_data)
+        del loader
+        return all_sampled_data
 
     def get_embedding(self, data: HeteroData, source_id: int, target_id: int):
         """
@@ -255,6 +266,36 @@ class GraphRepresentationGenerator:
         source_embedding = embeddings["source"][source_node_id_index]  # type: ignore
         target_embedding = embeddings["target"][target_node_id_index]  # type: ignore
         return source_embedding, target_embedding
+
+    def get_embeddings(
+        self, data: HeteroData, source_ids: List[int], target_ids: List[int]
+    ):
+        """
+        This method is used as a callback function and produces the KGE from given source node and target node.
+        For that a subgraph of the neighbohood is generated and then applied to the GNN. Afterwards only the embeddings of
+        given source and target nodes are returned.
+        """
+        batch_sampled_data = self.__link_neighbor_sampling(data, source_ids, target_ids)
+        all_source_node_embeddings = []
+        all_target_node_embeddings = []
+        for sampled_data in batch_sampled_data:
+            assert isinstance(sampled_data, HeteroData)
+            assert sampled_data is not None
+            # sampled_data.to(self.device)  # type: ignore
+            embeddings = self.model.forward_without_classifier(sampled_data)
+            edge_label_index = sampled_data[
+                "source", "edge", "target"
+            ].edge_label_index  # Shape: [2, num_edges]
+
+            # Extract source and target node embeddings from the computed embeddings
+            source_node_embeddings = embeddings["source"][edge_label_index[0]]
+            all_source_node_embeddings.append(source_node_embeddings)
+            target_node_embeddings = embeddings["target"][edge_label_index[1]]
+            all_target_node_embeddings.append(target_node_embeddings)
+        all_source_node_embeddings = torch.concat(all_source_node_embeddings)
+        all_target_node_embeddings = torch.concat(all_target_node_embeddings)
+        # Return the embeddings for the entire batch
+        return all_source_node_embeddings, all_target_node_embeddings
 
     def __get_embedding(self, row: Series) -> Series:
         split = row["split"]
@@ -283,7 +324,23 @@ class GraphRepresentationGenerator:
     def get_saved_embeddings(self, model: str) -> Optional[DataFrame]:
         source_path = f"{ROOT}/gnn/{model}_source_embedding.pt"
         if not os.path.exists(source_path):
-            return None
+            source_embeddings = []
+            target_embeddings = []
+            for split in ["train", "test", "val"]:
+                source_path = f"{ROOT}/gnn/{model}_source_embedding_{split}.pth"
+                target_path = f"{ROOT}/gnn/{model}_target_embedding_{split}.pth"
+                if not os.path.exists(source_path) or not os.path.exists(source_path):
+                    return None
+                else:
+                    source_embeddings.append(torch.load(source_path))
+                    target_embeddings.append(torch.load(target_path))
+                row = DataFrame(
+                    {
+                        "source_embedding": torch.stack(source_embeddings).tolist(),
+                        "target_embedding": torch.stack(target_embeddings).tolist(),
+                    }
+                )
+            return row
         source_embeddings = torch.load(source_path)
         target_path = f"{ROOT}/gnn/{model}_target_embedding.pt"
         if not os.path.exists(target_path):
@@ -297,9 +354,7 @@ class GraphRepresentationGenerator:
         )
         return row
 
-    def generate_embeddings(
-        self, llm_df: DataFrame, force_recompute: bool = False
-    ) -> DataFrame:
+    def generate_embeddings(self, llm_df: DataFrame) -> DataFrame:
         """
         This method passes all edges (source - target) to the GNN to produce source and target embeddings.
         Parameters
@@ -310,7 +365,33 @@ class GraphRepresentationGenerator:
 
         # produce the embeddings for all edges
         print(f"Computing embeddings for embedding dimension {self.kge_dimension}.")
-        return llm_df.apply(self.__get_embedding, axis=1)
+        df_splits = []
+        for split in ["train", "val", "test"]:
+            df_split = llm_df.loc[llm_df["split"] == split][["source_id", "target_id"]]
+            source_ids = df_split["source_id"].to_list()
+            target_ids = df_split["target_id"].to_list()
+            data = (
+                self.gnn_train_data
+                if split == "train"
+                else self.gnn_val_data
+                if split == "val"
+                else self.gnn_test_data
+                if split == "test"
+                else self.gnn_train_data
+            )
+            source_embeddings, target_embeddings = self.get_embeddings(
+                data, source_ids, target_ids
+            )
+            df_split["source_embedding"] = source_embeddings.to("cpu").detach().tolist()
+            df_split["target_embedding"] = target_embeddings.to("cpu").detach().tolist()
+            df_splits.append(df_split)
+
+        df_splits = pd.concat(df_splits)
+        llm_df = llm_df.merge(df_splits, on=["source_id", "target_id"])[
+            ["source_embedding", "target_embedding"]
+        ]
+
+        return llm_df
 
     def validate_model(self, data, batch_size=64):
         # Define the validation seed edges:

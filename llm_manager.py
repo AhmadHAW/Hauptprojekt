@@ -1,14 +1,16 @@
 import random as rd
-from typing import Optional, Union, Dict, Tuple, List, Callable
+from typing import Optional, Union, Dict, Tuple, List, Callable, Set
 from abc import ABC, abstractmethod
 import os
 import json
 from pathlib import Path
+import time
 
 import torch
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 import datasets
+from datasets import DatasetDict
 import numpy as np
 import pandas as pd
 import evaluate
@@ -31,19 +33,23 @@ from transformers.utils import is_datasets_available
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 import matplotlib.pyplot as plt
 from utils import (
-    find_non_existing_source_target,
-    mean_over_ranges,
+    mean_over_attention_ranges,
+    mean_over_attention_ranges_python_slow,
+    mean_over_hidden_states_python_slow,
+    mean_over_hidden_states,
+    replace_ranges,
+    get_combinations,
+    find_non_existing_source_targets,
     row_to_vanilla_datapoint,
     row_to_prompt_datapoint,
     row_to_input_embeds_replace_datapoint,
-    replace_ranges,
 )
 
 ID2LABEL = {0: "FALSE", 1: "TRUE"}
 LABEL2ID = {"FALSE": 0, "TRUE": 1}
 
-SPLIT_EPOCH_ENDING = f"/split_{{}}_epoch_{{}}_pos_{{}}.npy"
-TOKENS_ENDING = f"/tokens_{{}}_{{}}.csv"
+SPLIT_EPOCH_ENDING = f"/split_{{}}_pos_{{}}_com_{{}}.npy"
+TOKENS_ENDING = "/tokens.csv"
 
 MODEL_NAME = "google/bert_uncased_L-2_H-128_A-2"
 ALL_SEMANTIC_TOKENS = ["cls", "user", "sep1", "title", "sep2", "genres", "sep3"]
@@ -140,33 +146,41 @@ class DataCollatorBase(DataCollatorForLanguageModeling, ABC):
     in existing edges are replaced with non-existing edges.
     """
 
-    def __init__(self, tokenizer, df, source_df, target_df, false_ratio=1.0):
+    def __init__(
+        self, tokenizer, df, source_df, target_df, device="cpu", false_ratio=0.5
+    ):
         super().__init__(tokenizer=tokenizer, mlm=False)
         self.false_ratio = false_ratio
         self.tokenizer = tokenizer
-        self.df = df
+        self.source_ids, self.target_ids, self.edges = self.__df_to_nodes(df)
         self.source_df = source_df
         self.target_df = target_df
+        self.device = device
+
+    def __df_to_nodes(
+        self, df: pd.DataFrame
+    ) -> Tuple[List[int], List[int], Set[Tuple[int, int]]]:
+        source_ids: List[int] = list(df["source_id"].unique())
+        target_ids: List[int] = list(df["target_id"].unique())
+        edges: Set[Tuple[int, int]] = set(
+            df[["source_id", "target_id"]].itertuples(index=False, name=None)
+        )
+        return source_ids, target_ids, edges
 
     def __call__(self, features):
-        new_features = []
-        for feature in features:
-            # Every datapoint has a chance to be replaced by a negative datapoint, based on the false_ratio.
-            # The _transform_to_false_exmample methods have to be implemented by the inheriting class.
-            # For the prompt classifier, every new datapoint also contains embeddings of the nodes.
-            # If the false ratio is -1 this step will be skipped (for validation)
-            if self.false_ratio != -1 and rd.uniform(0, 1) >= (
-                1 / (self.false_ratio + 1)
-            ):
-                new_feature = self._transform_to_false_example()
-                new_features.append(new_feature)
-            else:
-                new_features.append(feature)
+        if self.false_ratio != -1:
+            total_features = len(features)
+            new_feature_amount = int(self.false_ratio * total_features)
+            with torch.no_grad():
+                new_features = self._generate_false_examples(k=new_feature_amount)
+            chosen_indices = rd.choices(range(total_features), k=new_feature_amount)
+            for chosen_index, feature in zip(chosen_indices, new_features):
+                features[chosen_index] = feature
         # Convert features into batches
-        return self._convert_features_into_batches(new_features)
+        return self._convert_features_into_batches(features)
 
     @abstractmethod
-    def _transform_to_false_example(self) -> Dict:
+    def _generate_false_examples(self, k: int) -> Dict:
         pass
 
     @abstractmethod
@@ -175,17 +189,25 @@ class DataCollatorBase(DataCollatorForLanguageModeling, ABC):
 
 
 class TextBasedDataCollator(DataCollatorBase, ABC):
-    def __init__(self, tokenizer, df, source_df, target_df, false_ratio=1.0):
+    def __init__(self, tokenizer, df, source_df, target_df, false_ratio=0.5):
         super().__init__(tokenizer, df, source_df, target_df, false_ratio=false_ratio)
 
     def _convert_features_into_batches(self, features: List[Dict]) -> Dict:
-        input_ids = torch.tensor([f["input_ids"] for f in features], dtype=torch.long)
-        attention_mask = torch.tensor(
-            [f["attention_mask"] for f in features], dtype=torch.long
-        )
-        labels = torch.tensor([f["labels"] for f in features], dtype=torch.long)
+        input_ids = []
+        attention_mask = []
+        labels = []
+        semantic_positional_encoding = []
+
+        for f in features:
+            input_ids.append(f["input_ids"])
+            attention_mask.append(f["attention_mask"])
+            labels.append(f["labels"])
+            semantic_positional_encoding.append(f["semantic_positional_encoding"])
+        input_ids = torch.tensor(input_ids, dtype=torch.long)
+        attention_mask = torch.tensor(attention_mask, dtype=torch.long)
+        labels = torch.tensor(labels, dtype=torch.long)
         semantic_positional_encoding = torch.tensor(
-            [f["semantic_positional_encoding"] for f in features], dtype=torch.long
+            semantic_positional_encoding, dtype=torch.long
         )
         return {
             "input_ids": input_ids,
@@ -204,30 +226,40 @@ class EmbeddingBasedDataCollator(DataCollatorBase):
         source_df,
         target_df,
         data,
-        get_embedding_cb,
-        false_ratio=1.0,
+        get_embeddings_cb,
+        false_ratio=0.5,
     ):
-        super().__init__(tokenizer, df, source_df, target_df, false_ratio=false_ratio)
+        super().__init__(
+            tokenizer, df, source_df, target_df, false_ratio=false_ratio, device=device
+        )
         self.data = data
-        self.get_embedding_cb = get_embedding_cb
+        self.get_embeddings_cb = get_embeddings_cb
 
     def _convert_features_into_batches(self, features: List[Dict]) -> Dict:
-        input_ids = torch.tensor([f["input_ids"] for f in features], dtype=torch.long)
-        attention_mask = torch.tensor(
-            [f["attention_mask"] for f in features], dtype=torch.long
-        )
-        labels = torch.tensor([f["labels"] for f in features], dtype=torch.long)
-        semantic_positional_encoding = torch.tensor(
-            [f["semantic_positional_encoding"] for f in features], dtype=torch.long
-        )
+        input_ids = []
+        attention_mask = []
+        labels = []
+        semantic_positional_encoding = []
+        source_ids = []
+        target_ids = []
         for f in features:
-            if isinstance(f["graph_embeddings"], list):
-                f["graph_embeddings"] = torch.tensor(f["graph_embeddings"])
-            else:
-                f["graph_embeddings"] = f["graph_embeddings"]
-        graph_embeddings = torch.stack(
-            [f["graph_embeddings"].detach().to("cpu") for f in features]
+            input_ids.append(f["input_ids"])
+            attention_mask.append(f["attention_mask"])
+            labels.append(f["labels"])
+            semantic_positional_encoding.append(f["semantic_positional_encoding"])
+            source_ids.append(f["source_id"])
+            target_ids.append(f["target_id"])
+        input_ids = torch.tensor(input_ids, dtype=torch.long)
+        attention_mask = torch.tensor(attention_mask, dtype=torch.long)
+        labels = torch.tensor(labels, dtype=torch.long)
+        semantic_positional_encoding = torch.tensor(
+            semantic_positional_encoding, dtype=torch.long
         )
+        source_embeddings, target_embeddings = self.get_embeddings_cb(
+            self.data, source_ids, target_ids
+        )
+        graph_embeddings = torch.stack([source_embeddings, target_embeddings], dim=1)
+        del source_embeddings, target_embeddings
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
@@ -236,53 +268,62 @@ class EmbeddingBasedDataCollator(DataCollatorBase):
             "semantic_positional_encoding": semantic_positional_encoding,
         }
 
-    def _transform_to_false_example(self) -> Dict:
-        label = 0
-        source_id, target_id = find_non_existing_source_target(self.df)
-
-        random_source: pd.DataFrame = (
-            self.source_df[self.source_df["id"] == source_id]
-            .sample(1)
-            .rename(columns={"id": "source_id"})
+    def _generate_false_examples(self, k: int) -> List[Dict]:
+        node_pairs = find_non_existing_source_targets(
+            self.edges, self.source_ids, self.target_ids, k=k
+        )
+        df = pd.DataFrame(
+            {"source_id": node_pairs[:, 0], "target_id": node_pairs[:, 1]}
+        )
+        df = (
+            df.merge(self.source_df, left_on="source_id", right_on="id")
+            .reset_index(drop=True)
+            .merge(self.target_df, left_on="target_id", right_on="id")
             .reset_index(drop=True)
         )
-        random_target: pd.DataFrame = (
-            self.target_df[self.target_df["id"] == target_id]
-            .sample(1)
-            .rename(columns={"id": "target_id"})
-            .reset_index(drop=True)
+        df["prompt"] = df.apply(
+            lambda row: row_to_input_embeds_replace_datapoint(
+                row, self.tokenizer.sep_token, self.tokenizer.pad_token
+            ),
+            axis=1,
         )
-        random_row = pd.concat([random_source, random_target], axis=1).iloc[0]
-
-        source_embedding, target_embedding = self.get_embedding_cb(
-            self.data, source_id, target_id
-        )
-        random_row["prompt"] = row_to_input_embeds_replace_datapoint(
-            random_row, self.tokenizer.sep_token, self.tokenizer.pad_token
-        )
-        tokenized = self.tokenizer(
-            random_row["prompt"], padding="max_length", truncation=True
-        )
+        prompts = df["prompt"].tolist()
+        del df
+        tokenized = self.tokenizer(prompts, padding="max_length", truncation=True)
+        del prompts
         sep_token_id = self.tokenizer.sep_token_id
         assert sep_token_id
+        input_ids = torch.tensor(tokenized["input_ids"])
         semantic_positional_encoding = get_semantic_positional_encoding(
-            torch.tensor(tokenized["input_ids"]).unsqueeze(0),
+            input_ids,
             sep_token_id,
         )
-        semantic_positional_encoding = (
-            sort_ranges(semantic_positional_encoding)
-            .squeeze(0)
-            .to("cpu")
-            .detach()
-            .tolist()
-        )
-        return {
-            "input_ids": tokenized["input_ids"],
-            "attention_mask": tokenized["attention_mask"],
-            "labels": label,
-            "graph_embeddings": torch.stack([source_embedding, target_embedding]),
-            "semantic_positional_encoding": semantic_positional_encoding,
-        }
+        semantic_positional_encoding = sort_ranges(semantic_positional_encoding)
+        input_ids = tokenized["input_ids"]
+        attention_mask = tokenized["attention_mask"]
+        # source_embeddings, target_embeddings = self.get_embeddings_cb(
+        #     self.data, node_pairs[:, 0].tolist(), node_pairs[:, 1].tolist()
+        # )
+        # graph_embeddings = torch.stack([source_embeddings, target_embeddings], dim=1)
+        result_dict = [
+            {
+                "input_ids": input_ids_,
+                "attention_mask": attention_mask_,
+                "labels": 0,
+                "semantic_positional_encoding": semantic_positional_encoding_.to("cpu")
+                .detach()
+                .tolist(),
+                "source_id": node_pair[0],
+                "target_id": node_pair[1],
+            }
+            for semantic_positional_encoding_, input_ids_, attention_mask_, node_pair in zip(
+                semantic_positional_encoding,
+                input_ids,
+                attention_mask,
+                node_pairs,
+            )
+        ]
+        return result_dict
 
 
 class PromptEmbeddingDataCollator(TextBasedDataCollator):
@@ -297,16 +338,68 @@ class PromptEmbeddingDataCollator(TextBasedDataCollator):
         source_df,
         target_df,
         data,
-        get_embedding_cb,
-        false_ratio=1.0,
+        get_embeddings_cb,
+        false_ratio=0.5,
     ):
         super().__init__(tokenizer, df, source_df, target_df, false_ratio=false_ratio)
         self.data = data
-        self.get_embedding_cb = get_embedding_cb
+        self.get_embeddings_cb = get_embeddings_cb
+
+    def _generate_false_examples(self, k: int) -> List[Dict]:
+        node_pairs = find_non_existing_source_targets(
+            self.edges, self.source_ids, self.target_ids, k=k
+        )
+        df = pd.DataFrame(
+            {"source_id": node_pairs[:, 0], "target_id": node_pairs[:, 1]}
+        )
+        df = (
+            df.merge(self.source_df, left_on="source_id", right_on="id")
+            .reset_index(drop=True)
+            .merge(self.target_df, left_on="target_id", right_on="id")
+            .reset_index(drop=True)
+        )
+        source_embeddings, target_embeddings = self.get_embeddings_cb(
+            self.data, node_pairs[:, 0].tolist(), node_pairs[:, 1].tolist()
+        )
+        df["prompt_source_embedding"] = source_embeddings.to("cpu").detach().tolist()
+        df["prompt_target_embedding"] = target_embeddings.to("cpu").detach().tolist()
+
+        df["prompt"] = df.apply(
+            lambda row: row_to_prompt_datapoint(row, self.tokenizer.sep_token),
+            axis=1,
+        )
+        prompts = df["prompt"].tolist()
+        tokenized = self.tokenizer(prompts, padding="max_length", truncation=True)
+        sep_token_id = self.tokenizer.sep_token_id
+        assert sep_token_id
+        input_ids = torch.tensor(tokenized["input_ids"])
+        semantic_positional_encoding = get_semantic_positional_encoding(
+            input_ids,
+            sep_token_id,
+        )
+        semantic_positional_encoding = sort_ranges(semantic_positional_encoding)
+        input_ids = tokenized["input_ids"]
+        attention_mask = tokenized["attention_mask"]
+        result_dict = [
+            {
+                "input_ids": input_ids_,
+                "attention_mask": attention_mask_,
+                "labels": 0,
+                "semantic_positional_encoding": semantic_positional_encoding_.to("cpu")
+                .detach()
+                .tolist(),
+            }
+            for semantic_positional_encoding_, input_ids_, attention_mask_ in zip(
+                semantic_positional_encoding,
+                input_ids,
+                attention_mask,
+            )
+        ]
+        return result_dict
 
     def _transform_to_false_example(self) -> Dict:
         label = 0
-        source_id, target_id = find_non_existing_source_target(self.df)
+        source_id, target_id = find_non_existing_source_targets(self.df)
 
         random_source: pd.DataFrame = (
             self.source_df[self.source_df["id"] == source_id]
@@ -321,7 +414,7 @@ class PromptEmbeddingDataCollator(TextBasedDataCollator):
             .reset_index(drop=True)
         )
         random_row = pd.concat([random_source, random_target], axis=1).iloc[0]
-        source_embedding, target_embedding = self.get_embedding_cb(
+        source_embedding, target_embedding = self.get_embeddings_cb(
             self.data, source_id, target_id
         )
         random_row["prompt_source_embedding"] = source_embedding.detach().to("cpu")
@@ -355,12 +448,59 @@ class VanillaEmbeddingDataCollator(TextBasedDataCollator):
     The vanilla data collator does only generate false edges without KGEs.
     """
 
-    def __init__(self, tokenizer, df, source_df, target_df, false_ratio=1.0):
+    def __init__(self, tokenizer, df, source_df, target_df, false_ratio=0.5):
         super().__init__(tokenizer, df, source_df, target_df, false_ratio=false_ratio)
+
+    def _generate_false_examples(self, k: int) -> List[Dict]:
+        node_pairs = find_non_existing_source_targets(
+            self.edges, self.source_ids, self.target_ids, k=k
+        )
+        df = pd.DataFrame(
+            {"source_id": node_pairs[:, 0], "target_id": node_pairs[:, 1]}
+        )
+        df = (
+            df.merge(self.source_df, left_on="source_id", right_on="id")
+            .reset_index(drop=True)
+            .merge(self.target_df, left_on="target_id", right_on="id")
+            .reset_index(drop=True)
+        )
+        df["prompt"] = df.apply(
+            lambda row: row_to_vanilla_datapoint(row, self.tokenizer.sep_token), axis=1
+        )
+        prompts = df["prompt"].tolist()
+        tokenized = self.tokenizer(prompts, padding="max_length", truncation=True)
+        sep_token_id = self.tokenizer.sep_token_id
+        assert sep_token_id
+        input_ids = torch.tensor(tokenized["input_ids"])
+        semantic_positional_encoding = get_semantic_positional_encoding(
+            input_ids,
+            sep_token_id,
+        )
+        semantic_positional_encoding = sort_ranges(semantic_positional_encoding)
+        input_ids = tokenized["input_ids"]
+        attention_mask = tokenized["attention_mask"]
+        result_dict = [
+            {
+                "input_ids": input_ids_,
+                "attention_mask": attention_mask_,
+                "labels": 0,
+                "semantic_positional_encoding": semantic_positional_encoding_.to("cpu")
+                .detach()
+                .tolist(),
+            }
+            for semantic_positional_encoding_, input_ids_, attention_mask_ in zip(
+                semantic_positional_encoding, input_ids, attention_mask
+            )
+        ]
+        return result_dict
 
     def _transform_to_false_example(self) -> Dict:
         label = 0
-        source_id, target_id = find_non_existing_source_target(self.df)
+        edge = find_non_existing_source_targets(
+            self.edges, self.source_ids, self.target_ids
+        )
+        source_id = edge[0, 0].item()
+        target_id = edge[0, 1].item()
         random_source: pd.DataFrame = (
             self.source_df[self.source_df["id"] == source_id]
             .sample(1)
@@ -421,7 +561,9 @@ class CustomTrainer(Trainer):
 
         Args:
             eval_dataset (`str` or `torch.utils.data.Dataset`, *optional*):
-                If a `str`, will use `self.val_dataset[eval_dataset]` as the evaluation dataset. If a `Dataset`, will override `self.val_dataset` and must implement `__len__`. If it is a [`~datasets.Dataset`], columns not accepted by the `model.forward()` method are automatically removed.
+                If a `str`, will use `self.val_dataset[eval_dataset]` as the evaluation dataset.
+                If a `Dataset`, will override `self.val_dataset` and must implement `__len__`. If it is a [`~datasets.Dataset`],
+                columns not accepted by the `model.forward()` method are automatically removed.
         """
         if eval_dataset is None and self.eval_dataset is None:
             raise ValueError("Trainer: evaluation requires an eval_dataset.")
@@ -475,7 +617,6 @@ class CustomTrainer(Trainer):
                 self._eval_dataloaders[dataloader_key] = eval_dataloader
             else:
                 self._eval_dataloaders = {dataloader_key: eval_dataloader}
-
         return self.accelerator.prepare(eval_dataloader)
 
 
@@ -639,14 +780,13 @@ class InputEmbedsReplaceBertEmbeddings(BertEmbeddings):
                 and graph_embeddings is not None
                 and inputs_embeds is not None
             ):
-                mask = (
-                    semantic_positional_encoding[:, [-4, -2], 0]
-                    .unsqueeze(-1)
-                    .repeat((1, 1, inputs_embeds.shape[-1]))
-                )
-                inputs_embeds = inputs_embeds.scatter(
-                    1, mask, graph_embeddings
-                )  # replace the input embeds at the place holder positions with the KGEs.
+                batch_indices = torch.arange(len(inputs_embeds)).unsqueeze(1)
+                inputs_embeds[
+                    batch_indices, semantic_positional_encoding[:, [-4, -2], 0]
+                ] = graph_embeddings  # replace the input embeds at the place holder positions with the KGEs.
+                # inputs_embeds = inputs_embeds.scatter(
+                #     1, mask, graph_embeddings
+                # )
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
         embeddings = inputs_embeds + token_type_embeddings
@@ -726,6 +866,11 @@ class InputEmbedsReplaceBertForSequenceClassification(BertForSequenceClassificat
         return_dict: Optional[bool] = None,
         graph_embeddings: Optional[torch.Tensor] = None,
         semantic_positional_encoding: Optional[torch.Tensor] = None,
+        source_id: Optional[torch.LongTensor] = None,
+        target_id: Optional[
+            torch.LongTensor
+        ] = None,  # we don't need source and target ids here anymore but only so that the collator picks them up on the way
+        # and we can transform them to graph embeddings.
     ) -> Union[Tuple[torch.Tensor], SequenceClassifierOutputOverRanges]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
@@ -741,7 +886,7 @@ class InputEmbedsReplaceBertForSequenceClassification(BertForSequenceClassificat
                 input_ids,
                 semantic_positional_encoding=semantic_positional_encoding,
                 graph_embeddings=graph_embeddings,
-            )  # we take the input embeds and later replace the positions where the padding tokens where placed as placeholder with the graph embeddings.
+            )  # we replaced the placeholder padding tokens in the embedding generation with the KGEs
             assert isinstance(inputs_embeds, torch.Tensor)
         outputs = self.bert(
             attention_mask=attention_mask,
@@ -1013,42 +1158,17 @@ class ClassifierBase(ABC):
         plt.legend()
         plt.show()
 
-    def _avg_over_hidden_states(
-        self,
-        all_semantic_positional_encoding: torch.Tensor,
-        last_hidden_states: torch.Tensor,
-    ):
-        averaged_hidden_states = []
-        for position in range(all_semantic_positional_encoding.shape[1]):
-            semantic_positional_encoding = all_semantic_positional_encoding[:, position]
-            starts = semantic_positional_encoding[:, 0]
-            ends = semantic_positional_encoding[:, 1]
-            averaged_hidden_state = mean_over_ranges(last_hidden_states, starts, ends)
-            averaged_hidden_states.append(averaged_hidden_state)
-        return torch.stack(averaged_hidden_states)
-
     def _means_over_ranges_cross(
         self,
         all_semantic_positional_encoding: torch.Tensor,
-        all_attentions: torch.Tensor,
+        attentions: torch.Tensor,
     ) -> torch.Tensor:
-        all_attentios_avgs = torch.zeros(
-            all_semantic_positional_encoding.shape[0],
-            all_semantic_positional_encoding.shape[1],
-            all_semantic_positional_encoding.shape[1],
-            all_attentions.shape[-1],
+        attentions = mean_over_attention_ranges(
+            attentions,
+            all_semantic_positional_encoding[:, :, 0],
+            all_semantic_positional_encoding[:, :, 1],
         )
-        for batch, (batch_range, batch_attention) in enumerate(
-            zip(all_semantic_positional_encoding, all_attentions)
-        ):
-            for from_, delimiter_from in enumerate(batch_range):
-                for to_, delimiter_to in enumerate(batch_range):
-                    batch_attention_sliced = batch_attention[
-                        delimiter_from[0] : delimiter_from[1]
-                    ][:, delimiter_to[0] : delimiter_to[1]]
-                    attention_avg = torch.mean(batch_attention_sliced, dim=(0, 1))
-                    all_attentios_avgs[batch, from_, to_] = attention_avg
-        return all_attentios_avgs
+        return attentions
 
     def forward_dataset_and_save_outputs(
         self,
@@ -1056,23 +1176,22 @@ class ClassifierBase(ABC):
         get_tokens_as_df_cb: Callable,
         splits: List[str] = ["train", "test", "val"],
         batch_size: int = 64,
-        epochs: int = 1,
+        save_step_size: int = 1,
         load_fields: List[str] = ["attentions", "hidden_states", "logits"],
-        hidden_state_position: Optional[int] = None,
-        include_graph_embeddings=True,
+        is_test: bool = False,
         force_recompute: bool = False,
-    ):
+    ) -> None:
         add_hidden_states = "hidden_states" in load_fields
 
         add_attentions = "attentions" in load_fields
         add_logits = "logits" in load_fields
-        num_positions = len(dataset["train"][0]["semantic_positional_encoding"]) + 2
-        num_positions += 1 if include_graph_embeddings else 0
         hidden_states_exist = True
-        if hidden_state_position is not None:
-            assert add_hidden_states
-            hidden_states_exist = hidden_states_exist and os.path.exists(
-                self.hidden_states_path.format(hidden_state_position)
+        if is_test:
+            dataset = DatasetDict(
+                {
+                    split: dataset.select(range(batch_size * 2))
+                    for split, dataset in dataset.items()
+                }
             )
         if (
             force_recompute
@@ -1086,25 +1205,56 @@ class ClassifierBase(ABC):
             Path(self.sub_logits_dir_path).mkdir(parents=True, exist_ok=True)
             Path(self.sub_hidden_states_dir_path).mkdir(parents=True, exist_ok=True)
             Path(self.sub_tokens_dir_path).mkdir(parents=True, exist_ok=True)
+            semantic_positional_encodings = {
+                "cls": [0],
+                "user_id": [1],
+                "movie_id": [3],
+                "title": [5],
+                "genres": [7],
+                "seps": [2, 4, 6, 8],
+            }
+            sep_list = ["cls", "user_id", "movie_id", "title", "genres", "seps"]
+            if len(dataset[splits[0]][0]["semantic_positional_encoding"]) > 9:
+                semantic_positional_encodings["seps"].extend([10, 12])
+                semantic_positional_encodings["kges"] = [9, 11]
+                sep_list.append("seps")
+            tokens_collected = False
+            all_tokens = []
+            all_logits = []
+            key_combinations = get_combinations(sep_list)
             with torch.no_grad():
                 for split in splits:
                     data_collator = self._get_data_collator(split)
-                    for epoch in range(epochs):
-                        all_hidden_states = [[] for x in range(num_positions + 1)]
-                        all_attentions = [[] for x in range(num_positions + 1)]
-                        all_tokens = []
-                        all_logits = [[] for x in range(num_positions + 1)]
-
-                        print(f"{split} Forward Epoch {epoch + 1} from {epochs}")
-                        data_loader = DataLoader(
-                            dataset=dataset[split],  # type: ignore
-                            batch_size=batch_size,
-                            collate_fn=data_collator,
-                        )
+                    data_loader = DataLoader(
+                        dataset=dataset[split],  # type: ignore
+                        batch_size=batch_size,
+                        collate_fn=data_collator,
+                    )
+                    for combination in key_combinations:
+                        combination_string = str(list(combination))
+                        if len(combination) == 0:
+                            print(
+                                "forwarding without masking",
+                                self.sub_attentions_path.format(
+                                    split, 0, combination_string
+                                ),
+                            )
+                        logits_of_combination = []
+                        attentions_collected = []
+                        hidden_states_collected = []
+                        all_logits.append(logits_of_combination)
                         for idx, batch in enumerate(data_loader):
+                            print(f"batch {idx}, combination {combination_string}")
+                            # idx = 0
                             # if True:
-                            #    batch = next(iter(data_loader))
+                            batch = next(iter(data_loader))
                             splits_ = [split] * len(batch["input_ids"])
+                            for key in combination:
+                                for pos in semantic_positional_encodings[key]:
+                                    batch["attention_mask"] = replace_ranges(
+                                        batch["attention_mask"],
+                                        batch["semantic_positional_encoding"][:, pos],
+                                    )
                             outputs = self.model(
                                 **batch,
                                 output_hidden_states=add_hidden_states,
@@ -1119,292 +1269,98 @@ class ClassifierBase(ABC):
                                     torch.sum(layer, dim=1) for layer in attentions
                                 ]
                                 attentions = torch.stack(attentions).permute(1, 2, 3, 0)
-                                attentions = self._means_over_ranges_cross(
-                                    semantic_positional_encoding, attentions
+                                if is_test:
+                                    attentions_test = (
+                                        mean_over_attention_ranges_python_slow(
+                                            attentions,
+                                            semantic_positional_encoding[:, :, 0],
+                                            semantic_positional_encoding[:, :, 1],
+                                        )
+                                    )
+                                attentions = mean_over_attention_ranges(
+                                    attentions,
+                                    semantic_positional_encoding[:, :, 0],
+                                    semantic_positional_encoding[:, :, 1],
                                 )
-                                all_attentions[0].append(attentions.numpy())
-                                del attentions
+                                if not is_test:
+                                    attentions_collected.append(attentions)
+                                    if (idx + 1) % save_step_size == 0:
+                                        np.save(
+                                            self.sub_attentions_path.format(
+                                                split,
+                                                (idx + 1) / save_step_size,
+                                                combination_string,
+                                            ),
+                                            np.concatenate(attentions_collected),
+                                        )
+                                        attentions_collected = []
+                                else:
+                                    assert torch.allclose(
+                                        attentions_test, attentions, atol=1e-8
+                                    ), f"Expected attentions to be same, but are not: {attentions[0,7,7,0]}, {attentions_test[0,7,7,0]}"
                             if add_logits:
                                 logits = outputs.logits
-                                predictions = [np.argmax(all_logits, axis=1).tolist()]
-                                all_logits[0].append(logits.numpy())
+                                logits_of_combination.append(logits.numpy())
                                 del logits
                             if add_hidden_states:
-                                if (
-                                    hidden_state_position is None
-                                    or hidden_state_position == 0
-                                ):
-                                    hidden_states_on_each_layer = []
-                                    for hidden_states in outputs.hidden_states:
-                                        hidden_states_on_layer = (
-                                            self._avg_over_hidden_states(
-                                                semantic_positional_encoding,
-                                                hidden_states,
-                                            )
-                                        )
-                                        hidden_states_on_each_layer.append(
-                                            hidden_states_on_layer.numpy()
-                                        )
-                                        del hidden_states
-                                    hidden_states_on_each_layer = np.stack(
-                                        hidden_states_on_each_layer
-                                    )
-                                    all_hidden_states[0].append(
-                                        hidden_states_on_each_layer.transpose(
-                                            2, 0, 1, 3
-                                        )
-                                    )
-                            tokens = get_tokens_as_df_cb(
-                                batch["input_ids"],
-                                self.tokenizer,
-                                semantic_positional_encoding,
-                            )
-                            tokens["labels"] = batch["labels"].tolist()
-                            tokens["split"] = splits_
-                            all_tokens.append(tokens)
-
-                            all_positions = [
-                                [pos]
-                                for pos in range(len(semantic_positional_encoding[0]))
-                            ]
-                            all_positions.extend([[1, 3, 5, 7], [2, 4, 6, 8]])
-                            if include_graph_embeddings:
-                                all_positions[-1].extend([10, 12])
-                                all_positions.append([9, 11])
-
-                            for pos, positions in enumerate(all_positions):
-                                masked_input_ids = replace_ranges(
-                                    batch["input_ids"],
-                                    batch["attention_mask"],
-                                    semantic_positional_encoding[:, positions],
-                                    self.tokenizer.mask_token_id,
+                                hidden_states = torch.stack(
+                                    outputs.hidden_states, dim=1
                                 )
-
-                                batch["input_ids"] = masked_input_ids
-                                if isinstance(
-                                    self.model,
-                                    InputEmbedsReplaceBertForSequenceClassification,
-                                ):
-                                    skip_replacing_source_embedding = (
-                                        len(semantic_positional_encoding[0]) - 4
-                                        in positions
-                                    )
-                                    skip_replacing_target_embedding = (
-                                        len(semantic_positional_encoding[0]) - 2
-                                        in positions
-                                    )
-                                    outputs_masked = self.model(
-                                        **batch,
-                                        output_hidden_states=add_hidden_states,
-                                        output_attentions=add_attentions,
-                                        skip_replacing_source_embedding=skip_replacing_source_embedding,
-                                        skip_replacing_target_embedding=skip_replacing_target_embedding,
-                                    )
-                                else:
-                                    outputs_masked = self.model(
-                                        **batch,
-                                        output_hidden_states=add_hidden_states,
-                                        output_attentions=add_attentions,
-                                    )
-                                if add_attentions:
-                                    attentions = outputs_masked.attentions
-                                    attentions = [
-                                        torch.sum(layer, dim=1) for layer in attentions
-                                    ]
-                                    attentions = torch.stack(attentions).permute(
-                                        1, 2, 3, 0
-                                    )
-                                    attentions = self._means_over_ranges_cross(
-                                        semantic_positional_encoding, attentions
-                                    )
-                                    all_attentions[pos + 1].append(attentions.numpy())
-                                    del attentions
-                                if add_logits:
-                                    logits = outputs_masked.logits
-                                    predictions.append(
-                                        np.argmax(all_logits, axis=1).tolist()
-                                    )
-                                    all_logits[pos + 1].append(logits.numpy())
-                                    del logits
-                                if add_hidden_states and (
-                                    hidden_state_position is None
-                                    or pos == hidden_state_position
-                                ):
-                                    hidden_states_on_each_layer = []
-                                    for hidden_states in outputs_masked.hidden_states:
-                                        hidden_states_on_layer = (
-                                            self._avg_over_hidden_states(
-                                                semantic_positional_encoding,
-                                                hidden_states,
-                                            )
-                                        )
-                                        hidden_states_on_each_layer.append(
-                                            hidden_states_on_layer.numpy()
-                                        )
-                                        del hidden_states
-                                    hidden_states_on_each_layer = np.stack(
-                                        hidden_states_on_each_layer
-                                    )
-                                    all_hidden_states[pos + 1].append(
-                                        hidden_states_on_each_layer.transpose(
-                                            2, 0, 1, 3
+                                if is_test:
+                                    test_hidden_states = (
+                                        mean_over_hidden_states_python_slow(
+                                            hidden_states,
+                                            semantic_positional_encoding[:, :, 0],
+                                            semantic_positional_encoding[:, :, 1],
                                         )
                                     )
-                            if add_logits:
-                                tokens["predictions"] = predictions
-
-                        # Concatenate all hidden states across batches
-                        all_tokens = pd.concat(all_tokens).reset_index(drop=True)
-                        all_tokens.to_csv(
-                            self.sub_tokens_path.format(split, epoch),
-                            index=False,
-                        )
-                        del all_tokens
-                        if add_attentions:
-                            for pos, pos_attentions in enumerate(all_attentions):
-                                attentions = np.concatenate(pos_attentions)
-                                np.save(
-                                    self.sub_attentions_path.format(split, epoch, pos),
-                                    attentions,
+                                hidden_states = mean_over_hidden_states(
+                                    hidden_states,
+                                    semantic_positional_encoding[:, :, 0],
+                                    semantic_positional_encoding[:, :, 1],
                                 )
-                            del all_attentions
-
-                        if add_logits:
-                            for pos, pos_logits in enumerate(all_logits):
-                                logits = np.concatenate(pos_logits)
-                                np.save(
-                                    self.sub_logits_path.format(split, epoch, pos),
-                                    logits,
-                                )
-                            del all_logits
-                        if add_hidden_states:
-                            for pos, pos_hidden_states in enumerate(all_hidden_states):
-                                if (
-                                    hidden_state_position is None
-                                    or pos == hidden_state_position
-                                ):
-                                    hidden_states = np.concatenate(pos_hidden_states)
-                                    np.save(
-                                        self.sub_hidden_states_path.format(
-                                            split, epoch, pos
-                                        ),
-                                        hidden_states,
-                                    )
-                            del all_hidden_states
-
-                # all_tokens
-                all_tokens = []
-                for split in splits:
-                    for epoch in range(epochs):
-                        all_tokens.append(
-                            pd.read_csv(self.sub_tokens_path.format(split, epoch))
-                        )
-                all_tokens = pd.concat(all_tokens).reset_index(drop=True)
-                all_tokens.to_csv(self.tokens_path, index=False)
-
-                # hidden states:
-                if add_hidden_states:
-                    all_hidden_states = []
-                    for pos, pos_hidden_states in enumerate(
-                        [[] for x in range(num_positions + 1)]
-                    ):
-                        if (
-                            hidden_state_position is None
-                            or pos == hidden_state_position
-                        ):
-                            for split in splits:
-                                for epoch in range(epochs):
-                                    pos_hidden_states.append(
-                                        np.load(
+                                if not is_test:
+                                    hidden_states_collected.append(hidden_states)
+                                    if (idx + 1) % save_step_size == 0:
+                                        np.save(
                                             self.sub_hidden_states_path.format(
-                                                split, epoch, pos
-                                            )
+                                                split,
+                                                (idx + 1) / save_step_size,
+                                                combination_string,
+                                            ),
+                                            np.concatenate(hidden_states_collected),
                                         )
-                                    )
-                            pos_hidden_states = np.concatenate(pos_hidden_states)
-                            all_hidden_states.append(pos_hidden_states)
-                    all_hidden_states = np.stack(all_hidden_states).transpose(
-                        1, 0, 2, 3, 4
-                    )
-                    np.save(self.hidden_states_path.format(), all_hidden_states)
-                    all_tokens["hidden_states"] = list(all_hidden_states)
-                    del all_hidden_states
-
-                # attentions:
-                if add_attentions:
-                    all_attentions = []
-                    for pos, pos_attentions in enumerate(
-                        [[] for x in range(num_positions + 1)]
-                    ):
-                        for split in splits:
-                            for epoch in range(epochs):
-                                pos_attentions.append(
-                                    np.load(
-                                        self.sub_attentions_path.format(
-                                            split, epoch, pos
-                                        )
-                                    )
+                                        hidden_states_collected = []
+                                else:
+                                    assert torch.allclose(
+                                        test_hidden_states, hidden_states, atol=1e-8
+                                    ), f"Expected hidden states to be same, but are not: {hidden_states[0,0,7,:7]}, {test_hidden_states[0,0,7,:7]}"
+                            if not tokens_collected:
+                                tokens = get_tokens_as_df_cb(
+                                    batch["input_ids"],
+                                    self.tokenizer,
+                                    semantic_positional_encoding,
                                 )
-                        pos_attentions = np.concatenate(pos_attentions)
-                        all_attentions.append(pos_attentions)
-                    all_attentions = np.stack(all_attentions).transpose(1, 0, 2, 3, 4)
-                    np.save(self.attentions_path, all_attentions)
-                    all_tokens["attentions"] = list(all_attentions)
-                # attentions:
-                if add_logits:
-                    all_logits = []
-                    for pos, pos_logits in enumerate(
-                        [[] for x in range(num_positions + 1)]
-                    ):
-                        if (
-                            hidden_state_position is None
-                            or pos == hidden_state_position
-                        ):
-                            for split in splits:
-                                for epoch in range(epochs):
-                                    pos_logits.append(
-                                        np.load(
-                                            self.sub_logits_path.format(
-                                                split, epoch, pos
-                                            )
-                                        )
-                                    )
-                            pos_logits = np.concatenate(pos_logits)
-                            all_logits.append(pos_logits)
-                    all_logits = np.stack(all_logits).transpose(1, 0, 2)
-                    np.save(self.logits_path, all_logits)
-                    all_tokens["logits"] = list(all_logits)
-
-        else:
-            all_tokens = pd.read_csv(self.tokens_path)
-            if add_hidden_states:
-                all_hidden_states = []
-                for pos, pos_attentions in enumerate(
-                    [[] for x in range(num_positions + 1)]
-                ):
-                    if hidden_state_position is None or pos == hidden_state_position:
-                        all_hidden_states.append(
-                            np.load(self.hidden_states_path.format(pos))
-                        )
-                all_hidden_states = np.stack(all_hidden_states).transpose(1, 0, 2, 3, 4)
-                if hidden_state_position is None:
-                    all_tokens["hidden_states"] = list(all_hidden_states)
-                else:
-                    all_tokens["hidden_states"] = list(all_hidden_states.squeeze(1))
-            if add_attentions:
-                all_attentions = np.load(self.attentions_path)
-                all_tokens["attentions"] = list(all_attentions)
-            if add_logits:
-                all_logits = np.load(self.logits_path)
-                if hidden_state_position is None:
-                    predictions = np.argmax(all_logits, axis=2).tolist()
-                else:
-                    all_logits = all_logits[:, hidden_state_position]
-                    predictions = np.argmax(all_logits, axis=1).tolist()
-                all_tokens["logits"] = list(all_logits)
-                all_tokens["predictions"] = predictions
-        all_tokens = all_tokens.loc[all_tokens["split"].isin(splits)]
-        return all_tokens
+                                tokens["labels"] = batch["labels"].tolist()
+                                tokens["split"] = splits_
+                                all_tokens.append(tokens)
+                        if not tokens_collected:
+                            # Concatenate all hidden states across batches
+                            all_tokens = pd.concat(all_tokens).reset_index(drop=True)
+                            if not is_test:
+                                all_tokens.to_csv(
+                                    self.sub_tokens_path,
+                                    index=False,
+                                )
+                            del all_tokens
+                            tokens_collected = True
+            logit_arrays = []
+            for logits in all_logits:
+                logit_array = np.concatenate(logits)
+                logit_arrays.append(logit_array)
+            all_logits = np.stack(logit_arrays)
+            if not is_test:
+                np.save(self.logits_path, all_logits)
 
     @staticmethod
     def read_forward_dataset(root: str, splits: List[str] = ["train", "test", "val"]):
@@ -1494,18 +1450,19 @@ class EmbeddingBasedClassifier(ClassifierBase):
     def __init__(
         self,
         kge_manager,
-        get_embedding_cb,
+        get_embeddings_cb,
         root_path: str,
         model: BertForSequenceClassification,
         model_name: str,
         model_max_length=256,
-        false_ratio=1.0,
+        false_ratio=0.5,
         force_recompute=False,
     ) -> None:
         tokenizer = BertTokenizer.from_pretrained(
             model_name, model_max_length=model_max_length
         )
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print("device", self.device)
         train_data_collator = EmbeddingBasedDataCollator(
             tokenizer,
             self.device,
@@ -1513,7 +1470,7 @@ class EmbeddingBasedClassifier(ClassifierBase):
             kge_manager.source_df,
             kge_manager.target_df,
             kge_manager.gnn_train_data,
-            get_embedding_cb,
+            get_embeddings_cb,
             false_ratio=false_ratio,
         )
         test_data_collator = EmbeddingBasedDataCollator(
@@ -1523,7 +1480,7 @@ class EmbeddingBasedClassifier(ClassifierBase):
             kge_manager.source_df,
             kge_manager.target_df,
             kge_manager.gnn_test_data,
-            get_embedding_cb,
+            get_embeddings_cb,
             false_ratio=-1.0,
         )
         val_data_collator = EmbeddingBasedDataCollator(
@@ -1533,7 +1490,7 @@ class EmbeddingBasedClassifier(ClassifierBase):
             kge_manager.source_df,
             kge_manager.target_df,
             kge_manager.gnn_val_data,
-            get_embedding_cb,
+            get_embeddings_cb,
             false_ratio=-1.0,
         )
         ClassifierBase.__init__(
@@ -1567,7 +1524,8 @@ class EmbeddingBasedClassifier(ClassifierBase):
                 "attention_mask": tokenized["attention_mask"],
                 "labels": example["labels"],
                 "semantic_positional_encoding": semantic_positional_encoding,
-                "graph_embeddings": example["graph_embeddings"],
+                "source_id": example["source_id"],
+                "target_id": example["target_id"],
             }
         else:
             result = {
@@ -1580,7 +1538,8 @@ class EmbeddingBasedClassifier(ClassifierBase):
                 "semantic_positional_encoding": semantic_positional_encoding.detach()
                 .to("cpu")
                 .tolist(),
-                "graph_embeddings": example["graph_embeddings"],
+                "source_id": example["source_id"],
+                "target_id": example["target_id"],
             }
         return result
 
@@ -1589,11 +1548,11 @@ class InputEmbedsReplaceClassifier(EmbeddingBasedClassifier):
     def __init__(
         self,
         kge_manager,
-        get_embedding_cb,
+        get_embeddings_cb,
         root_path,
         model_name=MODEL_NAME,
         model_max_length=256,
-        false_ratio: float = 1.0,
+        false_ratio: float = 0.5,
         force_recompute=False,
     ) -> None:
         training_path = f"{root_path}/training"
@@ -1613,7 +1572,7 @@ class InputEmbedsReplaceClassifier(EmbeddingBasedClassifier):
         assert isinstance(model, BertForSequenceClassification)
         super().__init__(
             kge_manager,
-            get_embedding_cb,
+            get_embeddings_cb,
             root_path,
             model,
             model_name,
@@ -1631,11 +1590,11 @@ class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
     def __init__(
         self,
         kge_manager,
-        get_embedding_cb,
+        get_embeddings_cb,
         root_path,
         model_name=MODEL_NAME,
         model_max_length=256,
-        false_ratio=1.0,
+        false_ratio=0.5,
         force_recompute=False,
     ) -> None:
         tokenizer = BertTokenizer.from_pretrained(
@@ -1647,7 +1606,7 @@ class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
             kge_manager.source_df,
             kge_manager.target_df,
             kge_manager.gnn_train_data,
-            get_embedding_cb,
+            get_embeddings_cb,
             false_ratio=false_ratio,
         )
         test_data_collator = PromptEmbeddingDataCollator(
@@ -1656,7 +1615,7 @@ class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
             kge_manager.source_df,
             kge_manager.target_df,
             kge_manager.gnn_test_data,
-            get_embedding_cb,
+            get_embeddings_cb,
             false_ratio=-1.0,
         )
         val_data_collator = PromptEmbeddingDataCollator(
@@ -1665,7 +1624,7 @@ class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
             kge_manager.source_df,
             kge_manager.target_df,
             kge_manager.gnn_val_data,
-            get_embedding_cb,
+            get_embeddings_cb,
             false_ratio=-1.0,
         )
         super().__init__(
@@ -1695,7 +1654,7 @@ class VanillaBertClassifier(BertClassifierOriginalArchitectureBase):
         root_path,
         model_name=MODEL_NAME,
         model_max_length=256,
-        false_ratio=1.0,
+        false_ratio=0.5,
         force_recompute=False,
     ) -> None:
         tokenizer = BertTokenizer.from_pretrained(

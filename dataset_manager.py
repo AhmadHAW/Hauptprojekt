@@ -15,10 +15,10 @@ from datasets import Dataset, DatasetDict, load_from_disk, load_dataset
 from transformers import PreTrainedTokenizer
 
 from utils import (
-    find_non_existing_source_target,
     row_to_vanilla_datapoint,
     row_to_prompt_datapoint,
     row_to_input_embeds_replace_datapoint,
+    find_non_existing_source_targets,
 )
 
 
@@ -51,7 +51,7 @@ class KGManger(ABC):
         """
         super().__init__()
         if (
-            not self.data_present() or force_recompute
+            not self._data_present() or force_recompute
         ):  # If the datas have already been preprocessed and saved, we can pull them up from the disk.
             assert len(edge_df[~(edge_df["source_id"].isin(source_df["id"]))]) == 0
             assert len(edge_df[~(edge_df["target_id"].isin(target_df["id"]))]) == 0
@@ -70,21 +70,20 @@ class KGManger(ABC):
                 )
             )
             self.llm_df = self.llm_df.drop(columns=feature_columns)
-            self.llm_df["labels"] = 1
-            self.data = self.generate_hetero_dataset()
+            self.data = self.__generate_hetero_dataset()
             # split HeteroDataset dataset into train, dev and test
-            self.split_data()
+            self.__split_data()
             # split llm dataset according to the HeteroDataset split into train, dev, test and rest
             self.__split_llm_dataset()
             # generate pandas dataframe with prompts and labels for LLM
-            self.generate_llm_dataset()
+            # self.generate_llm_dataset()
 
             self.source_df.to_csv(f"{ROOT}/llm/source.csv", index=False)
             self.target_df.to_csv(f"{ROOT}/llm/target.csv", index=False)
         else:
-            self.load_datasets_from_disk()
+            self._load_datasets_from_disk()
 
-    def data_present(self) -> bool:
+    def _data_present(self) -> bool:
         """Returns True, if GNN_TRAIN_DATASET_PATH, f"{ROOT}/gnn/test", f"{ROOT}/gnn/val", f"{ROOT}/llm/dataset.csv" are files."""
         return (
             os.path.isfile(f"{ROOT}/gnn/train")
@@ -95,7 +94,7 @@ class KGManger(ABC):
             and os.path.isfile(f"{ROOT}/llm/target.csv")
         )
 
-    def load_datasets_from_disk(self):
+    def _load_datasets_from_disk(self):
         self.gnn_train_data = torch.load(f"{ROOT}/gnn/train")
         self.gnn_val_data = torch.load(f"{ROOT}/gnn/val")
         self.gnn_test_data = torch.load(f"{ROOT}/gnn/test")
@@ -118,7 +117,7 @@ class KGManger(ABC):
             if not os.path.exists(directory):
                 os.makedirs(directory)
 
-    def generate_hetero_dataset(self) -> HeteroData:
+    def __generate_hetero_dataset(self) -> HeteroData:
         """(from torch geometrics Tutorial but adjusted for the general use case)
         Original Quote:
             With this, we are ready to initialize our `HeteroData` object and pass the necessary information to it.
@@ -181,7 +180,7 @@ class KGManger(ABC):
         assert data["target", "rev_edge", "source"].num_edges == len(self.edge_df)
         return data
 
-    def split_data(self) -> None:
+    def __split_data(self) -> None:
         """(From Torch Geometrics Tutorial)
         Original Quote:
             Defining Edge-level Training Splits
@@ -248,6 +247,7 @@ class KGManger(ABC):
     def append_input_embeds_replace_graph_embeddings(
         self, graph_embeddings: pd.DataFrame, save: bool = True
     ):
+        print("appending input embeds for replace model")
         assert len(self.llm_df) == len(graph_embeddings)
         self.llm_df["input_embeds_replace_source_embedding"] = graph_embeddings[
             "source_embedding"
@@ -264,102 +264,57 @@ class KGManger(ABC):
         """
         train_edge_index: torch.Tensor = self.gnn_train_data[
             "source", "edge", "target"
-        ]["edge_index"].T
-        test_edge_index: torch.Tensor = self.gnn_val_data["source", "edge", "target"][
-            "edge_index"
-        ].T
-        val_edge_index: torch.Tensor = self.gnn_test_data["source", "edge", "target"][
-            "edge_index"
-        ].T
+        ].edge_label_index
+        test_edge_index: torch.Tensor = self.gnn_test_data[
+            "source", "edge", "target"
+        ].edge_label_index
+        val_edge_index: torch.Tensor = self.gnn_val_data[
+            "source", "edge", "target"
+        ].edge_label_index
         print("splitting LLM dataset")
-        print(train_edge_index.shape)
         df_train = pd.DataFrame(
             {
-                "source_id": train_edge_index[:, 0].numpy(),
-                "target_id": train_edge_index[:, 1].numpy(),
+                "source_id": train_edge_index[0].tolist(),
+                "target_id": train_edge_index[1].tolist(),
                 "split": "train",
+                "labels": 1,
             }
         )
         df_test = pd.DataFrame(
             {
-                "source_id": test_edge_index[:, 0].numpy(),
-                "target_id": test_edge_index[:, 1].numpy(),
+                "source_id": test_edge_index[0].tolist(),
+                "target_id": test_edge_index[1].tolist(),
                 "split": "test",
+                "labels": self.gnn_test_data["source", "edge", "target"]
+                .edge_label.int()
+                .tolist(),
             }
         )
         df_val = pd.DataFrame(
             {
-                "source_id": val_edge_index[:, 0].numpy(),
-                "target_id": val_edge_index[:, 1].numpy(),
+                "source_id": val_edge_index[0].tolist(),
+                "target_id": val_edge_index[1].tolist(),
                 "split": "val",
+                "labels": self.gnn_val_data["source", "edge", "target"]
+                .edge_label.int()
+                .tolist(),
             }
         )
-        print(test_edge_index.shape, self.data)
-        print(len(df_train), len(df_test), len(df_val), df_train)
-        # this df split was written by chatGPT
-        # Combine all DataFrames into one
-        df_train_val = df_train.merge(
-            df_val, on=["source_id", "target_id"], how="left", indicator=True
-        )
-        df_val = df_val.merge(df_train_val, on=["source_id", "target_id"], how="left")
-        print(df_val)
         combined_df = pd.concat([df_train, df_test, df_val])
-        print(len(combined_df))
-
-        # Drop duplicates but prioritize 'train' if a pair exists there
-
-        # Separate pairs that are still duplicated between 'test' and 'val'
-        test_val_df = combined_df[combined_df["split"].isin(["test", "val"])].copy()
-
-        # Identify pairs that are in both 'test' and 'val'
-        duplicated_pairs = test_val_df[
-            test_val_df.duplicated(subset=["source_id", "target_id"], keep=False)
-        ]
-
-        # Now let's shuffle the duplicated pairs and split them 50:50 between 'test' and 'val'
-        duplicated_pairs_unique = duplicated_pairs[
-            ["source_id", "target_id"]
-        ].drop_duplicates()
-        # Randomly shuffle the duplicated pairs
-        duplicated_pairs_unique = duplicated_pairs_unique.sample(frac=1)
-
-        # Split 50:50 into 'test' and 'val'
-        midpoint = len(duplicated_pairs_unique) // 2
-        duplicated_pairs_unique["split"] = ["test"] * midpoint + ["val"] * (
-            len(duplicated_pairs_unique) - midpoint
+        combined_df = combined_df.drop_duplicates(
+            subset=["source_id", "target_id"], keep="first"
         )
-
-        # Now merge back the duplicated_pairs_unique into the rest of the dataframe
-        # First, we filter out any rows in the original test/val dataframe that were duplicated
-        non_duplicated_test_val = test_val_df.drop(duplicated_pairs.index)
-        print(
-            "all",
-            len(combined_df[combined_df["split"] == "train"]),
-            len(non_duplicated_test_val),
-            len(duplicated_pairs_unique),
+        duplicated_df = (
+            combined_df[combined_df.duplicated(subset=["source_id", "target_id"])]
+            .sample(frac=1)
+            .drop_duplicates(subset=["source_id", "target_id"], keep="first")
         )
-        # Combine everything: train rows, non-duplicated test/val rows, and the split 50:50 test/val rows
-        final_df = pd.concat(
-            [
-                combined_df[combined_df["split"] == "train"],
-                non_duplicated_test_val,
-                duplicated_pairs_unique,
-            ]
+        split_df = pd.concat([combined_df, duplicated_df])
+        split_df = self.llm_df.merge(
+            split_df[["source_id", "target_id", "split", "labels"]],
+            on=["source_id", "target_id"],
         )
-        # Reset index for clean output
-        final_df = final_df.reset_index(drop=True)
-        print("last", len(final_df))
-        print(final_df.info(verbose=True), self.llm_df.info(verbose=True))
-        # end of chatGPT
-        self.llm_df = self.llm_df.merge(
-            final_df, on=["source_id", "target_id"], how="inner"
-        )
-        self.save_llm_df()
-
-    def replace_llm_df(self, df: pd.DataFrame):
-        """
-        overrides the current llm dataset with the given dataset."""
-        self.llm_df = df
+        self.llm_df = split_df
         self.save_llm_df()
 
     def save_llm_df(self):
@@ -440,10 +395,6 @@ class KGManger(ABC):
         if os.path.exists(llm_adding_dataset_path) and not force_recompute:
             dataset = datasets.load_from_disk(llm_adding_dataset_path)
         else:
-            assert "input_embeds_replace_source_embedding" in self.llm_df
-            assert "input_embeds_replace_target_embedding" in self.llm_df
-            assert self.llm_df["input_embeds_replace_source_embedding"].notna().all()
-            assert self.llm_df["input_embeds_replace_target_embedding"].notna().all()
             if isinstance(df, pd.DataFrame):
                 llm_df = df.copy(deep=True)
             else:
@@ -454,13 +405,13 @@ class KGManger(ABC):
                 ),
                 axis=1,
             )
-            llm_df["graph_embeddings"] = llm_df.apply(
+            """ llm_df["graph_embeddings"] = llm_df.apply(
                 lambda row: self.__generate_embeddings(row),  # type: ignore
                 axis=1,
             )  # type: ignore
             llm_df["graph_embeddings"] = llm_df["graph_embeddings"].apply(
                 lambda embeddings: embeddings.detach().to("cpu").tolist()
-            )
+            ) """
             dataset = self.__dataset_from_df(llm_df)
             if tokenize_function:
                 dataset = dataset.map(tokenize_function, batched=True)
@@ -487,11 +438,10 @@ class KGManger(ABC):
                 llm_df = df.copy(deep=True)
             else:
                 llm_df = self.llm_df.copy(deep=True)
-            llm_df["prompt"] = self.llm_df.apply(
+            llm_df["prompt"] = llm_df.apply(
                 lambda row: row_to_vanilla_datapoint(row, sep_token=sep_token),
                 axis=1,
             )
-            llm_df["prompt"].iloc[0]
             dataset = self.__dataset_from_df(llm_df)
             if tokenize_function:
                 dataset = dataset.map(tokenize_function, batched=True)
@@ -531,55 +481,6 @@ class KGManger(ABC):
             input_embeds_replace_target_embedding.detach().tolist()
         )
         return row
-
-    def add_false_edges(
-        self,
-        false_ratio: float = 1.0,
-        prompt_get_embedding_cb: Optional[Callable] = None,
-        attention_get_embedding_cb: Optional[Callable] = None,
-        sep_token="[SEP]",
-        splits=["train", "test", "val"],
-    ):
-        df = self.llm_df.copy()
-        already_added_pairs = set()
-        new_rows = []
-        for split in splits:
-            split_proportion = int((df["split"] == split).sum() * false_ratio)
-            print(f"Adding {split_proportion} false edges for {split}.")
-            for idx in range(split_proportion):
-                source_id, target_id = find_non_existing_source_target(
-                    self.llm_df, already_added_pairs
-                )
-                random_source: pd.DataFrame = (
-                    self.source_df[self.source_df["id"] == source_id]
-                    .sample(1)
-                    .rename(columns={"id": "source_id"})
-                    .reset_index(drop=True)
-                )
-                random_target: pd.DataFrame = (
-                    self.target_df[self.target_df["id"] == target_id]
-                    .sample(1)
-                    .rename(columns={"id": "target_id"})
-                    .reset_index(drop=True)
-                )
-                random_row = pd.concat([random_source, random_target], axis=1).iloc[0]
-                random_row["labels"] = 0
-                random_row["split"] = split
-                if prompt_get_embedding_cb and attention_get_embedding_cb:
-                    random_row = self.add_graph_embeddings(
-                        random_row,
-                        prompt_get_embedding_cb,
-                        attention_get_embedding_cb,
-                    )
-                new_rows.append(random_row)
-        new_rows_df = pd.DataFrame(new_rows)
-        df = pd.concat([df, new_rows_df], ignore_index=True)
-        df["prompt"] = df.apply(
-            lambda row: row_to_vanilla_datapoint(row, sep_token=sep_token),
-            axis=1,
-        )
-        self.replace_llm_df(df)
-        return df
 
     def __flatten_and_rename_if_present(
         self, df: pd.DataFrame, prefix: str, add_tokens: bool = False
@@ -701,6 +602,38 @@ class KGManger(ABC):
             decoded = tokenizer.batch_decode(gather, skip_special_tokens=False)
             semantic_tokens.extend([decode.replace(" [CLS]", "") for decode in decoded])
 
+    def add_negative_edges_to_train_data(
+        self, false_ratio: float = 1.0, force_recompute: bool = False
+    ) -> None:
+        train_split = self.llm_df[self.llm_df["split"] == "train"]
+        amount_false_edges = int(len(train_split) * false_ratio)
+        if force_recompute or not (train_split["labels"] == 0).any():
+            positive_source_ids = list(train_split["source_id"].unique())
+            positive_target_ids = list(train_split["target_id"].unique())
+            positive_edges = set(zip(self.llm_df.source_id, self.llm_df.target_id))
+            node_pairs = find_non_existing_source_targets(
+                positive_edges,
+                positive_source_ids,
+                positive_target_ids,
+                k=amount_false_edges,
+            )
+            df = pd.DataFrame(
+                {
+                    "source_id": node_pairs[:, 0],
+                    "target_id": node_pairs[:, 1],
+                    "labels": 0,
+                    "split": "train",
+                }
+            )
+            df = (
+                df.merge(self.source_df, left_on="source_id", right_on="id")
+                .reset_index(drop=True)
+                .merge(self.target_df, left_on="target_id", right_on="id")
+                .reset_index(drop=True)
+            )
+            self.llm_df = pd.concat([self.llm_df, df])
+            self.save_llm_df()
+
 
 class MovieLensManager(KGManger):
     """
@@ -727,7 +660,7 @@ class MovieLensManager(KGManger):
 
 
         """
-        if not self.data_present() or force_recompute:
+        if not self._data_present() or force_recompute:
             if source_df:
                 assert target_df
                 assert edge_df
@@ -738,7 +671,7 @@ class MovieLensManager(KGManger):
                 )
             super().__init__(source_df, target_df, edge_df, force_recompute)
         else:
-            self.load_datasets_from_disk()
+            self._load_datasets_from_disk()
 
     def __download_dataset(self) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """Downloads the https://files.grouplens.org/datasets/movielens/ml-32m.zip dataset and
