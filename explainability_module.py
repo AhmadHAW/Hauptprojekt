@@ -32,9 +32,7 @@ class ExplainabilityModule:
         root_path: str = "./data/llm",
         model_types: List[str] = [
             "vanilla",
-            "prompt",
-            "input_embeds_replace",
-            "input_embeds_replace_frozen",
+            "graph_prompter_hf",
         ],
         save_path=None,
     ):
@@ -79,9 +77,7 @@ class ExplainabilityModule:
         root_path: str = "./data/llm",
         model_types: List[str] = [
             "vanilla",
-            "prompt",
-            "input_embeds_replace",
-            "input_embeds_replace_frozen",
+            "graph_prompter_hf",
         ],
         save_path=None,
     ):
@@ -201,23 +197,7 @@ class ExplainabilityModule:
             save_path=save_paths[0] if save_paths else None,
         )
         self.plot_attention_graph(
-            torch.Tensor(self.llm_df["prompt_attentions"].tolist()),
-            self.vanilla_tokens + self.additional_embedding_tokens,
-            "Prompt Model Attentions Plot",
-            weight_coef=weight_coef,
-            save_path=save_paths[1] if save_paths else None,
-        )
-        self.plot_attention_graph(
-            torch.Tensor(self.llm_df["input_embeds_replace_attentions"].tolist()),
-            self.vanilla_tokens + self.additional_embedding_tokens,
-            "Input Embeds Replace Model Attentions Plot",
-            weight_coef=weight_coef,
-            save_path=save_paths[2] if save_paths else None,
-        )
-        self.plot_attention_graph(
-            torch.Tensor(
-                self.llm_df["input_embeds_replace_frozen_attentions"].tolist()
-            ),
+            torch.Tensor(self.llm_df["graph_prompter_hf_attentions"].tolist()),
             self.vanilla_tokens + self.additional_embedding_tokens,
             "Input Embeds Replace Model Attentions Plot",
             weight_coef=weight_coef,
@@ -263,18 +243,14 @@ class ExplainabilityModule:
     def init_pcas(self, split="train"):
         df = self.llm_df[self.llm_df["split"] == split]
         vanilla_hidden_states = np.stack(df["vanilla_hidden_states"].tolist())
-        prompt_hidden_states = np.stack(df["prompt_hidden_states"].tolist())
-        input_embeds_replace_hidden_states = np.stack(
-            df["input_embeds_replace_hidden_states"].tolist()
+        graph_prompter_hf_hidden_states = np.stack(
+            df["graph_prompter_hf_hidden_states"].tolist()
         )
         self.vanilla_pcas = self.init_pcas_for_model(
             vanilla_hidden_states, self.vanilla_tokens
         )
-        self.prompt_pcas = self.init_pcas_for_model(
-            prompt_hidden_states, self.vanilla_tokens + self.additional_embedding_tokens
-        )
-        self.input_embeds_replace_pcas = self.init_pcas_for_model(
-            input_embeds_replace_hidden_states,
+        self.graph_prompter_hf_pcas = self.init_pcas_for_model(
+            graph_prompter_hf_hidden_states,
             self.vanilla_tokens + self.additional_embedding_tokens,
         )
 
@@ -321,33 +297,22 @@ class ExplainabilityModule:
         vanilla_pcas = self.get_list_index_from_list(
             self.vanilla_pcas[layer], token_index
         )
-        prompt_pcas = self.get_list_index_from_list(
-            self.prompt_pcas[layer], token_index
-        )
-        input_embeds_replace_pcas = self.get_list_index_from_list(
-            self.input_embeds_replace_pcas[layer], token_index
+        graph_prompter_hf_pcas = self.get_list_index_from_list(
+            self.graph_prompter_hf_pcas[layer], token_index
         )
         vanilla_hidden_states = np.stack(df["vanilla_hidden_states"].tolist())[
             :, layer, token_index
         ].transpose(1, 0, 2)  # shape (token positions, dataset size, embedding size)
-        prompt_hidden_states = np.stack(df["prompt_hidden_states"].tolist())[
-            :, layer, token_index
-        ].transpose(1, 0, 2)
-        input_embeds_replace_hidden_states = np.stack(
-            df["input_embeds_replace_hidden_states"].tolist()
+        graph_prompter_hf_hidden_states = np.stack(
+            df["graph_prompter_hf_hidden_states"].tolist()
         )[:, layer, token_index].transpose(1, 0, 2)
         low_dim_reps_vanilla = self._forward_hidden_states_to_pcas(
             vanilla_hidden_states, vanilla_pcas
         )
-        low_dim_reps_prompt = self._forward_hidden_states_to_pcas(
-            prompt_hidden_states, prompt_pcas
-        )
         low_dim_reps_embedding = self._forward_hidden_states_to_pcas(
-            input_embeds_replace_hidden_states, input_embeds_replace_pcas
+            graph_prompter_hf_hidden_states, graph_prompter_hf_pcas
         )
-        return np.stack(
-            [low_dim_reps_vanilla, low_dim_reps_prompt, low_dim_reps_embedding]
-        )
+        return np.stack([low_dim_reps_vanilla, low_dim_reps_embedding])
 
     def _title_figure_save(
         self,
@@ -423,7 +388,7 @@ class ExplainabilityModule:
             fig_size,
             fig_dpi,
             scatter_legends,
-            ["vanilla cls", "prompt cls", "input embeds replace cls"],
+            ["vanilla cls", "input embeds replace cls"],
             save_path,
         )
 
@@ -468,10 +433,8 @@ class ExplainabilityModule:
             scatter_legends,
             [
                 "vanilla existing",
-                "prompt existing",
                 "input embeds replace existing",
                 "vanilla non-existing",
-                "prompt non-existing",
                 "input embeds replace non-existing",
             ],
             save_path,
@@ -605,15 +568,11 @@ class HiddenStatesPlotter:
     def __init__(
         self,
         vanilla_df: pd.DataFrame,
-        prompt_df: pd.DataFrame,
         embedding_df: pd.DataFrame,
         vanilla_pcas: List[List[PCA]],
-        prompt_pcas: List[List[PCA]],
         embedding_pcas: List[List[PCA]],
     ) -> None:
         self.vanilla_df = vanilla_df
-        self.prompt_df = prompt_df
         self.embedding_df = embedding_df
         self.vanilla_pcas = vanilla_pcas
-        self.prompt_pcas = prompt_pcas
         self.embedding_pcas = embedding_pcas

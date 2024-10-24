@@ -227,13 +227,12 @@ def mean_over_hidden_states_python_slow(
 
 
 def replace_ranges(
-    attention_mask: torch.Tensor,
-    semantic_positional_encodings: torch.Tensor,
+    tensor: torch.Tensor, token_type_ranges: torch.Tensor, value: int = 0
 ) -> torch.Tensor:
-    assert (attention_mask == 0).count_nonzero(dim=1).all()
-    zero_index = (attention_mask == 0).count_nonzero(dim=1).unsqueeze(1)
-    starts = semantic_positional_encodings[:, 0]
-    ends = semantic_positional_encodings[:, 1]
+    assert (tensor[:, -1] == 0).all()
+    zero_index = torch.tensor(tensor.shape[1] - 1)
+    starts = token_type_ranges[:, 0]
+    ends = token_type_ranges[:, 1]
     max_length = (ends - starts).max().item()
     range_tensor = torch.arange(max_length).unsqueeze(0)
     ranges = starts.unsqueeze(1) + range_tensor
@@ -241,10 +240,20 @@ def replace_ranges(
     diffs = zero_index.repeat((1, ranges.shape[1])) - ranges
     diffs_masked = diffs * mask
     ranges_masked = ranges + diffs_masked
-    attention_mask = attention_mask.detach().clone()
-    replace_tensor = torch.tensor(0).repeat(attention_mask.shape)
-    attention_mask = attention_mask.scatter(1, ranges_masked, replace_tensor)
-    return attention_mask
+    tensor = tensor.detach().clone()
+    replace_tensor = torch.tensor(value, dtype=tensor.dtype).repeat(tensor.shape)
+    tensor = tensor.scatter(1, ranges_masked, replace_tensor)
+    tensor[:, -1] = 0
+    return tensor
+
+
+def replace_ranges_slow(
+    tensor: torch.Tensor, token_type_ranges: torch.Tensor, value: int = 0
+) -> torch.Tensor:
+    tensor = tensor.detach().clone()
+    for batch in range(len(tensor)):
+        tensor[batch, token_type_ranges[batch, 0] : token_type_ranges[batch, 1]] = value
+    return tensor
 
 
 # Get all permutations (order does not matter)
@@ -265,21 +274,13 @@ def chunks(lst, n):
         yield lst[i : i + n]
 
 
-def row_to_input_embeds_replace_datapoint(
+def row_to_graph_prompter_hf_datapoint(
     row: pd.Series,
     sep_token: str = "[SEP]",
     pad_token: str = "[PAD]",
 ) -> str:
     prompt = row_to_vanilla_datapoint(row, sep_token)
     prompt = f"{prompt}{sep_token}{pad_token}{sep_token}{pad_token}"
-    return prompt
-
-
-def row_to_prompt_datapoint(row: pd.Series, sep_token: str = "[SEP]") -> str:
-    prompt = row_to_vanilla_datapoint(row, sep_token)
-    prompt_source_embedding = row["prompt_source_embedding"]
-    prompt_target_embedding = row["prompt_target_embedding"]
-    prompt = f"{prompt}{sep_token}{transform_embeddings_to_string(prompt_source_embedding)}{sep_token}{transform_embeddings_to_string(prompt_target_embedding)}"
     return prompt
 
 

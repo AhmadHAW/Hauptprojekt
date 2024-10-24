@@ -4,7 +4,6 @@ from abc import ABC, abstractmethod
 import os
 import json
 from pathlib import Path
-import time
 
 import torch
 from torch import nn
@@ -21,6 +20,7 @@ from transformers import (
     DataCollatorForLanguageModeling,
     Trainer,
     TrainingArguments,
+    BertConfig,
 )
 from transformers.models.bert.modeling_bert import (
     BertModel,
@@ -40,30 +40,42 @@ from utils import (
     replace_ranges,
     get_combinations,
     find_non_existing_source_targets,
+    replace_ranges_slow,
     row_to_vanilla_datapoint,
-    row_to_prompt_datapoint,
-    row_to_input_embeds_replace_datapoint,
+    row_to_graph_prompter_hf_datapoint,
 )
 
 ID2LABEL = {0: "FALSE", 1: "TRUE"}
 LABEL2ID = {"FALSE": 0, "TRUE": 1}
 
-SPLIT_EPOCH_ENDING = f"/split_{{}}_pos_{{}}_com_{{}}.npy"
+SPLIT_EPOCH_ENDING = "/split_{}_pos_{}_com_{}.npy"
 TOKENS_ENDING = "/tokens.csv"
 
 MODEL_NAME = "google/bert_uncased_L-2_H-128_A-2"
-ALL_SEMANTIC_TOKENS = ["cls", "user", "sep1", "title", "sep2", "genres", "sep3"]
+ALL_SEMANTIC_TOKENS = [
+    "cls",
+    "user",
+    "sep",
+    "movie",
+    "sep",
+    "title",
+    "sep",
+    "genres",
+    "sep",
+]
 EMBEDDINGS_BASED_SEMANTIC_TOKENS = ALL_SEMANTIC_TOKENS + [
     "user embedding",
-    "sep4",
+    "sep",
     "movie embedding",
-    "sep5",
+    "sep",
 ]
+VANILLA_TOKEN_TYPE_VALUES = [0, 2, 1, 2, 1, 3, 1, 3, 1]
+GRAPH_PROMPTER_TOKEN_TYPE_VALUES = VANILLA_TOKEN_TYPE_VALUES + [4, 1, 4, 1]
+VANILLA_TOKEN_TYPES = len(set(VANILLA_TOKEN_TYPE_VALUES))
+GRAPH_PROMPTER_TOKEN_TYPES = len(set(GRAPH_PROMPTER_TOKEN_TYPE_VALUES))
 
 
-def get_semantic_positional_encoding(
-    input_ids: torch.Tensor, sep_token_id: int
-) -> torch.Tensor:
+def get_token_type_ranges(input_ids: torch.Tensor, sep_token_id: int) -> torch.Tensor:
     mask = input_ids == sep_token_id
     positions = mask.nonzero(as_tuple=True)
     cols = positions[1]
@@ -72,43 +84,41 @@ def get_semantic_positional_encoding(
     num_trues_per_row = mask.sum(dim=1)
     max_trues_per_row = num_trues_per_row.max().item()
     # Step 4: Create an empty tensor to hold the result
-    semantic_positional_encoding = -torch.ones(
+    token_type_ranges = -torch.ones(
         (mask.size(0), max_trues_per_row),  # type: ignore
         dtype=torch.long,
     )
 
-    # Step 5: Use scatter to place column indices in the semantic_positional_encoding tensor
-    # Create an index tensor that assigns each column index to the correct position in semantic_positional_encoding tensor
+    # Step 5: Use scatter to place column indices in the token_type_ranges tensor
+    # Create an index tensor that assigns each column index to the correct position in token_type_ranges tensor
     row_indices = torch.arange(mask.size(0)).repeat_interleave(num_trues_per_row)
     column_indices = torch.cat([torch.arange(n) for n in num_trues_per_row])  # type: ignore
 
-    semantic_positional_encoding[row_indices, column_indices] = cols
-    semantic_positional_encoding = torch.stack(
+    token_type_ranges[row_indices, column_indices] = cols
+    token_type_ranges = torch.stack(
         [
-            semantic_positional_encoding[:, :-1] + 1,
-            semantic_positional_encoding[:, 1:],
+            token_type_ranges[:, :-1] + 1,
+            token_type_ranges[:, 1:],
         ],
         dim=2,
     )
     # Create a tensor of zeros to represent the starting points
     second_points = torch.ones(
-        semantic_positional_encoding.size(0),
+        token_type_ranges.size(0),
         1,
         2,
-        dtype=semantic_positional_encoding.dtype,
+        dtype=token_type_ranges.dtype,
     )
     # Set the second column to be the first element of the first range
-    second_points[:, 0, 1] = semantic_positional_encoding[:, 0, 0] - 1
-    # Concatenate the start_points tensor with the original semantic_positional_encoding tensor
-    semantic_positional_encoding = torch.cat(
-        (second_points, semantic_positional_encoding), dim=1
-    )
-    return semantic_positional_encoding
+    second_points[:, 0, 1] = token_type_ranges[:, 0, 0] - 1
+    # Concatenate the start_points tensor with the original token_type_ranges tensor
+    token_type_ranges = torch.cat((second_points, token_type_ranges), dim=1)
+    return token_type_ranges
 
 
-def sort_ranges(semantic_positional_encoding: torch.Tensor):
+def sort_ranges(token_type_ranges: torch.Tensor):
     # Extract the second element (end of the current ranges excluded the starting cps token)
-    end_elements = semantic_positional_encoding[:, :, 1]
+    end_elements = token_type_ranges[:, :, 1]
     # Create the new ranges by adding 1 to the end elements
     new_ranges = torch.stack([end_elements, end_elements + 1], dim=-1)
     # add the cls positions to it
@@ -119,25 +129,21 @@ def sort_ranges(semantic_positional_encoding: torch.Tensor):
     )  # Shape (batch_size, 1, 2)
     new_ranges = torch.cat((new_ranges, cls_positions), dim=1)
     # Concatenate the original ranges with the new ranges
-    semantic_positional_encoding = torch.cat(
-        (semantic_positional_encoding, new_ranges), dim=1
-    )
+    token_type_ranges = torch.cat((token_type_ranges, new_ranges), dim=1)
     # Step 1: Extract the last value of dimension 2
-    last_values = semantic_positional_encoding[
-        :, :, -1
-    ]  # Shape (batch_size, num_elements)
+    last_values = token_type_ranges[:, :, -1]  # Shape (batch_size, num_elements)
 
     # Step 2: Sort the indices based on these last values
     # 'values' gives the sorted values (optional), 'indices' gives the indices to sort along dim 1
     _, indices = torch.sort(last_values, dim=1, descending=False)
 
     # Step 3: Apply the sorting indices to the original tensor
-    semantic_positional_encoding = torch.gather(
-        semantic_positional_encoding,
+    token_type_ranges = torch.gather(
+        token_type_ranges,
         1,
-        indices.unsqueeze(-1).expand(-1, -1, semantic_positional_encoding.size(2)),
+        indices.unsqueeze(-1).expand(-1, -1, token_type_ranges.size(2)),
     )
-    return semantic_positional_encoding
+    return token_type_ranges
 
 
 class DataCollatorBase(DataCollatorForLanguageModeling, ABC):
@@ -196,24 +202,26 @@ class TextBasedDataCollator(DataCollatorBase, ABC):
         input_ids = []
         attention_mask = []
         labels = []
-        semantic_positional_encoding = []
+        token_type_ranges = []
+        token_type_ids = []
 
         for f in features:
             input_ids.append(f["input_ids"])
             attention_mask.append(f["attention_mask"])
             labels.append(f["labels"])
-            semantic_positional_encoding.append(f["semantic_positional_encoding"])
+            token_type_ranges.append(f["token_type_ranges"])
+            token_type_ids.append(f["token_type_ids"])
         input_ids = torch.tensor(input_ids, dtype=torch.long)
         attention_mask = torch.tensor(attention_mask, dtype=torch.long)
         labels = torch.tensor(labels, dtype=torch.long)
-        semantic_positional_encoding = torch.tensor(
-            semantic_positional_encoding, dtype=torch.long
-        )
+        token_type_ranges = torch.tensor(token_type_ranges, dtype=torch.long)
+        token_type_ids = torch.tensor(token_type_ids, dtype=torch.long)
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "labels": labels,
-            "semantic_positional_encoding": semantic_positional_encoding,
+            "token_type_ranges": token_type_ranges,
+            "token_type_ids": token_type_ids,
         }
 
 
@@ -239,7 +247,8 @@ class EmbeddingBasedDataCollator(DataCollatorBase):
         input_ids = []
         attention_mask = []
         labels = []
-        semantic_positional_encoding = []
+        token_type_ranges = []
+        token_type_ids = []
         source_ids = []
         target_ids = []
         graph_embeddings = []
@@ -247,7 +256,8 @@ class EmbeddingBasedDataCollator(DataCollatorBase):
             input_ids.append(f["input_ids"])
             attention_mask.append(f["attention_mask"])
             labels.append(f["labels"])
-            semantic_positional_encoding.append(f["semantic_positional_encoding"])
+            token_type_ranges.append(f["token_type_ranges"])
+            token_type_ids.append(f["token_type_ids"])
             source_ids.append(f["source_id"])
             target_ids.append(f["target_id"])
             if "graph_embeddings" in f:
@@ -255,9 +265,8 @@ class EmbeddingBasedDataCollator(DataCollatorBase):
         input_ids = torch.tensor(input_ids, dtype=torch.long)
         attention_mask = torch.tensor(attention_mask, dtype=torch.long)
         labels = torch.tensor(labels, dtype=torch.long)
-        semantic_positional_encoding = torch.tensor(
-            semantic_positional_encoding, dtype=torch.long
-        )
+        token_type_ranges = torch.tensor(token_type_ranges, dtype=torch.long)
+        token_type_ids = torch.tensor(token_type_ids, dtype=torch.long)
         if len(graph_embeddings) == 0:
             source_embeddings, target_embeddings = self.get_embeddings_cb(
                 self.data, source_ids, target_ids
@@ -273,7 +282,8 @@ class EmbeddingBasedDataCollator(DataCollatorBase):
             "attention_mask": attention_mask,
             "labels": labels,
             "graph_embeddings": graph_embeddings,
-            "semantic_positional_encoding": semantic_positional_encoding,
+            "token_type_ranges": token_type_ranges,
+            "token_type_ids": token_type_ids,
         }
 
     def _generate_false_examples(self, k: int) -> List[Dict]:
@@ -290,7 +300,7 @@ class EmbeddingBasedDataCollator(DataCollatorBase):
             .reset_index(drop=True)
         )
         df["prompt"] = df.apply(
-            lambda row: row_to_input_embeds_replace_datapoint(
+            lambda row: row_to_graph_prompter_hf_datapoint(
                 row, self.tokenizer.sep_token, self.tokenizer.pad_token
             ),
             axis=1,
@@ -302,13 +312,20 @@ class EmbeddingBasedDataCollator(DataCollatorBase):
         sep_token_id = self.tokenizer.sep_token_id
         assert sep_token_id
         input_ids = torch.tensor(tokenized["input_ids"])
-        semantic_positional_encoding = get_semantic_positional_encoding(
+        token_type_ranges = get_token_type_ranges(
             input_ids,
             sep_token_id,
         )
-        semantic_positional_encoding = sort_ranges(semantic_positional_encoding)
+        token_type_ranges = sort_ranges(token_type_ranges)
         input_ids = tokenized["input_ids"]
         attention_mask = tokenized["attention_mask"]
+        token_type_ids = torch.zeros(len(attention_mask), len(attention_mask[0]))
+        for token_type, range_position in zip(
+            GRAPH_PROMPTER_TOKEN_TYPE_VALUES, range(token_type_ranges.shape[1])
+        ):
+            token_type_ids = replace_ranges(
+                token_type_ids, token_type_ranges[:, range_position], value=token_type
+            )
         # source_embeddings, target_embeddings = self.get_embeddings_cb(
         #     self.data, node_pairs[:, 0].tolist(), node_pairs[:, 1].tolist()
         # )
@@ -318,137 +335,20 @@ class EmbeddingBasedDataCollator(DataCollatorBase):
                 "input_ids": input_ids_,
                 "attention_mask": attention_mask_,
                 "labels": 0,
-                "semantic_positional_encoding": semantic_positional_encoding_.to("cpu")
-                .detach()
-                .tolist(),
+                "token_type_ranges": token_type_ranges_.to("cpu").detach().tolist(),
+                "token_type_ids": token_type_ids_.to("cpu").detach().tolist(),
                 "source_id": node_pair[0],
                 "target_id": node_pair[1],
             }
-            for semantic_positional_encoding_, input_ids_, attention_mask_, node_pair in zip(
-                semantic_positional_encoding,
+            for token_type_ranges_, token_type_ids_, input_ids_, attention_mask_, node_pair in zip(
+                token_type_ranges,
+                token_type_ids,
                 input_ids,
                 attention_mask,
                 node_pairs,
             )
         ]
         return result_dict
-
-
-class PromptEmbeddingDataCollator(TextBasedDataCollator):
-    """
-    The Prompt Data Collator also adds embeddings to the prompt on the fly.
-    """
-
-    def __init__(
-        self,
-        tokenizer,
-        df,
-        source_df,
-        target_df,
-        data,
-        get_embeddings_cb,
-        false_ratio=0.5,
-    ):
-        super().__init__(tokenizer, df, source_df, target_df, false_ratio=false_ratio)
-        self.data = data
-        self.get_embeddings_cb = get_embeddings_cb
-
-    def _generate_false_examples(self, k: int) -> List[Dict]:
-        node_pairs = find_non_existing_source_targets(
-            self.edges, self.source_ids, self.target_ids, k=k
-        )
-        df = pd.DataFrame(
-            {"source_id": node_pairs[:, 0], "target_id": node_pairs[:, 1]}
-        )
-        df = (
-            df.merge(self.source_df, left_on="source_id", right_on="id")
-            .reset_index(drop=True)
-            .merge(self.target_df, left_on="target_id", right_on="id")
-            .reset_index(drop=True)
-        )
-        source_embeddings, target_embeddings = self.get_embeddings_cb(
-            self.data, node_pairs[:, 0].tolist(), node_pairs[:, 1].tolist()
-        )
-        df["prompt_source_embedding"] = source_embeddings.to("cpu").detach().tolist()
-        df["prompt_target_embedding"] = target_embeddings.to("cpu").detach().tolist()
-
-        df["prompt"] = df.apply(
-            lambda row: row_to_prompt_datapoint(row, self.tokenizer.sep_token),
-            axis=1,
-        )
-        prompts = df["prompt"].tolist()
-        tokenized = self.tokenizer(prompts, padding="max_length", truncation=True)
-        sep_token_id = self.tokenizer.sep_token_id
-        assert sep_token_id
-        input_ids = torch.tensor(tokenized["input_ids"])
-        semantic_positional_encoding = get_semantic_positional_encoding(
-            input_ids,
-            sep_token_id,
-        )
-        semantic_positional_encoding = sort_ranges(semantic_positional_encoding)
-        input_ids = tokenized["input_ids"]
-        attention_mask = tokenized["attention_mask"]
-        result_dict = [
-            {
-                "input_ids": input_ids_,
-                "attention_mask": attention_mask_,
-                "labels": 0,
-                "semantic_positional_encoding": semantic_positional_encoding_.to("cpu")
-                .detach()
-                .tolist(),
-            }
-            for semantic_positional_encoding_, input_ids_, attention_mask_ in zip(
-                semantic_positional_encoding,
-                input_ids,
-                attention_mask,
-            )
-        ]
-        return result_dict
-
-    def _transform_to_false_example(self) -> Dict:
-        label = 0
-        source_id, target_id = find_non_existing_source_targets(self.df)
-
-        random_source: pd.DataFrame = (
-            self.source_df[self.source_df["id"] == source_id]
-            .sample(1)
-            .rename(columns={"id": "source_id"})
-            .reset_index(drop=True)
-        )
-        random_target: pd.DataFrame = (
-            self.target_df[self.target_df["id"] == target_id]
-            .sample(1)
-            .rename(columns={"id": "target_id"})
-            .reset_index(drop=True)
-        )
-        random_row = pd.concat([random_source, random_target], axis=1).iloc[0]
-        source_embedding, target_embedding = self.get_embeddings_cb(
-            self.data, source_id, target_id
-        )
-        random_row["prompt_source_embedding"] = source_embedding.detach().to("cpu")
-        random_row["prompt_target_embedding"] = target_embedding.detach().to("cpu")
-        random_row["prompt"] = row_to_prompt_datapoint(
-            random_row, sep_token=self.tokenizer.sep_token
-        )
-        tokenized = self.tokenizer(
-            random_row["prompt"], padding="max_length", truncation=True
-        )
-        sep_token_id = self.tokenizer.sep_token_id
-        assert sep_token_id
-        semantic_positional_encoding = get_semantic_positional_encoding(
-            torch.tensor(tokenized["input_ids"]).unsqueeze(0),
-            sep_token_id,
-        )
-        semantic_positional_encoding = sort_ranges(semantic_positional_encoding)
-        return {
-            "input_ids": tokenized["input_ids"],
-            "attention_mask": tokenized["attention_mask"],
-            "labels": label,
-            "semantic_positional_encoding": semantic_positional_encoding.squeeze(0)
-            .to("cpu")
-            .detach()
-            .tolist(),
-        }
 
 
 class VanillaEmbeddingDataCollator(TextBasedDataCollator):
@@ -480,70 +380,33 @@ class VanillaEmbeddingDataCollator(TextBasedDataCollator):
         sep_token_id = self.tokenizer.sep_token_id
         assert sep_token_id
         input_ids = torch.tensor(tokenized["input_ids"])
-        semantic_positional_encoding = get_semantic_positional_encoding(
+        token_type_ranges = get_token_type_ranges(
             input_ids,
             sep_token_id,
         )
-        semantic_positional_encoding = sort_ranges(semantic_positional_encoding)
+        token_type_ranges = sort_ranges(token_type_ranges)
         input_ids = tokenized["input_ids"]
         attention_mask = tokenized["attention_mask"]
+        token_type_ids = torch.zeros(len(attention_mask), len(attention_mask[0]))
+        for token_type, range_position in zip(
+            VANILLA_TOKEN_TYPE_VALUES, range(token_type_ranges.shape[1])
+        ):
+            token_type_ids = replace_ranges(
+                token_type_ids, token_type_ranges[:, range_position], value=token_type
+            )
         result_dict = [
             {
                 "input_ids": input_ids_,
                 "attention_mask": attention_mask_,
                 "labels": 0,
-                "semantic_positional_encoding": semantic_positional_encoding_.to("cpu")
-                .detach()
-                .tolist(),
+                "token_type_ranges": token_type_ranges_.to("cpu").detach().tolist(),
+                "token_type_ids": token_type_ids_.to("cpu").detach().tolist(),
             }
-            for semantic_positional_encoding_, input_ids_, attention_mask_ in zip(
-                semantic_positional_encoding, input_ids, attention_mask
+            for token_type_ranges_, token_type_ids_, input_ids_, attention_mask_ in zip(
+                token_type_ranges, token_type_ids, input_ids, attention_mask
             )
         ]
         return result_dict
-
-    def _transform_to_false_example(self) -> Dict:
-        label = 0
-        edge = find_non_existing_source_targets(
-            self.edges, self.source_ids, self.target_ids
-        )
-        source_id = edge[0, 0].item()
-        target_id = edge[0, 1].item()
-        random_source: pd.DataFrame = (
-            self.source_df[self.source_df["id"] == source_id]
-            .sample(1)
-            .rename(columns={"id": "source_id"})
-            .reset_index(drop=True)
-        )
-        random_target: pd.DataFrame = (
-            self.target_df[self.target_df["id"] == target_id]
-            .sample(1)
-            .rename(columns={"id": "target_id"})
-            .reset_index(drop=True)
-        )
-        random_row = pd.concat([random_source, random_target], axis=1).iloc[0]
-        random_row["prompt"] = row_to_vanilla_datapoint(
-            random_row, self.tokenizer.sep_token
-        )
-        tokenized = self.tokenizer(
-            random_row["prompt"], padding="max_length", truncation=True
-        )
-        sep_token_id = self.tokenizer.sep_token_id
-        assert sep_token_id
-        semantic_positional_encoding = get_semantic_positional_encoding(
-            torch.tensor(tokenized["input_ids"]).unsqueeze(0),
-            sep_token_id,
-        )
-        semantic_positional_encoding = sort_ranges(semantic_positional_encoding)
-        return {
-            "input_ids": tokenized["input_ids"],
-            "attention_mask": tokenized["attention_mask"],
-            "labels": label,
-            "semantic_positional_encoding": semantic_positional_encoding.squeeze(0)
-            .to("cpu")
-            .detach()
-            .tolist(),
-        }
 
 
 METRIC = evaluate.load("accuracy")
@@ -635,12 +498,12 @@ class SequenceClassifierOutputOverRanges(SequenceClassifierOutput):
         loss: Optional[torch.FloatTensor] = None,
         hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None,
         attentions: Optional[Tuple[torch.FloatTensor, ...]] = None,
-        semantic_positional_encoding: Optional[torch.Tensor] = None,
+        token_type_ranges: Optional[torch.Tensor] = None,
     ):
         super().__init__(
             loss=loss, logits=logits, hidden_states=hidden_states, attentions=attentions
         )  # type: ignore
-        self.semantic_positional_encoding = semantic_positional_encoding
+        self.token_type_ranges = token_type_ranges
 
     def to_tuple(self):
         # Ensure that your custom field is included when converting to a tuple
@@ -651,7 +514,7 @@ class SequenceClassifierOutputOverRanges(SequenceClassifierOutput):
                 self.logits,
                 self.hidden_states,
                 self.attentions,
-                self.semantic_positional_encoding,
+                self.token_type_ranges,
             )
             if v is not None
         )
@@ -670,7 +533,7 @@ class BertForSequenceClassificationRanges(BertForSequenceClassification):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        semantic_positional_encoding: Optional[torch.Tensor] = None,
+        token_type_ranges: Optional[torch.Tensor] = None,
     ) -> Union[Tuple[torch.Tensor], SequenceClassifierOutputOverRanges]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
@@ -732,11 +595,11 @@ class BertForSequenceClassificationRanges(BertForSequenceClassification):
             logits=logits,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-            semantic_positional_encoding=semantic_positional_encoding,
+            token_type_ranges=token_type_ranges,
         )
 
 
-class InputEmbedsReplaceBertEmbeddings(BertEmbeddings):
+class GraphPrompterHFBertEmbeddings(BertEmbeddings):
     """Construct the embeddings from word, position and token_type embeddings."""
 
     """
@@ -751,7 +614,7 @@ class InputEmbedsReplaceBertEmbeddings(BertEmbeddings):
         position_ids: Optional[torch.LongTensor] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         graph_embeddings: Optional[torch.FloatTensor] = None,
-        semantic_positional_encoding: Optional[torch.Tensor] = None,
+        token_type_ranges: Optional[torch.Tensor] = None,
         past_key_values_length: int = 0,
     ) -> torch.Tensor:
         if input_ids is not None:
@@ -784,14 +647,14 @@ class InputEmbedsReplaceBertEmbeddings(BertEmbeddings):
         if inputs_embeds is None:
             inputs_embeds = self.word_embeddings(input_ids)
             if (
-                semantic_positional_encoding is not None
+                token_type_ranges is not None
                 and graph_embeddings is not None
                 and inputs_embeds is not None
             ):
                 batch_indices = torch.arange(len(inputs_embeds)).unsqueeze(1)
-                inputs_embeds[
-                    batch_indices, semantic_positional_encoding[:, [-4, -2], 0]
-                ] = graph_embeddings  # replace the input embeds at the place holder positions with the KGEs.
+                inputs_embeds[batch_indices, token_type_ranges[:, [-4, -2], 0]] = (
+                    graph_embeddings  # replace the input embeds at the place holder positions with the KGEs.
+                )
                 # inputs_embeds = inputs_embeds.scatter(
                 #     1, mask, graph_embeddings
                 # )
@@ -806,7 +669,7 @@ class InputEmbedsReplaceBertEmbeddings(BertEmbeddings):
         return embeddings
 
 
-class InputEmbedsReplaceBertModel(BertModel):
+class GraphPrompterHFBertModel(BertModel):
     """
 
     The model can behave as an encoder (with only self-attention) as well as a decoder, in which case a layer of
@@ -828,7 +691,7 @@ class InputEmbedsReplaceBertModel(BertModel):
         super().__init__(config)
         self.config = config
 
-        self.embeddings = InputEmbedsReplaceBertEmbeddings(config)
+        self.embeddings = GraphPrompterHFBertEmbeddings(config)
         self.encoder = BertEncoder(config)
 
         self.pooler = BertPooler(config) if add_pooling_layer else None
@@ -840,7 +703,7 @@ class InputEmbedsReplaceBertModel(BertModel):
         self.post_init()
 
 
-class InputEmbedsReplaceBertForSequenceClassification(BertForSequenceClassification):
+class GraphPrompterHFBertForSequenceClassification(BertForSequenceClassification):
     """The bert base model has been adjusted so it also takes SPEs and KGEs."""
 
     def __init__(self, config):
@@ -848,7 +711,7 @@ class InputEmbedsReplaceBertForSequenceClassification(BertForSequenceClassificat
         self.num_labels = config.num_labels
         self.config = config
 
-        self.bert = InputEmbedsReplaceBertModel(config)
+        self.bert = GraphPrompterHFBertModel(config)
         classifier_dropout = (
             config.classifier_dropout
             if config.classifier_dropout is not None
@@ -873,7 +736,7 @@ class InputEmbedsReplaceBertForSequenceClassification(BertForSequenceClassificat
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         graph_embeddings: Optional[torch.Tensor] = None,
-        semantic_positional_encoding: Optional[torch.Tensor] = None,
+        token_type_ranges: Optional[torch.Tensor] = None,
         source_id: Optional[torch.LongTensor] = None,
         target_id: Optional[
             torch.LongTensor
@@ -892,7 +755,7 @@ class InputEmbedsReplaceBertForSequenceClassification(BertForSequenceClassificat
         if inputs_embeds is None:
             inputs_embeds = self.bert.embeddings(
                 input_ids,
-                semantic_positional_encoding=semantic_positional_encoding,
+                token_type_ranges=token_type_ranges,
                 graph_embeddings=graph_embeddings,
             )  # we replaced the placeholder padding tokens in the embedding generation with the KGEs
             assert isinstance(inputs_embeds, torch.Tensor)
@@ -944,7 +807,7 @@ class InputEmbedsReplaceBertForSequenceClassification(BertForSequenceClassificat
             logits=logits,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-            semantic_positional_encoding=semantic_positional_encoding,
+            token_type_ranges=token_type_ranges,
         )
 
 
@@ -1168,13 +1031,13 @@ class ClassifierBase(ABC):
 
     def _means_over_ranges_cross(
         self,
-        all_semantic_positional_encoding: torch.Tensor,
+        all_token_type_ranges: torch.Tensor,
         attentions: torch.Tensor,
     ) -> torch.Tensor:
         attentions = mean_over_attention_ranges(
             attentions,
-            all_semantic_positional_encoding[:, :, 0],
-            all_semantic_positional_encoding[:, :, 1],
+            all_token_type_ranges[:, :, 0],
+            all_token_type_ranges[:, :, 1],
         )
         return attentions
 
@@ -1214,7 +1077,7 @@ class ClassifierBase(ABC):
             Path(self.sub_logits_dir_path).mkdir(parents=True, exist_ok=True)
             Path(self.sub_hidden_states_dir_path).mkdir(parents=True, exist_ok=True)
             Path(self.sub_tokens_dir_path).mkdir(parents=True, exist_ok=True)
-            semantic_positional_encodings = {
+            token_type_ranges = {
                 "cls": [0],
                 "user_id": [1],
                 "movie_id": [3],
@@ -1223,9 +1086,9 @@ class ClassifierBase(ABC):
                 "seps": [2, 4, 6, 8],
             }
             sep_list = ["cls", "user_id", "movie_id", "title", "genres", "seps"]
-            if len(dataset[splits[0]][0]["semantic_positional_encoding"]) > 9:
-                semantic_positional_encodings["seps"].extend([10, 12])
-                semantic_positional_encodings["kges"] = [9, 11]
+            if len(dataset[splits[0]][0]["token_type_ranges"]) > 9:
+                token_type_ranges["seps"].extend([10, 12])
+                token_type_ranges["kges"] = [9, 11]
                 sep_list.append("seps")
             tokens_collected = False
             all_tokens = []
@@ -1270,19 +1133,17 @@ class ClassifierBase(ABC):
                             batch = next(iter(data_loader))
                             splits_ = [split] * len(batch["input_ids"])
                             for key in combination:
-                                for pos in semantic_positional_encodings[key]:
+                                for pos in token_type_ranges[key]:
                                     batch["attention_mask"] = replace_ranges(
                                         batch["attention_mask"],
-                                        batch["semantic_positional_encoding"][:, pos],
+                                        batch["token_type_ranges"][:, pos],
                                     )
                             outputs = self.model(
                                 **batch,
                                 output_hidden_states=add_hidden_states,
                                 output_attentions=add_attentions,
                             )
-                            semantic_positional_encoding = batch[
-                                "semantic_positional_encoding"
-                            ]
+                            token_type_ranges = batch["token_type_ranges"]
                             if add_attentions:
                                 attentions = outputs.attentions
                                 attentions = [
@@ -1293,14 +1154,14 @@ class ClassifierBase(ABC):
                                     attentions_test = (
                                         mean_over_attention_ranges_python_slow(
                                             attentions,
-                                            semantic_positional_encoding[:, :, 0],
-                                            semantic_positional_encoding[:, :, 1],
+                                            token_type_ranges[:, :, 0],
+                                            token_type_ranges[:, :, 1],
                                         )
                                     )
                                 attentions = mean_over_attention_ranges(
                                     attentions,
-                                    semantic_positional_encoding[:, :, 0],
-                                    semantic_positional_encoding[:, :, 1],
+                                    token_type_ranges[:, :, 0],
+                                    token_type_ranges[:, :, 1],
                                 )
                                 if not is_test:
                                     attentions_collected.append(attentions)
@@ -1330,14 +1191,14 @@ class ClassifierBase(ABC):
                                     test_hidden_states = (
                                         mean_over_hidden_states_python_slow(
                                             hidden_states,
-                                            semantic_positional_encoding[:, :, 0],
-                                            semantic_positional_encoding[:, :, 1],
+                                            token_type_ranges[:, :, 0],
+                                            token_type_ranges[:, :, 1],
                                         )
                                     )
                                 hidden_states = mean_over_hidden_states(
                                     hidden_states,
-                                    semantic_positional_encoding[:, :, 0],
-                                    semantic_positional_encoding[:, :, 1],
+                                    token_type_ranges[:, :, 0],
+                                    token_type_ranges[:, :, 1],
                                 )
                                 if not is_test:
                                     hidden_states_collected.append(hidden_states)
@@ -1359,7 +1220,7 @@ class ClassifierBase(ABC):
                                 tokens = get_tokens_as_df_cb(
                                     batch["input_ids"],
                                     self.tokenizer,
-                                    semantic_positional_encoding,
+                                    token_type_ranges,
                                 )
                                 tokens["labels"] = batch["labels"].tolist()
                                 tokens["split"] = splits_
@@ -1412,16 +1273,24 @@ class BertClassifierOriginalArchitectureBase(ClassifierBase):
         model_name,
         force_recompute=False,
     ) -> None:
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print("device", self.device)
         best_model_path = f"{root_path}/training/best"
+        config = BertConfig.from_pretrained(model_name)
+        config.type_vocab_size = VANILLA_TOKEN_TYPES
+        config.num_labels = 2
+        config.id2label = ID2LABEL
+        config.label2id = LABEL2ID
         # Initialize the model and tokenizer
         if os.path.exists(best_model_path) and not force_recompute:
             model = BertForSequenceClassificationRanges.from_pretrained(
-                best_model_path, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID
+                best_model_path, config=config, ignore_mismatched_sizes=True
             )
         else:
             model = BertForSequenceClassificationRanges.from_pretrained(
-                model_name, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID
+                model_name, config=config, ignore_mismatched_sizes=True
             )
+        assert isinstance(model, BertForSequenceClassification)
         super().__init__(
             df=df,
             model=model,
@@ -1442,16 +1311,31 @@ class BertClassifierOriginalArchitectureBase(ClassifierBase):
             truncation=True,
             return_tensors="pt",
         )
-        semantic_positional_encoding = get_semantic_positional_encoding(
+        token_type_ranges = get_token_type_ranges(
             tokenized["input_ids"], self.tokenizer.sep_token_id
         )
-        semantic_positional_encoding = sort_ranges(semantic_positional_encoding)
+        token_type_ranges = sort_ranges(token_type_ranges)
+        token_type_ids = torch.zeros_like(tokenized["attention_mask"])
+        for token_type, range_position in zip(
+            VANILLA_TOKEN_TYPE_VALUES, range(token_type_ranges.shape[1])
+        ):
+            token_type_ids = replace_ranges(
+                token_type_ids, token_type_ranges[:, range_position], value=token_type
+            )
+            # token_type_ids_slow = replace_ranges_slow(
+            #     token_type_ids, token_type_ranges[:, range_position], value=token_type
+            # )
+            # assert torch.allclose(
+            #     token_type_ids[:, :-1], token_type_ids_slow[:, :-1], atol=1e-8
+            # ), f"Expected token_type_ids to be same, but are not: {token_type_ids[0,1]}, {token_type_ids_slow[0,1]}, {token_type_ids[0,2]}, {token_type_ids_slow[0,2]}"
+
         if return_pt:
             result = {
                 "input_ids": tokenized["input_ids"],
                 "attention_mask": tokenized["attention_mask"],
                 "labels": example["labels"],
-                "semantic_positional_encoding": semantic_positional_encoding,
+                "token_type_ranges": token_type_ranges,
+                "token_type_ids": token_type_ids,
             }
         else:
             result = {
@@ -1461,9 +1345,8 @@ class BertClassifierOriginalArchitectureBase(ClassifierBase):
                 .to("cpu")
                 .tolist(),
                 "labels": example["labels"],
-                "semantic_positional_encoding": semantic_positional_encoding.detach()
-                .to("cpu")
-                .tolist(),
+                "token_type_ranges": token_type_ranges.detach().to("cpu").tolist(),
+                "token_type_ids": token_type_ids.detach().to("cpu").tolist(),
             }
         return result
 
@@ -1536,16 +1419,24 @@ class EmbeddingBasedClassifier(ClassifierBase):
             truncation=True,
             return_tensors="pt",
         )
-        semantic_positional_encoding = get_semantic_positional_encoding(
+        token_type_ranges = get_token_type_ranges(
             tokenized["input_ids"], self.tokenizer.sep_token_id
         )
-        semantic_positional_encoding = sort_ranges(semantic_positional_encoding)
+        token_type_ranges = sort_ranges(token_type_ranges)
+        token_type_ids = torch.zeros_like(tokenized["attention_mask"])
+        for token_type, range_position in zip(
+            GRAPH_PROMPTER_TOKEN_TYPE_VALUES, range(token_type_ranges.shape[1])
+        ):
+            token_type_ids = replace_ranges(
+                token_type_ids, token_type_ranges[:, range_position], value=token_type
+            )
         if return_pt:
             result = {
                 "input_ids": tokenized["input_ids"],
                 "attention_mask": tokenized["attention_mask"],
                 "labels": example["labels"],
-                "semantic_positional_encoding": semantic_positional_encoding,
+                "token_type_ranges": token_type_ranges,
+                "token_type_ids": token_type_ids,
                 "source_id": example["source_id"],
                 "target_id": example["target_id"],
             }
@@ -1557,16 +1448,15 @@ class EmbeddingBasedClassifier(ClassifierBase):
                 .to("cpu")
                 .tolist(),
                 "labels": example["labels"],
-                "semantic_positional_encoding": semantic_positional_encoding.detach()
-                .to("cpu")
-                .tolist(),
+                "token_type_ranges": token_type_ranges.detach().to("cpu").tolist(),
+                "token_type_ids": token_type_ids.detach().to("cpu").tolist(),
                 "source_id": example["source_id"],
                 "target_id": example["target_id"],
             }
         return result
 
 
-class InputEmbedsReplaceClassifier(EmbeddingBasedClassifier):
+class GraphPrompterHFClassifier(EmbeddingBasedClassifier):
     def __init__(
         self,
         kge_manager,
@@ -1580,16 +1470,19 @@ class InputEmbedsReplaceClassifier(EmbeddingBasedClassifier):
         training_path = f"{root_path}/training"
         model_path = f"{training_path}/best"
 
+        config = BertConfig.from_pretrained(model_name)
+        config.type_vocab_size = GRAPH_PROMPTER_TOKEN_TYPES
+        config.num_labels = 2
+        config.id2label = ID2LABEL
+        config.label2id = LABEL2ID
+        # Initialize the model and tokenizer
         if os.path.exists(model_path) and not force_recompute:
-            model = InputEmbedsReplaceBertForSequenceClassification.from_pretrained(
-                model_path,
-                num_labels=2,
-                id2label=ID2LABEL,
-                label2id=LABEL2ID,
+            model = GraphPrompterHFBertForSequenceClassification.from_pretrained(
+                model_path, config=config, ignore_mismatched_sizes=True
             )
         else:
-            model = InputEmbedsReplaceBertForSequenceClassification.from_pretrained(
-                model_name, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID
+            model = GraphPrompterHFBertForSequenceClassification.from_pretrained(
+                model_name, config=config, ignore_mismatched_sizes=True
             )
         assert isinstance(model, BertForSequenceClassification)
         super().__init__(
@@ -1605,65 +1498,6 @@ class InputEmbedsReplaceClassifier(EmbeddingBasedClassifier):
 
     def plot_training_loss_and_accuracy(self):
         model_type = "Input Embeds Replace"
-        self._plot_training_loss_and_accuracy(model_type)
-
-
-class PromptBertClassifier(BertClassifierOriginalArchitectureBase):
-    def __init__(
-        self,
-        kge_manager,
-        get_embeddings_cb,
-        root_path,
-        model_name=MODEL_NAME,
-        model_max_length=256,
-        false_ratio=0.5,
-        force_recompute=False,
-    ) -> None:
-        tokenizer = BertTokenizer.from_pretrained(
-            model_name, model_max_length=model_max_length
-        )
-        train_data_collator = PromptEmbeddingDataCollator(
-            tokenizer,
-            kge_manager.llm_df,
-            kge_manager.source_df,
-            kge_manager.target_df,
-            kge_manager.gnn_train_data,
-            get_embeddings_cb,
-            false_ratio=false_ratio,
-        )
-        test_data_collator = PromptEmbeddingDataCollator(
-            tokenizer,
-            kge_manager.llm_df,
-            kge_manager.source_df,
-            kge_manager.target_df,
-            kge_manager.gnn_test_data,
-            get_embeddings_cb,
-            false_ratio=-1.0,
-        )
-        val_data_collator = PromptEmbeddingDataCollator(
-            tokenizer,
-            kge_manager.llm_df,
-            kge_manager.source_df,
-            kge_manager.target_df,
-            kge_manager.gnn_val_data,
-            get_embeddings_cb,
-            false_ratio=-1.0,
-        )
-        super().__init__(
-            df=kge_manager.llm_df,
-            tokenizer=tokenizer,
-            train_data_collator=train_data_collator,
-            test_data_collator=test_data_collator,
-            val_data_collator=val_data_collator,
-            model_max_length=model_max_length,
-            semantic_datapoints=EMBEDDINGS_BASED_SEMANTIC_TOKENS,
-            root_path=root_path,
-            model_name=model_name,
-            force_recompute=force_recompute,
-        )
-
-    def plot_training_loss_and_accuracy(self):
-        model_type = "Prompt"
         self._plot_training_loss_and_accuracy(model_type)
 
 

@@ -61,7 +61,7 @@ And print its content in a way, that we display all columns with numpy content a
 print(exp.get_verbose_df(n = 5))
 ```
 
-|   | source_id | target_id | id_x | id_y | prompt_feature_title        | prompt_feature_genres                                       | labels | split | prompt                                                                                       | prompt_source_embedding | prompt_target_embedding | input_embeds_replace_source_embedding | input_embeds_replace_target_embedding | vanilla_attentions | vanilla_hidden_states | vanilla_attentions_original_shape | vanilla_hidden_states_original_shape | prompt_attentions    | prompt_hidden_states  | prompt_attentions_original_shape | prompt_hidden_states_original_shape | input_embeds_replace_attentions | input_embeds_replace_hidden_states | input_embeds_replace_attentions_original_shape | input_embeds_replace_hidden_states_original_shape |
+|   | source_id | target_id | id_x | id_y | prompt_feature_title        | prompt_feature_genres                                       | labels | split | prompt                                                                                       | prompt_source_embedding | prompt_target_embedding | graph_prompter_hf_source_embedding | graph_prompter_hf_target_embedding | vanilla_attentions | vanilla_hidden_states | vanilla_attentions_original_shape | vanilla_hidden_states_original_shape | prompt_attentions    | prompt_hidden_states  | prompt_attentions_original_shape | prompt_hidden_states_original_shape | graph_prompter_hf_attentions | graph_prompter_hf_hidden_states | graph_prompter_hf_attentions_original_shape | graph_prompter_hf_hidden_states_original_shape |
 |---|-----------|-----------|------|------|-----------------------------|-------------------------------------------------------------|--------|-------|----------------------------------------------------------------------------------------------|-------------------------|-------------------------|----------------------------|----------------------------|--------------------|-----------------------|-----------------------------------|--------------------------------------|----------------------|-----------------------|----------------------------------|-------------------------------------|----------------------|-------------------------|-------------------------------------|----------------------------------------|
 | 0 | 0         | 0         | 0    | 0    | Toy Story (1995)            | ['Adventure', 'Animation', 'Children', 'Comedy', 'Fantasy'] | 1      | train | 0[SEP]0[SEP]Toy Story [1995][SEP]('Adventure', 'Animation', 'Children', 'Comedy', 'Fantasy') | float64: (4,)           | float64: (4,)           | float64: (128,)            | float64: (128,)            | float32: (9, 9, 2) | float32: (3, 9, 128)  | int64: (3,)                       | int64: (3,)                          | float32: (13, 13, 2) | float32: (3, 13, 128) | int64: (3,)                      | int64: (3,)                         | float32: (13, 13, 2) | float32: (3, 13, 128)   | int64: (3,)                         | int64: (3,)                            |
 | 1 | 0         | 2         | 0    | 2    | Grumpier Old Men (1995)     | ['Comedy', 'Romance']                                       | 1      | train | 0[SEP]2[SEP]Grumpier Old Men [1995][SEP]('Comedy', 'Romance')                                | float64: (4,)           | float64: (4,)           | float64: (128,)            | float64: (128,)            | float32: (9, 9, 2) | float32: (3, 9, 128)  | int64: (3,)                       | int64: (3,)                          | float32: (13, 13, 2) | float32: (3, 13, 128) | int64: (3,)                      | int64: (3,)                         | float32: (13, 13, 2) | float32: (3, 13, 128)   | int64: (3,)                         | int64: (3,)                            |
@@ -72,9 +72,9 @@ print(exp.get_verbose_df(n = 5))
 As we can see this dataset contains source and target ids of nodes, in context of the MovieLens dataset **user id** and **movie id**. Then there are the natural language features, like prompt_feature_**title** and prompt_feature_**genres**. Labels *1* are existing edges, naming the user has in fact rated the movie. **Prompt** stands for the *Vanilla Prompt* The kind of prompt that does not include KGEs. Every prompt is build the same way: ```source_id[SEP]movie_id[SEP]prompt_feature_1[SEP]prompt_feature_2[SEP]...```
 While the prompt for the model that includes KGEs in the prompt adds
 ```prompt_source_embedding[SEP]prompt_target_embedding[SEP]``` with both embeddings being of dtype float 16 with length 4.
-The *input_embeds_replace_source_embedding* and *input_embeds_replace_target_embedding* are not passed in the prompt but in the input embeddings of the LLM, replacing the placeholder *[PAD]* tokens. Both are of dtype float64 and 128 length, because the Bert model this was produced with has a hidden state size of 128.
+The *graph_prompter_hf_source_embedding* and *graph_prompter_hf_target_embedding* are not passed in the prompt but in the input embeddings of the LLM, replacing the placeholder *[PAD]* tokens. Both are of dtype float64 and 128 length, because the Bert model this was produced with has a hidden state size of 128.
 
-We are more interested in the *vanilla_attentions*, *prompt_attentions* and *input_embeds_replace_attentions*. These arrays give us for the respective strategy the averaged attentions over the prompt positions. So ones we plot these attentions, we will see the attentions the model puts on each individual feature in total. Other then the special tokens *[SEP]* we will also the the beginning token *[CLS]* which is added by the Bert classifier. This token is passed to the classifier header and summarizes the entire models extracted features.
+We are more interested in the *vanilla_attentions*, *prompt_attentions* and *graph_prompter_hf_attentions*. These arrays give us for the respective strategy the averaged attentions over the prompt positions. So ones we plot these attentions, we will see the attentions the model puts on each individual feature in total. Other then the special tokens *[SEP]* we will also the the beginning token *[CLS]* which is added by the Bert classifier. This token is passed to the classifier header and summarizes the entire models extracted features.
 
 We now plot the attentions over all models with:
 
@@ -284,7 +284,7 @@ outputs = self.bert(
 ```
 
 [from](/llm_manager.py#L607-638)
-[tutorial change feed forward](/customize_input_embeds_replace_model.ipynb)
+[tutorial change feed forward](/customize_graph_prompter_hf_model.ipynb)
 
 #### Data Loader
 
@@ -331,7 +331,7 @@ def tokenize_function(self, example, return_pt=False):
         "input_ids": tokenized["input_ids"],
         "attention_mask": tokenized["attention_mask"],
         "labels": example["labels"],
-        "semantic_positional_encoding": semantic_positional_encoding,
+        "token_type_ranges": token_type_ranges,
     }
 ```
 

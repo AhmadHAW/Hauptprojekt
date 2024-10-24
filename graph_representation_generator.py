@@ -151,7 +151,6 @@ class GraphRepresentationGenerator:
             hidden_channels=hidden_channels,
             output_channels=kge_dimension,
             data=data,
-            force_recompute=force_recompute,
         )
         # load if there is a trained model and not force_recompute
         if os.path.isfile(self.model_path) and not force_recompute:
@@ -354,7 +353,9 @@ class GraphRepresentationGenerator:
         )
         return row
 
-    def generate_embeddings(self, llm_df: DataFrame) -> DataFrame:
+    def generate_embeddings(
+        self, llm_df: DataFrame, splits: List[str] = ["train", "val", "test"]
+    ) -> DataFrame:
         """
         This method passes all edges (source - target) to the GNN to produce source and target embeddings.
         Parameters
@@ -366,7 +367,7 @@ class GraphRepresentationGenerator:
         # produce the embeddings for all edges
         print(f"Computing embeddings for embedding dimension {self.kge_dimension}.")
         df_splits = []
-        for split in ["train", "val", "test"]:
+        for split in splits:
             df_split = llm_df.loc[llm_df["split"] == split][["source_id", "target_id"]]
             source_ids = df_split["source_id"].to_list()
             target_ids = df_split["target_id"].to_list()

@@ -16,15 +16,13 @@ from transformers import PreTrainedTokenizer
 
 from utils import (
     row_to_vanilla_datapoint,
-    row_to_prompt_datapoint,
-    row_to_input_embeds_replace_datapoint,
+    row_to_graph_prompter_hf_datapoint,
     find_non_existing_source_targets,
 )
 
 
 ROOT = "./data"  # The root path where models and datasets are saved at.
 
-PROMPT_KGE_DIMENSION = 4
 INPUT_EMBEDS_REPLACE_KGE_DIMENSION = 128
 
 
@@ -60,16 +58,6 @@ class KGManger(ABC):
             self.source_df = source_df
             self.target_df = target_df
             self.edge_df = edge_df
-            self.llm_df = edge_df.merge(
-                source_df, left_on="source_id", right_on="id", how="left"
-            ).merge(target_df, left_on="target_id", right_on="id", how="left")
-            feature_columns = list(
-                filter(
-                    lambda column: column.startswith("gnn_feature_"),
-                    self.llm_df.columns,
-                )
-            )
-            self.llm_df = self.llm_df.drop(columns=feature_columns)
             self.data = self.__generate_hetero_dataset()
             # split HeteroDataset dataset into train, dev and test
             self.__split_data()
@@ -111,7 +99,7 @@ class KGManger(ABC):
             "gnn",
             "llm/vanilla",
             "llm/prompt",
-            "llm/input_embeds_replace",
+            "llm/graph_prompter_hf",
         ]:
             directory = f"{ROOT}/{directory_suffix}"
             if not os.path.exists(directory):
@@ -244,15 +232,15 @@ class KGManger(ABC):
         if save:
             self.save_llm_df()
 
-    def append_input_embeds_replace_graph_embeddings(
+    def append_graph_prompter_hf_graph_embeddings(
         self, graph_embeddings: pd.DataFrame, save: bool = True
     ):
         print("appending input embeds for replace model")
         assert len(self.llm_df) == len(graph_embeddings)
-        self.llm_df["input_embeds_replace_source_embedding"] = graph_embeddings[
+        self.llm_df["graph_prompter_hf_source_embedding"] = graph_embeddings[
             "source_embedding"
         ]
-        self.llm_df["input_embeds_replace_target_embedding"] = graph_embeddings[
+        self.llm_df["graph_prompter_hf_target_embedding"] = graph_embeddings[
             "target_embedding"
         ]
         if save:
@@ -301,20 +289,16 @@ class KGManger(ABC):
             }
         )
         combined_df = pd.concat([df_train, df_test, df_val])
-        combined_df = combined_df.drop_duplicates(
-            subset=["source_id", "target_id"], keep="first"
+        self.llm_df = combined_df.merge(
+            self.source_df, left_on="source_id", right_on="id"
+        ).merge(self.target_df, left_on="target_id", right_on="id")
+        feature_columns = list(
+            filter(
+                lambda column: column.startswith("gnn_feature_"),
+                self.llm_df.columns,
+            )
         )
-        duplicated_df = (
-            combined_df[combined_df.duplicated(subset=["source_id", "target_id"])]
-            .sample(frac=1)
-            .drop_duplicates(subset=["source_id", "target_id"], keep="first")
-        )
-        split_df = pd.concat([combined_df, duplicated_df])
-        split_df = self.llm_df.merge(
-            split_df[["source_id", "target_id", "split", "labels"]],
-            on=["source_id", "target_id"],
-        )
-        self.llm_df = split_df
+        self.llm_df = self.llm_df.drop(columns=feature_columns + ["id_x", "id_y"])
         self.save_llm_df()
 
     def save_llm_df(self):
@@ -335,49 +319,7 @@ class KGManger(ABC):
                 torch.tensor(self.llm_df[column].tolist()), f"{ROOT}/gnn/{column}.pt"
             )
 
-    def generate_prompt_embedding_dataset(
-        self,
-        tokenize_function: Optional[Callable] = None,
-        sep_token: str = "[SEP]",
-        suffix="",
-        df: Optional[pd.DataFrame] = None,
-        force_recompute: bool = False,
-    ) -> Union[DatasetDict, Dataset]:
-        """
-        Generates the dataset for training the prompt model,
-        by passing the tokenizer.tokenize function and
-        the embedding dimension of the target prompt model.
-        """
-        llm_prompt_dataset_path = f"{ROOT}/llm/prompt{suffix}/dataset"
-        if os.path.exists(llm_prompt_dataset_path) and not force_recompute:
-            dataset = datasets.load_from_disk(llm_prompt_dataset_path)
-        else:
-            assert "prompt_source_embedding" in self.llm_df
-            assert "prompt_target_embedding" in self.llm_df
-            assert self.llm_df["prompt_source_embedding"].notna().all()
-            assert self.llm_df["prompt_target_embedding"].notna().all()
-            if isinstance(df, pd.DataFrame):
-                llm_df = df.copy(deep=True)
-            else:
-                llm_df = self.llm_df.copy(deep=True)
-            llm_df["prompt"] = self.llm_df.apply(
-                lambda row: row_to_prompt_datapoint(row, sep_token=sep_token),
-                axis=1,
-            )
-            dataset = self.__dataset_from_df(llm_df)
-            if tokenize_function:
-                dataset = dataset.map(tokenize_function, batched=True)
-            dataset.save_to_disk(llm_prompt_dataset_path)
-
-        return dataset
-
-    def __generate_embeddings(self, row) -> torch.Tensor:
-        source_embeddings = row["input_embeds_replace_source_embedding"]
-        target_embeddings = row["input_embeds_replace_target_embedding"]
-        embeddings = torch.tensor([source_embeddings, target_embeddings])
-        return embeddings
-
-    def generate_input_embeds_replace_embedding_dataset(
+    def generate_graph_prompter_hf_embedding_dataset(
         self,
         sep_token,
         pad_token,
@@ -385,7 +327,7 @@ class KGManger(ABC):
         suffix="",
         df: Optional[pd.DataFrame] = None,
         splits: List[str] = ["train", "test", "val"],
-        add_embeddings: bool = True,
+        get_embeddings_cb: Optional[Callable] = None,
         force_recompute: bool = False,
     ) -> Union[DatasetDict, Dataset]:
         """
@@ -393,7 +335,7 @@ class KGManger(ABC):
         by passing the tokenizer.tokenize function and
         the embedding dimension of the target adding model.
         """
-        llm_adding_dataset_path = f"{ROOT}/llm/input_embeds_replace/dataset{suffix}"
+        llm_adding_dataset_path = f"{ROOT}/llm/graph_prompter_hf/dataset{suffix}"
         if os.path.exists(llm_adding_dataset_path) and not force_recompute:
             dataset = datasets.load_from_disk(llm_adding_dataset_path)
         else:
@@ -401,20 +343,25 @@ class KGManger(ABC):
                 llm_df = df.copy(deep=True)
             else:
                 llm_df = self.llm_df.copy(deep=True)
-            llm_df = llm_df[llm_df["split"] in splits]
+            llm_df = llm_df[llm_df["split"].isin(splits)]
             llm_df["prompt"] = llm_df.apply(
-                lambda row: row_to_input_embeds_replace_datapoint(
+                lambda row: row_to_graph_prompter_hf_datapoint(
                     row, sep_token, pad_token
                 ),
                 axis=1,
             )
-            if add_embeddings:
-                llm_df["graph_embeddings"] = llm_df.apply(
-                    lambda row: self.__generate_embeddings(row),  # type: ignore
-                    axis=1,
-                )  # type: ignore
-                llm_df["graph_embeddings"] = llm_df["graph_embeddings"].apply(
-                    lambda embeddings: embeddings.detach().to("cpu").tolist()
+            if get_embeddings_cb:
+                source_embeddings, target_embeddings = get_embeddings_cb(
+                    self.data,
+                    llm_df["source_id"].to_list(),
+                    llm_df["target_id"].to_list(),
+                )
+                graph_embeddings = torch.stack(
+                    [source_embeddings, target_embeddings], dim=1
+                )
+                del source_embeddings, target_embeddings
+                llm_df["graph_embeddings"] = (
+                    graph_embeddings.to("cpu").detach().tolist()
                 )
             dataset = self.__dataset_from_df(llm_df)
             if tokenize_function:
@@ -435,7 +382,7 @@ class KGManger(ABC):
         Generates the dataset for training the vanilla model,
         by passing the tokenizer.tokenize function.
         """
-        filepath = f"{ROOT}/llm/vanilla{suffix}/dataset"
+        filepath = f"{ROOT}/llm/vanilla/dataset{suffix}"
         if os.path.exists(filepath) and not force_recompute:
             dataset = datasets.load_from_disk(filepath)
         else:
@@ -443,7 +390,7 @@ class KGManger(ABC):
                 llm_df = df.copy(deep=True)
             else:
                 llm_df = self.llm_df.copy(deep=True)
-            llm_df = llm_df[llm_df["split"] in splits]
+            llm_df = llm_df[llm_df["split"].isin(splits)]
             llm_df["prompt"] = llm_df.apply(
                 lambda row: row_to_vanilla_datapoint(row, sep_token=sep_token),
                 axis=1,
@@ -477,14 +424,14 @@ class KGManger(ABC):
         )
         row["prompt_source_embedding"] = prompt_source_embedding.detach().tolist()
         row["prompt_target_embedding"] = prompt_target_embedding.detach().tolist()
-        input_embeds_replace_source_embedding, input_embeds_replace_target_embedding = (
+        graph_prompter_hf_source_embedding, graph_prompter_hf_target_embedding = (
             get_attention_embedding_cb(data, source_id, target_id)
         )
-        row["input_embeds_replace_source_embedding"] = (
-            input_embeds_replace_source_embedding.detach().tolist()
+        row["graph_prompter_hf_source_embedding"] = (
+            graph_prompter_hf_source_embedding.detach().tolist()
         )
-        row["input_embeds_replace_target_embedding"] = (
-            input_embeds_replace_target_embedding.detach().tolist()
+        row["graph_prompter_hf_target_embedding"] = (
+            graph_prompter_hf_target_embedding.detach().tolist()
         )
         return row
 
@@ -584,10 +531,10 @@ class KGManger(ABC):
         all_semantic_tokens: List[List],
         input_ids: torch.Tensor,
         tokenizer: PreTrainedTokenizer,
-        all_semantic_positional_encoding: torch.Tensor,
+        all_token_type_ranges: torch.Tensor,
     ) -> None:
-        ends = all_semantic_positional_encoding[:, :, 1]
-        starts = all_semantic_positional_encoding[:, :, 0]
+        ends = all_token_type_ranges[:, :, 1]
+        starts = all_token_type_ranges[:, :, 0]
         # input: # ends: torch.tensor([2, 5, 6]) starts: tensor([0, 2, 4])
         # Compute the maximum length of the ranges
         max_length = (ends - starts).max()
@@ -684,7 +631,7 @@ class MovieLensManager(KGManger):
         extracts the content into ROOT//ml-32m/"""
         movies_path = f"{ROOT}/ml-32m/movies.csv"
         ratings_path = f"{ROOT}/ml-32m/ratings.csv"
-        url = "https://files.grouplens.org/datasets/movielens/ml-32m.zip"
+        url = "https://files.grouplens.org/datasets/ml-32m.zip"
         extract_zip(download_url(url, ROOT), ROOT)
         movies_df = pd.read_csv(movies_path, index_col="movieId")
         movies_llm_df = pd.read_csv(movies_path, index_col="movieId")
@@ -762,18 +709,16 @@ class MovieLensManager(KGManger):
         self,
         input_ids: torch.Tensor,
         tokenizer: PreTrainedTokenizer,
-        all_semantic_positional_encoding: torch.Tensor,
+        all_token_type_ranges: torch.Tensor,
     ) -> pd.DataFrame:
-        all_semantic_positional_encoding = all_semantic_positional_encoding[
-            :, [1, 3, 5, 7]
-        ]
+        all_token_type_ranges = all_token_type_ranges[:, [1, 3, 5, 7]]
         user_ids = []
         titles = []
         genres = []
         movie_ids = []
         all_semantic_tokens = [user_ids, movie_ids, titles, genres]
         self.fill_all_semantic_tokens(
-            all_semantic_tokens, input_ids, tokenizer, all_semantic_positional_encoding
+            all_semantic_tokens, input_ids, tokenizer, all_token_type_ranges
         )
         all_semantic_tokens[0] = [int(id) for id in all_semantic_tokens[0]]
         all_semantic_tokens[1] = [int(id) for id in all_semantic_tokens[1]]
@@ -793,14 +738,12 @@ class MovieLensManager(KGManger):
         self,
         input_ids: torch.Tensor,
         tokenizer: PreTrainedTokenizer,
-        all_semantic_positional_encoding: torch.Tensor,
+        all_token_type_ranges: torch.Tensor,
     ) -> pd.DataFrame:
-        all_semantic_positional_encoding = all_semantic_positional_encoding[
-            :, [1, 3, 5, 7, 9, 11]
-        ]
+        all_token_type_ranges = all_token_type_ranges[:, [1, 3, 5, 7, 9, 11]]
         all_semantic_tokens = [[], [], [], [], [], []]
         self.fill_all_semantic_tokens(
-            all_semantic_tokens, input_ids, tokenizer, all_semantic_positional_encoding
+            all_semantic_tokens, input_ids, tokenizer, all_token_type_ranges
         )
         all_semantic_tokens[0] = [int(id) for id in all_semantic_tokens[0]]
         all_semantic_tokens[1] = [int(id) for id in all_semantic_tokens[1]]
@@ -824,7 +767,7 @@ class MovieLensManager(KGManger):
             df = dataset[split].to_pandas()
             dfs.append(df)
         df = pd.concat(dfs)
-        regex = r"(vanilla|prompt|input_embeds_replace|input_embeds_replace_frozen)_attentions_original_shape"
+        regex = r"(vanilla|graph_prompter_hf"
         model_types: List = []
         for column in df.columns:
             match = re.search(regex, column)
@@ -855,7 +798,7 @@ class MovieLensManager(KGManger):
             df = dataset[split].to_pandas()
             dfs.append(df)
         df = pd.concat(dfs)
-        regex = r"(vanilla|prompt|input_embeds_replace|input_embeds_replace_frozen)_attentions_original_shape"
+        regex = r"(vanilla|graph_prompter_hf"
         model_types: List = []
         for column in df.columns:
             match = re.search(regex, column)
