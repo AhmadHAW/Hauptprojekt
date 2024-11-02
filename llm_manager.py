@@ -52,24 +52,15 @@ SPLIT_EPOCH_ENDING = "/split_{}_pos_{}_com_{}.npy"
 TOKENS_ENDING = "/tokens.csv"
 
 MODEL_NAME = "google/bert_uncased_L-2_H-128_A-2"
-ALL_SEMANTIC_TOKENS = [
-    "cls",
-    "user",
-    "sep",
-    "movie",
-    "sep",
-    "title",
-    "sep",
-    "genres",
-    "sep",
-]
-EMBEDDINGS_BASED_SEMANTIC_TOKENS = ALL_SEMANTIC_TOKENS + [
-    "user embedding",
-    "sep",
-    "movie embedding",
-    "sep",
-]
-VANILLA_TOKEN_TYPE_VALUES = [0, 2, 1, 2, 1, 3, 1, 3, 1]
+
+TOKEN_TYPE_MAPPING = {
+    0: "cls",
+    1: "sep",
+    2: "source_features",
+    3: "target_features",
+    4: "kges",
+}
+VANILLA_TOKEN_TYPE_VALUES = [0, 2, 1, 3, 1, 3, 1, 3, 1]
 GRAPH_PROMPTER_TOKEN_TYPE_VALUES = VANILLA_TOKEN_TYPE_VALUES + [4, 1, 4, 1]
 VANILLA_TOKEN_TYPES = len(set(VANILLA_TOKEN_TYPE_VALUES))
 GRAPH_PROMPTER_TOKEN_TYPES = len(set(GRAPH_PROMPTER_TOKEN_TYPE_VALUES))
@@ -652,12 +643,18 @@ class GraphPrompterHFBertEmbeddings(BertEmbeddings):
                 and inputs_embeds is not None
             ):
                 batch_indices = torch.arange(len(inputs_embeds)).unsqueeze(1)
-                inputs_embeds[batch_indices, token_type_ranges[:, [-4, -2], 0]] = (
-                    graph_embeddings  # replace the input embeds at the place holder positions with the KGEs.
-                )
-                # inputs_embeds = inputs_embeds.scatter(
-                #     1, mask, graph_embeddings
+                # inputs_embeds[batch_indices, token_type_ranges[:, [-4, -2], 0]] = (
+                #     graph_embeddings  # replace the input embeds at the place holder positions with the KGEs.
                 # )
+                mask = token_type_ranges[:, [-4, -2], 0].repeat(
+                    1, 1, graph_embeddings.shape[-1]
+                )
+                print(
+                    inputs_embeds.shape,
+                    mask.shape,
+                    graph_embeddings.shape,
+                )
+                inputs_embeds = inputs_embeds.scatter(1, mask, graph_embeddings)
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
         embeddings = inputs_embeds + token_type_embeddings
@@ -821,7 +818,6 @@ class ClassifierBase(ABC):
         test_data_collator,
         val_data_collator,
         model_max_length,
-        semantic_datapoints,
         root_path,
         force_recompute=False,
     ) -> None:
@@ -832,7 +828,6 @@ class ClassifierBase(ABC):
         self.train_data_collator = train_data_collator
         self.test_data_collator = test_data_collator
         self.val_data_collator = val_data_collator
-        self.semantic_datapoints = semantic_datapoints
         self.attentions_path = f"{root_path}/attentions.npy"
         self.logits_path = f"{root_path}/logits.npy"
         self.hidden_states_path = f"{root_path}/hidden_states_{{}}.npy"
@@ -1268,7 +1263,6 @@ class BertClassifierOriginalArchitectureBase(ClassifierBase):
         test_data_collator,
         val_data_collator,
         model_max_length,
-        semantic_datapoints,
         root_path,
         model_name,
         force_recompute=False,
@@ -1299,7 +1293,6 @@ class BertClassifierOriginalArchitectureBase(ClassifierBase):
             test_data_collator=test_data_collator,
             val_data_collator=val_data_collator,
             model_max_length=model_max_length,
-            semantic_datapoints=semantic_datapoints,
             root_path=root_path,
             force_recompute=force_recompute,
         )
@@ -1407,7 +1400,6 @@ class EmbeddingBasedClassifier(ClassifierBase):
             test_data_collator=test_data_collator,
             val_data_collator=val_data_collator,
             model_max_length=model_max_length,
-            semantic_datapoints=EMBEDDINGS_BASED_SEMANTIC_TOKENS,
             root_path=root_path,
             force_recompute=force_recompute,
         )
@@ -1529,7 +1521,6 @@ class VanillaBertClassifier(BertClassifierOriginalArchitectureBase):
             test_data_collator=val_data_collator,
             val_data_collator=val_data_collator,
             model_max_length=model_max_length,
-            semantic_datapoints=ALL_SEMANTIC_TOKENS,
             root_path=root_path,
             model_name=model_name,
             force_recompute=force_recompute,

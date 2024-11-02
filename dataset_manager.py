@@ -98,7 +98,6 @@ class KGManger(ABC):
         for directory_suffix in [
             "gnn",
             "llm/vanilla",
-            "llm/prompt",
             "llm/graph_prompter_hf",
         ]:
             directory = f"{ROOT}/{directory_suffix}"
@@ -188,7 +187,7 @@ class KGManger(ABC):
         # For this, we first split the set of edges into
         # training (80%), validation (10%), and testing edges (10%).
         # Across the training edges, we use 70% of edges for message passing,
-        # and 30% of edges for supervision.
+        # and 100% of edges for supervision.
         # We further want to generate fixed negative edges for evaluation with a ratio of 1:1.
         # Negative edges during training will be generated on-the-fly, so we don't want to
         # add them to the graph right away.
@@ -196,8 +195,8 @@ class KGManger(ABC):
         transform = T.RandomLinkSplit(
             num_val=0.1,
             num_test=0.1,
-            disjoint_train_ratio=0.3,
-            neg_sampling_ratio=1.0,
+            disjoint_train_ratio=0.0,
+            neg_sampling_ratio=1,
             add_negative_train_samples=False,
             edge_types=("source", "edge", "target"),
             rev_edge_types=("target", "rev_edge", "source"),
@@ -400,40 +399,6 @@ class KGManger(ABC):
                 dataset = dataset.map(tokenize_function, batched=True)
             dataset.save_to_disk(filepath)
         return dataset
-
-    def add_graph_embeddings(
-        self,
-        row: pd.Series,
-        get_prompt_embedding_cb: Callable,
-        get_attention_embedding_cb: Callable,
-    ) -> pd.Series:
-        split = row["split"]
-        source_id = row["source_id"]
-        target_id = row["target_id"]
-        data = None
-        if split == "train":
-            data = self.gnn_train_data
-        elif split == "val":
-            data = self.gnn_val_data
-        elif split == "test":
-            data = self.gnn_test_data
-        else:
-            raise Exception("no split found where it should have")
-        prompt_source_embedding, prompt_target_embedding = get_prompt_embedding_cb(
-            data, source_id, target_id
-        )
-        row["prompt_source_embedding"] = prompt_source_embedding.detach().tolist()
-        row["prompt_target_embedding"] = prompt_target_embedding.detach().tolist()
-        graph_prompter_hf_source_embedding, graph_prompter_hf_target_embedding = (
-            get_attention_embedding_cb(data, source_id, target_id)
-        )
-        row["graph_prompter_hf_source_embedding"] = (
-            graph_prompter_hf_source_embedding.detach().tolist()
-        )
-        row["graph_prompter_hf_target_embedding"] = (
-            graph_prompter_hf_target_embedding.detach().tolist()
-        )
-        return row
 
     def __flatten_and_rename_if_present(
         self, df: pd.DataFrame, prefix: str, add_tokens: bool = False
