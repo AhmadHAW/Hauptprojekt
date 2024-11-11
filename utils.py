@@ -256,8 +256,79 @@ def replace_ranges_slow(
     return tensor
 
 
+def get_token_type_ranges(input_ids: torch.Tensor, sep_token_id: int) -> torch.Tensor:
+    mask = input_ids == sep_token_id
+    positions = mask.nonzero(as_tuple=True)
+    cols = positions[1]
+
+    # Step 3: Determine the number of True values per row
+    num_trues_per_row = mask.sum(dim=1)
+    max_trues_per_row = num_trues_per_row.max().item()
+    # Step 4: Create an empty tensor to hold the result
+    token_type_ranges = -torch.ones(
+        (mask.size(0), max_trues_per_row),  # type: ignore
+        dtype=torch.long,
+    )
+
+    # Step 5: Use scatter to place column indices in the token_type_ranges tensor
+    # Create an index tensor that assigns each column index to the correct position in token_type_ranges tensor
+    row_indices = torch.arange(mask.size(0)).repeat_interleave(num_trues_per_row)
+    column_indices = torch.cat([torch.arange(n) for n in num_trues_per_row])  # type: ignore
+
+    token_type_ranges[row_indices, column_indices] = cols
+    token_type_ranges = torch.stack(
+        [
+            token_type_ranges[:, :-1] + 1,
+            token_type_ranges[:, 1:],
+        ],
+        dim=2,
+    )
+    # Create a tensor of zeros to represent the starting points
+    second_points = torch.ones(
+        token_type_ranges.size(0),
+        1,
+        2,
+        dtype=token_type_ranges.dtype,
+    )
+    # Set the second column to be the first element of the first range
+    second_points[:, 0, 1] = token_type_ranges[:, 0, 0] - 1
+    # Concatenate the start_points tensor with the original token_type_ranges tensor
+    token_type_ranges = torch.cat((second_points, token_type_ranges), dim=1)
+    return token_type_ranges
+
+
+def sort_ranges(token_type_ranges: torch.Tensor):
+    # Extract the second element (end of the current ranges excluded the starting cps token)
+    end_elements = token_type_ranges[:, :, 1]
+    # Create the new ranges by adding 1 to the end elements
+    new_ranges = torch.stack([end_elements, end_elements + 1], dim=-1)
+    # add the cls positions to it
+    cls_positions = torch.tensor([0, 1])
+    cls_positions = cls_positions.unsqueeze(0).unsqueeze(0)  # Shape (1, 1, 2)
+    cls_positions = cls_positions.expand(
+        new_ranges.size(0), 1, -1
+    )  # Shape (batch_size, 1, 2)
+    new_ranges = torch.cat((new_ranges, cls_positions), dim=1)
+    # Concatenate the original ranges with the new ranges
+    token_type_ranges = torch.cat((token_type_ranges, new_ranges), dim=1)
+    # Step 1: Extract the last value of dimension 2
+    last_values = token_type_ranges[:, :, -1]  # Shape (batch_size, num_elements)
+
+    # Step 2: Sort the indices based on these last values
+    # 'values' gives the sorted values (optional), 'indices' gives the indices to sort along dim 1
+    _, indices = torch.sort(last_values, dim=1, descending=False)
+
+    # Step 3: Apply the sorting indices to the original tensor
+    token_type_ranges = torch.gather(
+        token_type_ranges,
+        1,
+        indices.unsqueeze(-1).expand(-1, -1, token_type_ranges.size(2)),
+    )
+    return token_type_ranges
+
+
 # Get all permutations (order does not matter)
-def get_combinations(elements: List[str]) -> List[Set[str]]:
+def get_combinations(elements: List[int]) -> List[Set[int]]:
     result = []
     for r in range(1, len(elements) + 1):  # r is the length of permutations
         result.extend(itertools.combinations(elements, r))
@@ -274,29 +345,9 @@ def chunks(lst, n):
         yield lst[i : i + n]
 
 
-def row_to_graph_prompter_hf_datapoint(
-    row: pd.Series,
-    sep_token: str = "[SEP]",
-    pad_token: str = "[PAD]",
-) -> str:
-    prompt = row_to_vanilla_datapoint(row, sep_token)
-    prompt = f"{prompt}{sep_token}{pad_token}{sep_token}{pad_token}"
-    return prompt
-
-
-def row_to_vanilla_datapoint(row: pd.Series, sep_token: str = "[SEP]") -> str:
-    prompt = ""
-    prompt_columns = list(
-        filter(
-            lambda column: column.startswith("prompt_feature_")
-            or column in ["source_id", "target_id"],
-            row.keys(),
-        )
-    )
-    for prompt_column in prompt_columns:
-        prompt += f"{row[prompt_column]}{sep_token}"
-    return prompt[: -len(sep_token)]
-
-
 def transform_embeddings_to_string(embeddings: torch.Tensor, float_numbers: int = 16):
     return str([format(embedding, f".{float_numbers}f") for embedding in embeddings])
+
+
+def find_all_index(value, elements: List) -> List[int]:
+    return [i for i, x in enumerate(elements) if x == value]

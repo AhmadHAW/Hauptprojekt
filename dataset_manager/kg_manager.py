@@ -1,29 +1,21 @@
 import os
-from typing import List, Tuple, Callable, Optional, Dict, Union, Set, Union
+from typing import List, Callable, Optional, Union, Union
 from abc import ABC
-import ast
-import re
 
 import torch
-from torch_geometric.data import download_url, extract_zip
 from torch_geometric.data import HeteroData
 import torch_geometric.transforms as T
 import pandas as pd
 import datasets
-import numpy as np
-from datasets import Dataset, DatasetDict, load_from_disk, load_dataset
+from datasets import Dataset, DatasetDict, load_from_disk
 from transformers import PreTrainedTokenizer
 
-from utils import (
-    row_to_vanilla_datapoint,
-    row_to_graph_prompter_hf_datapoint,
-    find_non_existing_source_targets,
-)
+from utils import find_non_existing_source_targets
+from llm_manager.vanilla.utils import row_to_vanilla_datapoint
+from llm_manager.graph_prompter_hf.utils import row_to_graph_prompter_hf_datapoint
 
 
 ROOT = "./data"  # The root path where models and datasets are saved at.
-
-INPUT_EMBEDS_REPLACE_KGE_DIMENSION = 128
 
 
 class KGManger(ABC):
@@ -187,7 +179,7 @@ class KGManger(ABC):
         # For this, we first split the set of edges into
         # training (80%), validation (10%), and testing edges (10%).
         # Across the training edges, we use 70% of edges for message passing,
-        # and 100% of edges for supervision.
+        # and 30% of edges for supervision.
         # We further want to generate fixed negative edges for evaluation with a ratio of 1:1.
         # Negative edges during training will be generated on-the-fly, so we don't want to
         # add them to the graph right away.
@@ -195,7 +187,7 @@ class KGManger(ABC):
         transform = T.RandomLinkSplit(
             num_val=0.1,
             num_test=0.1,
-            disjoint_train_ratio=0.0,
+            disjoint_train_ratio=0.7,
             neg_sampling_ratio=1,
             add_negative_train_samples=False,
             edge_types=("source", "edge", "target"),
@@ -221,15 +213,6 @@ class KGManger(ABC):
             lambda row: row_to_vanilla_datapoint(row, sep_token=sep_token),
             axis=1,
         )
-
-    def append_prompt_graph_embeddings(
-        self, graph_embeddings: pd.DataFrame, save: bool = True
-    ):
-        assert len(self.llm_df) == len(graph_embeddings)
-        self.llm_df["prompt_source_embedding"] = graph_embeddings["source_embedding"]
-        self.llm_df["prompt_target_embedding"] = graph_embeddings["target_embedding"]
-        if save:
-            self.save_llm_df()
 
     def append_graph_prompter_hf_graph_embeddings(
         self, graph_embeddings: pd.DataFrame, save: bool = True
@@ -335,34 +318,35 @@ class KGManger(ABC):
         the embedding dimension of the target adding model.
         """
         llm_adding_dataset_path = f"{ROOT}/llm/graph_prompter_hf/dataset{suffix}"
+        llm_adding_dataset_temp_path = (
+            f"{ROOT}/llm/graph_prompter_hf/dataset{suffix}_temp"
+        )
         if os.path.exists(llm_adding_dataset_path) and not force_recompute:
             dataset = datasets.load_from_disk(llm_adding_dataset_path)
         else:
-            if isinstance(df, pd.DataFrame):
-                llm_df = df.copy(deep=True)
-            else:
-                llm_df = self.llm_df.copy(deep=True)
-            llm_df = llm_df[llm_df["split"].isin(splits)]
-            llm_df["prompt"] = llm_df.apply(
-                lambda row: row_to_graph_prompter_hf_datapoint(
-                    row, sep_token, pad_token
-                ),
-                axis=1,
-            )
-            if get_embeddings_cb:
-                source_embeddings, target_embeddings = get_embeddings_cb(
-                    self.data,
-                    llm_df["source_id"].to_list(),
-                    llm_df["target_id"].to_list(),
+            if not os.path.exists(llm_adding_dataset_temp_path) or force_recompute:
+                if isinstance(df, pd.DataFrame):
+                    llm_df = df.copy(deep=True)
+                else:
+                    llm_df = self.llm_df.copy(deep=True)
+                llm_df = llm_df[llm_df["split"].isin(splits)]
+                llm_df["prompt"] = llm_df.apply(
+                    lambda row: row_to_graph_prompter_hf_datapoint(
+                        row, sep_token, pad_token
+                    ),
+                    axis=1,
                 )
-                graph_embeddings = torch.stack(
-                    [source_embeddings, target_embeddings], dim=1
-                )
-                del source_embeddings, target_embeddings
-                llm_df["graph_embeddings"] = (
-                    graph_embeddings.to("cpu").detach().tolist()
-                )
-            dataset = self.__dataset_from_df(llm_df)
+                if get_embeddings_cb:
+                    source_kges, target_kges = get_embeddings_cb(
+                        self.data,
+                        llm_df["source_id"].to_list(),
+                        llm_df["target_id"].to_list(),
+                    )
+                    llm_df["source_kges"] = source_kges.to("cpu").detach().tolist()
+                    llm_df["target_kges"] = target_kges.to("cpu").detach().tolist()
+                dataset = self.__dataset_from_df(llm_df)
+                dataset.save_to_disk(llm_adding_dataset_temp_path)
+            dataset = load_from_disk(llm_adding_dataset_temp_path)
             if tokenize_function:
                 dataset = dataset.map(tokenize_function, batched=True)
             dataset.save_to_disk(llm_adding_dataset_path)
@@ -551,237 +535,3 @@ class KGManger(ABC):
             )
             self.llm_df = pd.concat([self.llm_df, df])
             self.save_llm_df()
-
-
-class MovieLensManager(KGManger):
-    """
-    The MovieLensManager manages the original graph data set and the pre-processed data sets for GNNs and LLMs.
-    """
-
-    def __init__(
-        self,
-        source_df: Optional[pd.DataFrame] = None,
-        target_df: Optional[pd.DataFrame] = None,
-        edge_df: Optional[pd.DataFrame] = None,
-        force_recompute: bool = False,
-    ) -> None:
-        """
-        The constructor allows general settings, like forcing to reload even tho there are datasets present.
-        The preprocessing of the dataset can be read in detail in the original gnn link prediction tutorial of
-        torch geometrics (https://colab.research.google.com/drive/1xpzn1Nvai1ygd_P5Yambc_oe4VBPK_ZT?usp=sharing#scrollTo=vit8xKCiXAue)
-
-        Parameters
-        __________
-        force_recompute:            bool
-                                    Whether to force reloading and recomputing datasets and values.
-                                    Default False -> Loads and computes only if missing.
-
-
-        """
-        if not self._data_present() or force_recompute:
-            if source_df:
-                assert target_df
-                assert edge_df
-            else:
-                movies_df, movies_llm_df, ratings_df = self.__download_dataset()
-                source_df, target_df, edge_df = self.__map_to_unique(
-                    movies_df, movies_llm_df, ratings_df
-                )
-            super().__init__(source_df, target_df, edge_df, force_recompute)
-        else:
-            self._load_datasets_from_disk()
-
-    def __download_dataset(self) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        """Downloads the https://files.grouplens.org/datasets/movielens/ml-32m.zip dataset and
-        extracts the content into ROOT//ml-32m/"""
-        movies_path = f"{ROOT}/ml-32m/movies.csv"
-        ratings_path = f"{ROOT}/ml-32m/ratings.csv"
-        url = "https://files.grouplens.org/datasets/ml-32m.zip"
-        extract_zip(download_url(url, ROOT), ROOT)
-        movies_df = pd.read_csv(movies_path, index_col="movieId")
-        movies_llm_df = pd.read_csv(movies_path, index_col="movieId")
-        movies_llm_df["genres"] = movies_llm_df["genres"].apply(
-            lambda genres: list(genres.split("|"))
-        )
-        ratings_df = pd.read_csv(ratings_path)
-        return movies_df, movies_llm_df, ratings_df
-
-    def __map_to_unique(
-        self,
-        movies_df: pd.DataFrame,
-        movies_llm_df: pd.DataFrame,
-        ratings_df: pd.DataFrame,
-    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        """Maps the IDs from the data set to a compact ID series.
-        Then merge the data points so that <userID, movieID, title, genres] quadruples are created.
-        """
-        # Create a mapping from unique user indices to range [0, num_user_nodes):
-        unique_user_id = ratings_df["userId"].unique()
-        unique_user_id = pd.DataFrame(
-            data={
-                "userId": unique_user_id,
-                "mappedUserId": pd.RangeIndex(len(unique_user_id)),
-            }
-        )
-        source_df = pd.DataFrame({"id": pd.RangeIndex(len(unique_user_id))})
-        # Create a mapping from unique movie indices to range [0, num_movie_nodes):
-        unique_movie_id = pd.DataFrame(
-            data={
-                "movieId": movies_df.index,
-                "mappedMovieId": pd.RangeIndex(len(movies_df)),
-            }
-        )
-        target_df = pd.DataFrame(
-            data={
-                "id": pd.RangeIndex(len(movies_llm_df)),
-                "title": movies_llm_df["title"].tolist(),
-                "genres": movies_llm_df["genres"].tolist(),
-            }
-        )
-        genre_dummies = (
-            pd.get_dummies(target_df["genres"].explode(), prefix="gnn_feature")
-            .groupby(level=0)
-            .sum()
-        )
-        target_df = pd.concat([target_df, genre_dummies], axis=1)
-
-        # Perform merge to obtain the edges from users and movies:
-        ratings_user_id = pd.merge(
-            ratings_df["userId"],
-            unique_user_id,
-            left_on="userId",
-            right_on="userId",
-            how="left",
-        )
-        ratings_user_id = torch.from_numpy(ratings_user_id["mappedUserId"].values)
-        ratings_movie_id = pd.merge(
-            ratings_df["movieId"],
-            unique_movie_id,
-            left_on="movieId",
-            right_on="movieId",
-            how="left",
-        )
-        ratings_movie_id = torch.from_numpy(ratings_movie_id["mappedMovieId"].values)
-        edge_df = pd.DataFrame(
-            {"source_id": ratings_user_id, "target_id": ratings_movie_id}
-        )
-        target_df = target_df.rename(
-            columns={"title": "prompt_feature_title", "genres": "prompt_feature_genres"}
-        )
-        return source_df, target_df, edge_df
-
-    def get_vanilla_tokens_as_df(
-        self,
-        input_ids: torch.Tensor,
-        tokenizer: PreTrainedTokenizer,
-        all_token_type_ranges: torch.Tensor,
-    ) -> pd.DataFrame:
-        all_token_type_ranges = all_token_type_ranges[:, [1, 3, 5, 7]]
-        user_ids = []
-        titles = []
-        genres = []
-        movie_ids = []
-        all_semantic_tokens = [user_ids, movie_ids, titles, genres]
-        self.fill_all_semantic_tokens(
-            all_semantic_tokens, input_ids, tokenizer, all_token_type_ranges
-        )
-        all_semantic_tokens[0] = [int(id) for id in all_semantic_tokens[0]]
-        all_semantic_tokens[1] = [int(id) for id in all_semantic_tokens[1]]
-        all_semantic_tokens[3] = [
-            ast.literal_eval(string_list) for string_list in all_semantic_tokens[3]
-        ]
-        data = {
-            "source_id": all_semantic_tokens[0],
-            "target_id": all_semantic_tokens[1],
-            "title": all_semantic_tokens[2],
-            "genres": all_semantic_tokens[3],
-        }
-        df = pd.DataFrame(data)
-        return df
-
-    def get_prompt_tokens_as_df(
-        self,
-        input_ids: torch.Tensor,
-        tokenizer: PreTrainedTokenizer,
-        all_token_type_ranges: torch.Tensor,
-    ) -> pd.DataFrame:
-        all_token_type_ranges = all_token_type_ranges[:, [1, 3, 5, 7, 9, 11]]
-        all_semantic_tokens = [[], [], [], [], [], []]
-        self.fill_all_semantic_tokens(
-            all_semantic_tokens, input_ids, tokenizer, all_token_type_ranges
-        )
-        all_semantic_tokens[0] = [int(id) for id in all_semantic_tokens[0]]
-        all_semantic_tokens[1] = [int(id) for id in all_semantic_tokens[1]]
-        all_semantic_tokens[3] = [
-            ast.literal_eval(string_list) for string_list in all_semantic_tokens[3]
-        ]
-        data = {
-            "source_id": all_semantic_tokens[0],
-            "target_id": all_semantic_tokens[1],
-            "title": all_semantic_tokens[2],
-            "genres": all_semantic_tokens[3],
-        }
-        df = pd.DataFrame(data)
-        return df
-
-    @staticmethod
-    def load_dataset_from_disk(path_to_hf_dataset: str) -> pd.DataFrame:
-        dataset = load_from_disk(path_to_hf_dataset)
-        dfs = []
-        for split in ["train", "test", "val"]:
-            df = dataset[split].to_pandas()
-            dfs.append(df)
-        df = pd.concat(dfs)
-        regex = r"(vanilla|graph_prompter_hf"
-        model_types: List = []
-        for column in df.columns:
-            match = re.search(regex, column)
-            if match:
-                model_types.append(match.group(1))
-        for attention_column in model_types:
-            df[f"{attention_column}_attentions"] = df.apply(
-                lambda row: row[f"{attention_column}_attentions"].reshape(
-                    row[f"{attention_column}_attentions_original_shape"]
-                ),
-                axis=1,
-            )
-
-        for hidden_state_column in model_types:
-            df[f"{hidden_state_column}_hidden_states"] = df.apply(
-                lambda row: row[f"{hidden_state_column}_hidden_states"].reshape(
-                    row[f"{hidden_state_column}_hidden_states_original_shape"]
-                ),
-                axis=1,
-            )
-        return df
-
-    @staticmethod
-    def load_dataset_from_hub(path_to_dataset_hub: str) -> pd.DataFrame:
-        dataset = load_dataset(path_to_dataset_hub)
-        dfs = []
-        for split in ["train", "test", "val"]:
-            df = dataset[split].to_pandas()
-            dfs.append(df)
-        df = pd.concat(dfs)
-        regex = r"(vanilla|graph_prompter_hf"
-        model_types: List = []
-        for column in df.columns:
-            match = re.search(regex, column)
-            if match:
-                model_types.append(match.group(1))
-        for attention_column in model_types:
-            df[f"{attention_column}_attentions"] = df.apply(
-                lambda row: row[f"{attention_column}_attentions"].reshape(
-                    row[f"{attention_column}_attentions_original_shape"]
-                ),
-                axis=1,
-            )
-
-        for hidden_state_column in model_types:
-            df[f"{hidden_state_column}_hidden_states"] = df.apply(
-                lambda row: row[f"{hidden_state_column}_hidden_states"].reshape(
-                    row[f"{hidden_state_column}_hidden_states_original_shape"]
-                ),
-                axis=1,
-            )
-        return df
