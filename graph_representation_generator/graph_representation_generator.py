@@ -185,8 +185,7 @@ class GraphRepresentationGenerator:
         all_target_node_embeddings = []
         for sampled_data in batch_sampled_data:
             assert isinstance(sampled_data, HeteroData)
-            assert sampled_data is not None
-            # sampled_data.to(self.device)  # type: ignore
+            assert sampled_data is not ModuleNotFoundError
             embeddings = self.model.forward_without_classifier(sampled_data)
             edge_label_index = sampled_data[
                 "source", "edge", "target"
@@ -306,4 +305,4 @@ class GraphRepresentationGenerator:
         print(f"Validation AUC: {auc:.4f}")
 
     def save_model(self):
-        torch.save(self.model.to(device="cpu").gnn.state_dict(), self.model_path)
+        torch.save(self.model.to(device="cpu").state_dict(), self.model_path)

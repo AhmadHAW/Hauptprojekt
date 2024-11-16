@@ -15,38 +15,7 @@ from llm_manager.data_collator_base import DataCollatorBase
 from llm_manager.vanilla.config import VANILLA_TOKEN_TYPE_VALUES
 
 
-class TextBasedDataCollator(DataCollatorBase, ABC):
-    def __init__(self, tokenizer, df, source_df, target_df, false_ratio=0.5):
-        super().__init__(tokenizer, df, source_df, target_df, false_ratio=false_ratio)
-
-    def _convert_features_into_batches(self, features: List[Dict]) -> Dict:
-        input_ids = []
-        attention_mask = []
-        labels = []
-        token_type_ranges = []
-        token_type_ids = []
-
-        for f in features:
-            input_ids.append(f["input_ids"])
-            attention_mask.append(f["attention_mask"])
-            labels.append(f["labels"])
-            token_type_ranges.append(f["token_type_ranges"])
-            token_type_ids.append(f["token_type_ids"])
-        input_ids = torch.tensor(input_ids, dtype=torch.long)
-        attention_mask = torch.tensor(attention_mask, dtype=torch.long)
-        labels = torch.tensor(labels, dtype=torch.long)
-        token_type_ranges = torch.tensor(token_type_ranges, dtype=torch.long)
-        token_type_ids = torch.tensor(token_type_ids, dtype=torch.long)
-        return {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "labels": labels,
-            "token_type_ranges": token_type_ranges,
-            "token_type_ids": token_type_ids,
-        }
-
-
-class VanillaEmbeddingDataCollator(TextBasedDataCollator):
+class VanillaDataCollator(DataCollatorBase):
     """
     The vanilla data collator in addition to the original DataCollator, this collator generates false examples
     depending on the false ratio set during initialization.
@@ -105,3 +74,29 @@ class VanillaEmbeddingDataCollator(TextBasedDataCollator):
             )
         ]
         return result_dict
+
+    def _convert_features_into_batches(self, features: List[Dict]) -> Dict:
+        input_ids = []
+        attention_mask = []
+        labels = []
+        token_type_ranges = []
+        token_type_ids = []
+
+        for f in features:
+            input_ids.append(f["input_ids"])
+            attention_mask.append(f["attention_mask"])
+            labels.append(f["labels"])
+            token_type_ranges.append(f["token_type_ranges"])
+            token_type_ids.append(f["token_type_ids"])
+        input_ids = torch.tensor(input_ids, dtype=torch.long)
+        attention_mask = torch.tensor(attention_mask, dtype=torch.long)
+        labels = torch.tensor(labels, dtype=torch.long)
+        token_type_ranges = torch.tensor(token_type_ranges, dtype=torch.long)
+        token_type_ids = torch.tensor(token_type_ids, dtype=torch.long)
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": labels,
+            "token_type_ranges": token_type_ranges,
+            "token_type_ids": token_type_ids,
+        }

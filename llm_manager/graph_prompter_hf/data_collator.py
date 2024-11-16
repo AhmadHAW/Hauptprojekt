@@ -23,23 +23,18 @@ class GraphPrompterHFDataCollator(DataCollatorBase):
         df,
         source_df,
         target_df,
-        data,
-        get_embeddings_cb,
-        detach_kges,
+        split,
         false_ratio=0.5,
     ):
         super().__init__(
             tokenizer, df, source_df, target_df, false_ratio=false_ratio, device=device
         )
-        self.data = data
-        self.get_embeddings_cb = get_embeddings_cb
-        self.detach_kges = detach_kges
+        self.split = split
 
     def _convert_features_into_batches(self, features: List[Dict]) -> Dict:
         input_ids = []
         attention_mask = []
         labels = []
-        token_type_ranges = []
         token_type_ids = []
         source_ids = []
         target_ids = []
@@ -49,7 +44,6 @@ class GraphPrompterHFDataCollator(DataCollatorBase):
             input_ids.append(f["input_ids"])
             attention_mask.append(f["attention_mask"])
             labels.append(f["labels"])
-            token_type_ranges.append(f["token_type_ranges"])
             token_type_ids.append(f["token_type_ids"])
             source_ids.append(f["source_id"])
             target_ids.append(f["target_id"])
@@ -60,16 +54,8 @@ class GraphPrompterHFDataCollator(DataCollatorBase):
         input_ids = torch.tensor(input_ids, dtype=torch.long)
         attention_mask = torch.tensor(attention_mask, dtype=torch.long)
         labels = torch.tensor(labels, dtype=torch.long)
-        token_type_ranges = torch.tensor(token_type_ranges, dtype=torch.long)
         token_type_ids = torch.tensor(token_type_ids, dtype=torch.long)
-        if len(source_kges) == 0:
-            source_kges, target_kges = self.get_embeddings_cb(
-                self.data, source_ids, target_ids
-            )
-            if self.detach_kges:
-                source_kges = source_kges.detach()
-                target_kges = target_kges.detach()
-        else:
+        if len(source_kges) > 0:
             source_kges = torch.stack(source_kges)
             target_kges = torch.stack(target_kges)
         return {
@@ -78,8 +64,10 @@ class GraphPrompterHFDataCollator(DataCollatorBase):
             "labels": labels,
             "source_kges": source_kges,
             "target_kges": target_kges,
-            "token_type_ranges": token_type_ranges,
             "token_type_ids": token_type_ids,
+            "source_id": source_ids,
+            "target_id": target_ids,
+            "split": self.split,
         }
 
     def _generate_false_examples(self, k: int) -> List[Dict]:

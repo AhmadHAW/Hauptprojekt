@@ -14,8 +14,8 @@ from transformers import (
 from llm_manager.classifier_base import ClassifierBase
 from utils import get_token_type_ranges, replace_ranges, sort_ranges
 from llm_manager.vanilla.config import VANILLA_TOKEN_TYPE_VALUES, VANILLA_TOKEN_TYPES
-from llm_manager.vanilla.data_collator import VanillaEmbeddingDataCollator
-from llm_manager.modeling_outputs import SequenceClassifierOutputOverRanges
+from llm_manager.vanilla.data_collator import VanillaDataCollator
+from transformers.modeling_outputs import SequenceClassifierOutput
 
 
 class VanillaBertForSequenceClassification(BertForSequenceClassification):
@@ -35,8 +35,7 @@ class VanillaBertForSequenceClassification(BertForSequenceClassification):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        token_type_ranges: Optional[torch.Tensor] = None,
-    ) -> Union[Tuple[torch.Tensor], SequenceClassifierOutputOverRanges]:
+    ) -> Union[Tuple[torch.Tensor], SequenceClassifierOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
             Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
@@ -92,12 +91,11 @@ class VanillaBertForSequenceClassification(BertForSequenceClassification):
             output = (logits,) + outputs[2:]
             return ((loss,) + output) if loss is not None else output
 
-        return SequenceClassifierOutputOverRanges(
+        return SequenceClassifierOutput(
             loss=loss,
             logits=logits,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-            token_type_ranges=token_type_ranges,
         )
 
 
@@ -116,10 +114,10 @@ class VanillaClassifier(ClassifierBase):
         tokenizer = BertTokenizer.from_pretrained(
             model_name, model_max_length=model_max_length
         )
-        train_data_collator = VanillaEmbeddingDataCollator(
+        train_data_collator = VanillaDataCollator(
             tokenizer, df, source_df, target_df, false_ratio=false_ratio
         )
-        val_data_collator = VanillaEmbeddingDataCollator(
+        val_data_collator = VanillaDataCollator(
             tokenizer, df, source_df, target_df, false_ratio=-1.0
         )
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -174,7 +172,6 @@ class VanillaClassifier(ClassifierBase):
                 "input_ids": tokenized["input_ids"],
                 "attention_mask": tokenized["attention_mask"],
                 "labels": example["labels"],
-                "token_type_ranges": token_type_ranges,
                 "token_type_ids": token_type_ids,
                 "source_id": example["source_id"],
                 "target_id": example["target_id"],
@@ -187,7 +184,6 @@ class VanillaClassifier(ClassifierBase):
                 .to("cpu")
                 .tolist(),
                 "labels": example["labels"],
-                "token_type_ranges": token_type_ranges.detach().to("cpu").tolist(),
                 "token_type_ids": token_type_ids.detach().to("cpu").tolist(),
                 "source_id": example["source_id"],
                 "target_id": example["target_id"],

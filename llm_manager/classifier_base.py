@@ -52,15 +52,15 @@ class ClassifierBase(ABC):
         tokenizer,
         train_data_collator,
         test_data_collator,
-        val_data_collator,
+        val_data_collator,  # TODO: make these optional and then use the train data collator if not passed
         root_path,
         gnn_parameters: Optional[List[Parameter]] = None,
         force_recompute=False,
     ) -> None:
-        self.predictions = None
-        self.df = df
+        self.predictions = None  # TODO: remove
+        self.df = df  # TODO: remove
         self.model = model
-        self.tokenizer = tokenizer
+        self.tokenizer = tokenizer  # TODO: remove
         self.train_data_collator = train_data_collator
         self.test_data_collator = test_data_collator
         self.val_data_collator = val_data_collator
@@ -81,10 +81,12 @@ class ClassifierBase(ABC):
         )
         self.sub_tokens_dir_path = f"{root_path}/tokens"
         self.sub_tokens_path = f"{self.sub_tokens_dir_path}{TOKENS_ENDING}"
-        self.force_recompute = force_recompute
+        self.force_recompute = force_recompute  # TODO: remove
         self.gnn_parameters = gnn_parameters
 
-    def _get_data_collator(self, split) -> DataCollatorForLanguageModeling:
+    def _get_data_collator(
+        self, split
+    ) -> DataCollatorForLanguageModeling:  # TODO: remove instead use dict
         return (
             self.test_data_collator
             if split == "test"
@@ -134,11 +136,18 @@ class ClassifierBase(ABC):
     def _get_trainer(
         self,
         dataset,
-        tokenize=False,
-        eval_data_collator=None,
+        tokenize=False,  # TODO: remove because depricated
+        eval_data_collator=None,  # TODO: remove because depricated
         epochs=3,
         batch_size: int = 64,
     ):
+        def _compute_metrics(eval_pred):
+            predictions, labels = eval_pred
+            predictions = np.argmax(predictions, axis=1)
+            return METRIC.compute(predictions=predictions, references=labels)
+
+        use_cpu = False if torch.cuda.is_available() else True
+
         if tokenize:
             tokenized_dataset = dataset.map(self.tokenize_function, batched=True)
         else:
@@ -155,6 +164,7 @@ class ClassifierBase(ABC):
             save_strategy="epoch",
             eval_strategy="epoch",
             load_best_model_at_end=True,
+            use_cpu=use_cpu,
         )
         if not eval_data_collator:
             eval_data_collator = self.test_data_collator
@@ -167,15 +177,10 @@ class ClassifierBase(ABC):
             eval_dataset=tokenized_dataset["test"],
             data_collator=self.train_data_collator,
             eval_data_collator=eval_data_collator,
-            compute_metrics=self._compute_metrics,
+            compute_metrics=_compute_metrics,
             gnn_parameters=self.gnn_parameters,
         )
         return trainer
-
-    def _compute_metrics(self, eval_pred):
-        predictions, labels = eval_pred
-        predictions = np.argmax(predictions, axis=1)
-        return METRIC.compute(predictions=predictions, references=labels)
 
     @abstractmethod
     def tokenize_function(self, example, return_pt=False):
@@ -195,7 +200,7 @@ class ClassifierBase(ABC):
         trainer.model.to(device="cpu").save_pretrained(self.best_model_path)  # type: ignore
         trainer.model.to(device=self.device)  # type: ignore
 
-    @staticmethod
+    @staticmethod  # TODO: move to ExplainabilityModule
     def _plot_training_loss_and_accuracy(model_type: str, root: str = "./data/llm"):
         training_state_path = (
             f"{root}/{model_type}/training/checkpoint-4420/trainer_state.json"
@@ -266,7 +271,7 @@ class ClassifierBase(ABC):
         plt.legend()
         plt.show()
 
-    def _means_over_ranges_cross(
+    def _means_over_ranges_cross(  # TODO: remove
         self,
         all_token_type_ranges: torch.Tensor,
         attentions: torch.Tensor,
@@ -480,7 +485,9 @@ class ClassifierBase(ABC):
                             )
 
     @staticmethod
-    def read_forward_dataset(root: str, splits: List[str] = ["train", "test", "val"]):
+    def read_forward_dataset(
+        root: str, splits: List[str] = ["train", "test", "val"]
+    ):  # TODO: move to EvaluationModule
         tokens_path = f"{root}/tokens.csv"
         hidden_states_path = f"{root}/hidden_states.npy"
         attentions_path = f"{root}/attentions.npy"

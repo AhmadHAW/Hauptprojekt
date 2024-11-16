@@ -103,4 +103,5 @@ class CustomTrainer(Trainer):
         # add gnn parameters if available
         if self.optimizer and self.gnn_parameters:
             # Add parameters of the other model to the optimizer
+            print("Adding GNN parameters to optimizer")
             self.optimizer.add_param_group({"params": self.gnn_parameters})  # type: ignore TODO: Fix typing issues

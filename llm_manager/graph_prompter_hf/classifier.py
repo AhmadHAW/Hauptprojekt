@@ -5,11 +5,13 @@ from pathlib import Path
 import torch
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss, Parameter
+from torch_geometric.data import HeteroData
 from transformers import (
     BertForSequenceClassification,
     BertTokenizer,
     BertConfig,
 )
+from transformers.modeling_outputs import SequenceClassifierOutput
 from transformers.models.bert.modeling_bert import (
     BertModel,
     BertEmbeddings,
@@ -24,7 +26,6 @@ from utils import (
 
 from llm_manager.classifier_base import ClassifierBase
 from llm_manager.graph_prompter_hf.data_collator import GraphPrompterHFDataCollator
-from llm_manager.modeling_outputs import SequenceClassifierOutputOverRanges
 from llm_manager.graph_prompter_hf.config import (
     GRAPH_PROMPTER_TOKEN_TYPES,
     GRAPH_PROMPTER_TOKEN_TYPE_VALUES,
@@ -94,20 +95,23 @@ class GraphPrompterHFBertEmbeddings(BertEmbeddings):
                 and target_kges is not None
                 and inputs_embeds is not None
             ):
-                assert isinstance(inputs_embeds, torch.Tensor)
-                source_mask = token_type_ids == GRAPH_PROMPTER_TOKEN_TYPE_VALUES[-4]
-                target_mask = token_type_ids == GRAPH_PROMPTER_TOKEN_TYPE_VALUES[-2]
-                print(source_mask[0])
-                source_mask = source_mask.repeat(1, 1, inputs_embeds.shape[2])
-                target_mask = target_mask.repeat(1, 1, inputs_embeds.shape[2])
-                print(source_mask.shape)
-                ones = torch.ones_like(inputs_embeds).to(inputs_embeds.device)
+                source_mask = (
+                    token_type_ids == GRAPH_PROMPTER_TOKEN_TYPE_VALUES[-4]
+                ).int()
+                target_mask = (
+                    token_type_ids == GRAPH_PROMPTER_TOKEN_TYPE_VALUES[-2]
+                ).int()
+                source_mask = source_mask.unsqueeze(-1).repeat(
+                    1, 1, inputs_embeds.shape[2]
+                )
+                target_mask = target_mask.unsqueeze(-1).repeat(
+                    1, 1, inputs_embeds.shape[2]
+                )
+                ones = torch.ones_like(inputs_embeds, device=inputs_embeds.device)
                 new_inputs_embeds = (
                     inputs_embeds * (1 - source_mask) + ones * source_mask
-                ) * ((1 - target_mask) + ones * target_mask)
-                assert isinstance(new_inputs_embeds, torch.FloatTensor)  #  for lint
+                ) * (1 - target_mask) + ones * target_mask
                 inputs_embeds = new_inputs_embeds
-                print(new_inputs_embeds.shape)
 
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
@@ -191,13 +195,10 @@ class GraphPrompterHFBertForSequenceClassification(BertForSequenceClassification
         return_dict: Optional[bool] = None,
         source_kges: Optional[torch.Tensor] = None,
         target_kges: Optional[torch.Tensor] = None,
-        token_type_ranges: Optional[torch.Tensor] = None,
-        source_id: Optional[torch.LongTensor] = None,
-        target_id: Optional[
-            torch.LongTensor
-        ] = None,  # we don't need source and target ids here anymore but only so that the collator picks them up on the way
-        # and we can transform them to graph embeddings.
-    ) -> Union[Tuple[torch.Tensor], SequenceClassifierOutputOverRanges]:
+        source_id: Optional[List[int]] = None,
+        target_id: Optional[List[int]] = None,
+        split: Optional[str] = None,
+    ) -> Union[Tuple[torch.Tensor], SequenceClassifierOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
             Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
@@ -207,12 +208,32 @@ class GraphPrompterHFBertForSequenceClassification(BertForSequenceClassification
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
+        if not split:
+            split = "train"
         if inputs_embeds is None:
+            if source_kges is None and source_id is not None and target_id is not None:
+                if self.detach_kges:
+                    with torch.no_grad():
+                        print("no grad")
+                        source_kges, target_kges = self.get_embeddings_cb(
+                            self.data[split], source_id, target_id
+                        )
+                        assert source_kges is not None
+                        assert target_kges is not None
+                        source_kges = source_kges.detach()
+                        target_kges = target_kges.detach()
+                    source_kges.requires_grad_(True)
+                    target_kges.requires_grad_(True)
+            else:
+                source_kges, target_kges = self.get_embeddings_cb(
+                    self.data[split], source_id, target_id
+                )
+
             inputs_embeds = self.bert.embeddings(
                 input_ids,
-                token_type_ranges=token_type_ranges,
                 source_kges=source_kges,
                 target_kges=target_kges,
+                token_type_ids=token_type_ids,
             )  # we replaced the placeholder padding tokens in the embedding generation with the KGEs
             assert isinstance(inputs_embeds, torch.Tensor)
         outputs = self.bert(
@@ -258,12 +279,11 @@ class GraphPrompterHFBertForSequenceClassification(BertForSequenceClassification
             output = (logits,) + outputs[2:]
             return ((loss,) + output) if loss is not None else output
 
-        return SequenceClassifierOutputOverRanges(
+        return SequenceClassifierOutput(
             loss=loss,
             logits=logits,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-            token_type_ranges=token_type_ranges,
         )
 
 
@@ -289,6 +309,8 @@ class GraphPrompterHF(ClassifierBase):
         config.num_labels = 2
         config.id2label = {0: "FALSE", 1: "TRUE"}
         config.label2id = {"FALSE": 0, "TRUE": 1}
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print("device", self.device)
         # Initialize the model and tokenizer
         if (
             vanilla_model_path
@@ -296,7 +318,9 @@ class GraphPrompterHF(ClassifierBase):
             and not force_recompute
         ):
             model = GraphPrompterHFBertForSequenceClassification.from_pretrained(
-                vanilla_model_path, config=config, ignore_mismatched_sizes=True
+                vanilla_model_path,
+                config=config,
+                ignore_mismatched_sizes=True,
             )
         elif os.path.exists(model_path) and not force_recompute:
             model = GraphPrompterHFBertForSequenceClassification.from_pretrained(
@@ -307,20 +331,27 @@ class GraphPrompterHF(ClassifierBase):
                 model_name, config=config, ignore_mismatched_sizes=True
             )
 
+        assert isinstance(model, GraphPrompterHFBertForSequenceClassification)
+        assert isinstance(model, nn.Module)
+        model.to(self.device)
+        model.get_embeddings_cb = get_embeddings_cb
+        model.detach_kges = gnn_parameters is None
+        model.data = {
+            "train": kge_manager.gnn_train_data,
+            "test": kge_manager.gnn_test_data,
+            "val": kge_manager.gnn_val_data,
+        }
+
         tokenizer = BertTokenizer.from_pretrained(
             model_name, model_max_length=model_max_length
         )
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print("device", self.device)
         train_data_collator = GraphPrompterHFDataCollator(
             tokenizer,
             self.device,
             kge_manager.llm_df,
             kge_manager.source_df,
             kge_manager.target_df,
-            kge_manager.gnn_train_data,
-            get_embeddings_cb,
-            detach_kges=gnn_parameters is None,
+            split="train",
             false_ratio=false_ratio,
         )
         test_data_collator = GraphPrompterHFDataCollator(
@@ -329,9 +360,7 @@ class GraphPrompterHF(ClassifierBase):
             kge_manager.llm_df,
             kge_manager.source_df,
             kge_manager.target_df,
-            kge_manager.gnn_test_data,
-            get_embeddings_cb,
-            detach_kges=gnn_parameters is None,
+            split="test",
             false_ratio=-1.0,
         )
         val_data_collator = GraphPrompterHFDataCollator(
@@ -340,9 +369,7 @@ class GraphPrompterHF(ClassifierBase):
             kge_manager.llm_df,
             kge_manager.source_df,
             kge_manager.target_df,
-            kge_manager.gnn_val_data,
-            get_embeddings_cb,
-            detach_kges=gnn_parameters is None,
+            split="val",
             false_ratio=-1.0,
         )
         ClassifierBase.__init__(
@@ -376,12 +403,12 @@ class GraphPrompterHF(ClassifierBase):
             token_type_ids = replace_ranges(
                 token_type_ids, token_type_ranges[:, range_position], value=token_type
             )
+
         if return_pt:
             result = {
                 "input_ids": tokenized["input_ids"],
                 "attention_mask": tokenized["attention_mask"],
                 "labels": example["labels"],
-                "token_type_ranges": token_type_ranges,
                 "token_type_ids": token_type_ids,
                 "source_id": example["source_id"],
                 "target_id": example["target_id"],
@@ -394,7 +421,6 @@ class GraphPrompterHF(ClassifierBase):
                 .to("cpu")
                 .tolist(),
                 "labels": example["labels"],
-                "token_type_ranges": token_type_ranges.detach().to("cpu").tolist(),
                 "token_type_ids": token_type_ids.detach().to("cpu").tolist(),
                 "source_id": example["source_id"],
                 "target_id": example["target_id"],
