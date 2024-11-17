@@ -21,8 +21,6 @@ from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 import matplotlib.pyplot as plt
 from utils import (
     mean_over_attention_ranges,
-    mean_over_attention_ranges_python_slow,
-    mean_over_hidden_states_python_slow,
     mean_over_hidden_states,
     replace_ranges,
     get_combinations,
@@ -286,12 +284,10 @@ class ClassifierBase(ABC):
     def forward_dataset_and_save_outputs(
         self,
         dataset: datasets.Dataset | datasets.DatasetDict,
-        get_tokens_as_df_cb: Callable,
         splits: List[str] = ["train", "test", "val"],
         batch_size: int = 64,
         save_step_size: int = 1,
         load_fields: List[str] = ["attentions", "hidden_states", "logits"],
-        is_test: bool = False,
         force_recompute: bool = False,
         combination_boundaries: Optional[Tuple[int, int]] = None,
     ) -> None:
@@ -300,13 +296,6 @@ class ClassifierBase(ABC):
         add_attentions = "attentions" in load_fields
         add_logits = "logits" in load_fields
         hidden_states_exist = True
-        if is_test:
-            dataset = DatasetDict(
-                {
-                    split: dataset.select(range(batch_size * 2))
-                    for split, dataset in dataset.items()
-                }
-            )
         if (
             force_recompute
             or not os.path.exists(self.attentions_path)
@@ -319,7 +308,7 @@ class ClassifierBase(ABC):
             Path(self.sub_logits_dir_path).mkdir(parents=True, exist_ok=True)
             Path(self.sub_hidden_states_dir_path).mkdir(parents=True, exist_ok=True)
             Path(self.sub_tokens_dir_path).mkdir(parents=True, exist_ok=True)
-            if len(dataset[splits[0]][0]["token_type_ranges"]) == 9:
+            if len(set(dataset[splits[0]][0]["token_type_ids"])) == 3:
                 # we are a vanilla model
                 token_type_values = list(set(VANILLA_TOKEN_TYPE_VALUES))
                 token_type_values_reverse = VANILLA_TOKEN_TYPE_VALUES_REVERSE
@@ -328,7 +317,6 @@ class ClassifierBase(ABC):
                 token_type_values = list(set(GRAPH_PROMPTER_TOKEN_TYPE_VALUES))
                 token_type_values_reverse = GRAPH_PROMPTER_TOKEN_TYPE_VALUES_REVERSE
             tokens_collected = False
-            all_tokens = []
             token_type_combinations = get_combinations(token_type_values)
             if combination_boundaries:
                 assert (
@@ -368,56 +356,51 @@ class ClassifierBase(ABC):
                         for idx, batch in enumerate(data_loader):
                             # idx = 0
                             # if True:
-                            batch = next(iter(data_loader))
+                            # batch = next(iter(data_loader))
                             splits_ = [split] * len(batch["input_ids"])
+                            token_type_ids = batch["token_type_ids"]
+                            token_type_mask = torch.zeros_like(
+                                token_type_ids, dtype=torch.int
+                            )
                             for key in combination:
                                 for pos in token_type_values_reverse[key]:
-                                    batch["attention_mask"] = replace_ranges(
-                                        batch["attention_mask"],
-                                        batch["token_type_ranges"][:, pos],
-                                        value=0,
-                                    )
+                                    print(pos)
+                                    token_type_mask += (token_type_ids == pos).int()
+                            original_attention_mask = batch["attention_mask"]
+                            batch["attention_mask"] = replace_ranges(
+                                original_attention_mask,
+                                token_type_mask,
+                                value=0,
+                            )
                             outputs = self.model(
                                 **batch,
                                 output_hidden_states=add_hidden_states,
                                 output_attentions=add_attentions,
                             )
-                            token_type_ranges = batch["token_type_ranges"]
                             if add_attentions:
                                 attentions = outputs.attentions
                                 attentions = [
                                     torch.sum(layer, dim=1) for layer in attentions
                                 ]
                                 attentions = torch.stack(attentions).permute(1, 2, 3, 0)
-                                if is_test:
-                                    attentions_test = (
-                                        mean_over_attention_ranges_python_slow(
-                                            attentions,
-                                            token_type_ranges[:, :, 0],
-                                            token_type_ranges[:, :, 1],
-                                        )
-                                    )
                                 attentions = mean_over_attention_ranges(
                                     attentions,
-                                    token_type_ranges[:, :, 0],
-                                    token_type_ranges[:, :, 1],
+                                    token_type_ids,
+                                    attention_mask=original_attention_mask,
                                 )
-                                if not is_test:
-                                    attentions_collected.append(attentions)
-                                    if (idx + 1) % save_step_size == 0:
-                                        np.save(
-                                            self.sub_attentions_path.format(
-                                                split,
-                                                (idx + 1) / save_step_size,
-                                                combination_string,
-                                            ),
-                                            np.concatenate(attentions_collected),
-                                        )
-                                        attentions_collected = []
-                                else:
-                                    assert torch.allclose(
-                                        attentions_test, attentions, atol=1e-8
-                                    ), f"Expected attentions to be same, but are not: {attentions[0,7,7,0]}, {attentions_test[0,7,7,0]}"
+                                attentions_collected.append(
+                                    attentions.to("cpu").numpy()
+                                )
+                                if (idx + 1) % save_step_size == 0:
+                                    np.save(
+                                        self.sub_attentions_path.format(
+                                            split,
+                                            (idx + 1) / save_step_size,
+                                            combination_string,
+                                        ),
+                                        np.concatenate(attentions_collected),
+                                    )
+                                    attentions_collected = []
                             if add_logits:
                                 logits = outputs.logits
                                 logits_of_combination.append(logits.numpy())
@@ -426,55 +409,24 @@ class ClassifierBase(ABC):
                                 hidden_states = torch.stack(
                                     outputs.hidden_states, dim=1
                                 )
-                                if is_test:
-                                    test_hidden_states = (
-                                        mean_over_hidden_states_python_slow(
-                                            hidden_states,
-                                            token_type_ranges[:, :, 0],
-                                            token_type_ranges[:, :, 1],
-                                        )
-                                    )
                                 hidden_states = mean_over_hidden_states(
                                     hidden_states,
-                                    token_type_ranges[:, :, 0],
-                                    token_type_ranges[:, :, 1],
+                                    token_type_ids,
+                                    original_attention_mask,
                                 )
-                                if not is_test:
-                                    hidden_states_collected.append(hidden_states)
-                                    if (idx + 1) % save_step_size == 0:
-                                        np.save(
-                                            self.sub_hidden_states_path.format(
-                                                split,
-                                                (idx + 1) / save_step_size,
-                                                combination_string,
-                                            ),
-                                            np.concatenate(hidden_states_collected),
-                                        )
-                                        hidden_states_collected = []
-                                else:
-                                    assert torch.allclose(
-                                        test_hidden_states, hidden_states, atol=1e-8
-                                    ), f"Expected hidden states to be same, but are not: {hidden_states[0,0,7,:7]}, {test_hidden_states[0,0,7,:7]}"
-                            if not tokens_collected:
-                                tokens = get_tokens_as_df_cb(
-                                    batch["input_ids"],
-                                    self.tokenizer,
-                                    token_type_ranges,
+                                hidden_states_collected.append(
+                                    hidden_states.to("cpu").numpy()
                                 )
-                                tokens["labels"] = batch["labels"].tolist()
-                                tokens["split"] = splits_
-                                all_tokens.append(tokens)
-                        if not tokens_collected:
-                            # Concatenate all hidden states across batches
-                            all_tokens = pd.concat(all_tokens).reset_index(drop=True)
-                            if not is_test:
-                                all_tokens.to_csv(
-                                    self.sub_tokens_path,
-                                    index=False,
-                                )
-                            del all_tokens
-                            tokens_collected = True
-
+                                if (idx + 1) % save_step_size == 0:
+                                    np.save(
+                                        self.sub_hidden_states_path.format(
+                                            split,
+                                            (idx + 1) / save_step_size,
+                                            combination_string,
+                                        ),
+                                        np.concatenate(hidden_states_collected),
+                                    )
+                                    hidden_states_collected = []
                         if add_logits:
                             logits_of_combination = np.concatenate(
                                 logits_of_combination

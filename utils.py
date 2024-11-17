@@ -1,4 +1,4 @@
-from typing import Tuple, List, Set
+from typing import Tuple, List, Set, FrozenSet
 
 import numpy as np
 import pandas as pd
@@ -41,165 +41,93 @@ def find_non_existing_source_targets(
 
 
 def mean_over_attention_ranges(
-    tens: torch.Tensor, starts: torch.Tensor, ends: torch.Tensor
+    tens: torch.Tensor, token_type_ids: torch.Tensor, attention_mask: torch.Tensor
 ) -> torch.Tensor:
     """
-    This operation allows to produce a mean over ranges of different sizes in torch tensor manner only.
-    We use padding positions to calculate an average and then remove the padded positions afterwards.
-    This code was based on ChatGPT suggestions and works on the assumption:
-    Let S be the sum of the padded list of numbers.
-    Let n be the number of elements in the padded list.
-    Let μ be the average of the padded list of numbers.
-    Let r be the difference between the actual range lengths and the max range length
-    Let x be the number that is at the padding position.
-    μ' = ((μ * n)-(r * x)) / (n - r)
+    This operation allows to produce a mean over grouped token type ids
     """
-    tens = tens.to(torch.float64)
-    batch_size = tens.shape[0]
-    positional_encodings = starts.shape[1]
-    sequence_length = tens.shape[1]
-    layers = tens.shape[-1]
-    # input: # ends: torch.tensor([2, 5, 6]) starts: tensor([0, 2, 4])
-    # Compute the maximum length of the ranges
-    max_length = (ends - starts).max().item()
-    # Create a range tensor from 0 to max_length-1
-    range_tensor = torch.arange(max_length).repeat(
-        (batch_size, positional_encodings, 1)
-    )
-    # Compute the ranges using broadcasting and masking
-    ranges = starts.unsqueeze(-1).repeat(1, 1, int(max_length)) + range_tensor
-    mask = ranges < ends.unsqueeze(-1).repeat(1, 1, int(max_length))
+    tens_means = []
+    for token_type in torch.unique(token_type_ids):
+        token_type_mask = (token_type_ids == token_type).int() * attention_mask
+        token_type_mask = (
+            token_type_mask.unsqueeze(1)
+            .unsqueeze(-1)
+            .repeat(1, tens.shape[1], 1, tens.shape[-1])
+        )
+        sum_ = torch.sum(token_type_mask, dim=2)
+        result = torch.sum(tens * token_type_mask, dim=2) / sum_
+        tens_means.append(result)
+    tens = torch.stack(tens_means, dim=2)
 
-    # Apply the mask
-    masked_ranges = (
-        ranges * mask
-    )  # result: tensor([[0, 1, 0], [2, 3, 4], [4, 5, 0]]) here padding index is 0
-    #                        -                     -    positions were padded
-    tens_unsqueezed = tens.unsqueeze(dim=2).repeat(1, 1, positional_encodings, 1, 1)
-    result = (
-        masked_ranges.unsqueeze(dim=1)
-        .unsqueeze(-1)
-        .repeat(1, sequence_length, 1, 1, layers)
-    )
-    gather = tens_unsqueezed.gather(dim=3, index=result)
-    means = torch.mean(
-        gather, dim=3
-    )  # The mean was computed with the padding positions. We will remove the values from the mean now,
-
-    range_diffs = (
-        (max_length - (ends - starts))
-        .unsqueeze(1)
-        .unsqueeze(-1)
-        .repeat(1, sequence_length, 1, layers)
-    )  # the amount of times, the range had to be padded
-    values_to_remove = (
-        range_diffs * tens_unsqueezed[:, :, :, 0]
-    )  # the summed value at padded position
-    means = (means * max_length - values_to_remove) / (
-        max_length - range_diffs
-    )  # the actual mean without padding positions
-    result_2 = (
-        (ranges * mask)
-        .unsqueeze(-1)
-        .unsqueeze(-1)
-        .repeat(1, 1, 1, positional_encodings, layers)
-    )
-    means = means.unsqueeze(1).repeat(1, positional_encodings, 1, 1, 1)
-    means_s2 = means.gather(dim=2, index=result_2).mean(dim=2)
-    range_diffs = (
-        (max_length - (ends - starts))
-        .unsqueeze(-1)
-        .unsqueeze(-1)
-        .repeat(1, 1, positional_encodings, layers)
-    )
-    values_to_remove = range_diffs * means[:, :, 0]
-    means_s2 = (means_s2 * max_length - values_to_remove) / (max_length - range_diffs)
-    means_s2 = means_s2.to(torch.float32)
-    return means_s2
-
-
-def mean_over_attention_ranges_python_slow(
-    tens: torch.Tensor,
-    starts: torch.Tensor,
-    ends: torch.Tensor,
-) -> torch.Tensor:
-    """This python method is the corresponding test method to the mean_over_attention_ranges method, written in simple python,
-    so the steps are simple to understand. This implementation is inefficient."""
-    tens = tens.to(torch.float64)
-    batch_positions = []
-    for batch in range(starts.shape[0]):
-        positions = []
-        for start, end in zip(starts[batch], ends[batch]):
-            assert (
-                start < end
-            ), f"Expected the start position to be smaller then end position, but got start: {start}, end: {end} instead."
-            positions.append(tens[batch, :, start:end].mean(dim=1))
-        positions = torch.stack(positions, dim=1)
-        batch_positions.append(positions)
-    tens = torch.stack(batch_positions, dim=0)
-
-    batch_positions = []
-    for batch in range(starts.shape[0]):
-        positions = []
-        for start, end in zip(starts[batch], ends[batch]):
-            positions.append(tens[batch, start:end].mean(dim=0))
-        positions = torch.stack(positions, dim=0)
-        batch_positions.append(positions)
-    tens = torch.stack(batch_positions, dim=0)
-    tens = tens.to(torch.float32)
+    tens_means = []
+    for token_type in torch.unique(token_type_ids):
+        token_type_mask = (token_type_ids == token_type).int() * attention_mask
+        token_type_mask = (
+            token_type_mask.unsqueeze(2)
+            .unsqueeze(3)
+            .repeat(1, 1, tens.shape[2], tens.shape[3])
+        )
+        sum_ = torch.sum(token_type_mask, dim=1)
+        result = torch.sum(tens * token_type_mask, dim=1) / sum_
+        tens_means.append(result)
+    tens = torch.stack(tens_means, dim=1)
     return tens
+
+
+def test_mean_over_attention_ranges():
+    # Case 1: Simple example
+    tens = torch.tensor(
+        [
+            [
+                [[1, 2], [3, 4], [5, 6]],
+                [[7, 8], [9, 10], [11, 12]],
+                [[13, 14], [15, 16], [17, 18]],
+            ]
+        ],
+        dtype=torch.float32,
+    )
+    token_type_ids = torch.tensor([[0, 0, 1]])
+    # expected = torch.tensor(
+    #     [[[[2.0, 3.0], [5.0, 6.0]],
+    #       [[8.0, 9.0], [11.0, 12.0]],
+    #       [[14.0, 15.0], [17.0, 18.0]]]], dtype=torch.float32
+    # )
+    expected = torch.tensor(
+        [[[[[5.0, 6.0], [8.0, 9.0]], [[14.0, 15.0], [17.0, 18.0]]]]],
+        dtype=torch.float32,
+    )
+    result = mean_over_attention_ranges(tens, token_type_ids)
+    print(result.shape)
+    assert torch.allclose(
+        result, expected
+    ), f"Test failed! Got {result}, expected {expected}"
+
+    # Add other cases...
+
+    print("All tests passed!")
 
 
 def mean_over_hidden_states(
     tens: torch.Tensor,
-    starts: torch.Tensor,
-    ends: torch.Tensor,
+    token_type_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
 ) -> torch.Tensor:
-    tens = tens.to(torch.float64)
-    batch_size = tens.shape[0]
-    positional_encodings = starts.shape[1]
-    layers = tens.shape[1]
-    hidden_state_size = tens.shape[-1]
-    # input: # ends: torch.tensor([2, 5, 6]) starts: tensor([0, 2, 4])
-    # Compute the maximum length of the ranges
-    max_length = (ends - starts).max().item()
-    # Create a range tensor from 0 to max_length-1
-    range_tensor = torch.arange(max_length).repeat(
-        (batch_size, positional_encodings, 1)
-    )
-    # Compute the ranges using broadcasting and masking
-    ranges = starts.unsqueeze(-1).repeat(1, 1, int(max_length)) + range_tensor
-    mask = ranges < ends.unsqueeze(-1).repeat(1, 1, int(max_length))
-
-    # Apply the mask
-    masked_ranges = (
-        ranges * mask
-    )  # result: tensor([[0, 1, 0], [2, 3, 4], [4, 5, 0]]) here padding index is 0
-    #                        -                     -    positions were padded
-    tens_unsqueezed = tens.unsqueeze(dim=2).repeat(1, 1, positional_encodings, 1, 1)
-    result = (
-        masked_ranges.unsqueeze(dim=1)
-        .unsqueeze(-1)
-        .repeat(1, layers, 1, 1, hidden_state_size)
-    )
-    gather = tens_unsqueezed.gather(dim=3, index=result)
-    means = torch.mean(
-        gather, dim=3
-    )  # The mean was computed with the padding positions. We will remove the values from the mean now,
-    range_diffs = (
-        (max_length - (ends - starts))
-        .unsqueeze(1)
-        .unsqueeze(-1)
-        .repeat(1, layers, 1, hidden_state_size)
-    )  # the amount of times, the range had to be padded
-    values_to_remove = (
-        range_diffs * tens_unsqueezed[:, :, :, 0]
-    )  # the summed value at padded position
-    means = (means * max_length - values_to_remove) / (
-        max_length - range_diffs
-    )  # the actual mean without padding positions
-    means = means.to(torch.float32)
-    return means
+    """
+    This operation allows to produce a mean over grouped token type ids
+    """
+    tens_means = []
+    for token_type in torch.unique(token_type_ids):
+        token_type_mask = (token_type_ids == token_type).int() * attention_mask
+        token_type_mask = (
+            token_type_mask.unsqueeze(1)
+            .unsqueeze(-1)
+            .repeat(1, tens.shape[1], 1, tens.shape[-1])
+        )
+        sum_ = torch.sum(token_type_mask, dim=2)
+        result = torch.sum(tens * token_type_mask, dim=2) / sum_
+        tens_means.append(result)
+    tens = torch.stack(tens_means, dim=1)
+    return tens
 
 
 def mean_over_hidden_states_python_slow(
@@ -227,24 +155,11 @@ def mean_over_hidden_states_python_slow(
 
 
 def replace_ranges(
-    tensor: torch.Tensor, token_type_ranges: torch.Tensor, value: int = 0
+    tensor: torch.Tensor, token_type_mask: torch.Tensor, value: int = 0
 ) -> torch.Tensor:
-    assert (tensor[:, -1] == 0).all()
-    zero_index = torch.tensor(tensor.shape[1] - 1)
-    starts = token_type_ranges[:, 0]
-    ends = token_type_ranges[:, 1]
-    max_length = (ends - starts).max().item()
-    range_tensor = torch.arange(max_length).unsqueeze(0)
-    ranges = starts.unsqueeze(1) + range_tensor
-    mask = ranges >= ends.unsqueeze(1)
-    diffs = zero_index.repeat((1, ranges.shape[1])) - ranges
-    diffs_masked = diffs * mask
-    ranges_masked = ranges + diffs_masked
-    tensor = tensor.detach().clone()
-    replace_tensor = torch.tensor(value, dtype=tensor.dtype).repeat(tensor.shape)
-    tensor = tensor.scatter(1, ranges_masked, replace_tensor)
-    tensor[:, -1] = 0
-    return tensor
+    value_tensor = torch.Tensor([[value]])
+    value_tensor = value_tensor.repeat(tensor.shape)
+    return tensor * (1 - token_type_mask) + value_tensor * token_type_mask
 
 
 def replace_ranges_slow(
@@ -328,14 +243,14 @@ def sort_ranges(token_type_ranges: torch.Tensor):
 
 
 # Get all permutations (order does not matter)
-def get_combinations(elements: List[int]) -> List[Set[int]]:
+def get_combinations(elements: List[int]) -> List[FrozenSet[int]]:
     result = []
     for r in range(1, len(elements) + 1):  # r is the length of permutations
         result.extend(itertools.combinations(elements, r))
-    result_sets = []
+    empty_combination: FrozenSet[int] = frozenset()
+    result_sets = [empty_combination]  # the permutations of no keys.
     for permutation in result:
         result_sets.append(frozenset(permutation))
-    result_sets.append(frozenset())  # the permutations of no keys.
     return result_sets
 
 

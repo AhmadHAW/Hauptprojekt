@@ -66,11 +66,10 @@ class VanillaDataCollator(DataCollatorBase):
                 "input_ids": input_ids_,
                 "attention_mask": attention_mask_,
                 "labels": 0,
-                "token_type_ranges": token_type_ranges_.to("cpu").detach().tolist(),
                 "token_type_ids": token_type_ids_.to("cpu").detach().tolist(),
             }
-            for token_type_ranges_, token_type_ids_, input_ids_, attention_mask_ in zip(
-                token_type_ranges, token_type_ids, input_ids, attention_mask
+            for token_type_ids_, input_ids_, attention_mask_ in zip(
+                token_type_ids, input_ids, attention_mask
             )
         ]
         return result_dict
@@ -79,24 +78,20 @@ class VanillaDataCollator(DataCollatorBase):
         input_ids = []
         attention_mask = []
         labels = []
-        token_type_ranges = []
         token_type_ids = []
 
         for f in features:
             input_ids.append(f["input_ids"])
             attention_mask.append(f["attention_mask"])
             labels.append(f["labels"])
-            token_type_ranges.append(f["token_type_ranges"])
             token_type_ids.append(f["token_type_ids"])
         input_ids = torch.tensor(input_ids, dtype=torch.long)
         attention_mask = torch.tensor(attention_mask, dtype=torch.long)
         labels = torch.tensor(labels, dtype=torch.long)
-        token_type_ranges = torch.tensor(token_type_ranges, dtype=torch.long)
         token_type_ids = torch.tensor(token_type_ids, dtype=torch.long)
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "labels": labels,
-            "token_type_ranges": token_type_ranges,
             "token_type_ids": token_type_ids,
         }
