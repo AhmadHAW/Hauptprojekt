@@ -316,7 +316,6 @@ class ClassifierBase(ABC):
                 # we are a graph prompter model
                 token_type_values = list(set(GRAPH_PROMPTER_TOKEN_TYPE_VALUES))
                 token_type_values_reverse = GRAPH_PROMPTER_TOKEN_TYPE_VALUES_REVERSE
-            tokens_collected = False
             token_type_combinations = get_combinations(token_type_values)
             if combination_boundaries:
                 assert (
@@ -353,6 +352,7 @@ class ClassifierBase(ABC):
                         attentions_collected = []
                         hidden_states_collected = []
                         print(f"combination: {combination}")
+                        total_batches = len(data_loader)
                         for idx, batch in enumerate(data_loader):
                             # idx = 0
                             # if True:
@@ -391,7 +391,9 @@ class ClassifierBase(ABC):
                                 attentions_collected.append(
                                     attentions.to("cpu").numpy()
                                 )
-                                if (idx + 1) % save_step_size == 0:
+                                if (idx + 1) % save_step_size == 0 or (
+                                    idx + 1
+                                ) == total_batches:
                                     np.save(
                                         self.sub_attentions_path.format(
                                             split,
@@ -417,7 +419,9 @@ class ClassifierBase(ABC):
                                 hidden_states_collected.append(
                                     hidden_states.to("cpu").numpy()
                                 )
-                                if (idx + 1) % save_step_size == 0:
+                                if (idx + 1) % save_step_size == 0 or (
+                                    idx + 1
+                                ) == total_batches:
                                     np.save(
                                         self.sub_hidden_states_path.format(
                                             split,
