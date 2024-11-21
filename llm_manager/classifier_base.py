@@ -52,6 +52,7 @@ class ClassifierBase(ABC):
         test_data_collator,
         val_data_collator,  # TODO: make these optional and then use the train data collator if not passed
         root_path,
+        device,
         gnn_parameters: Optional[List[Parameter]] = None,
         force_recompute=False,
     ) -> None:
@@ -80,6 +81,7 @@ class ClassifierBase(ABC):
         self.sub_tokens_dir_path = f"{root_path}/tokens"
         self.sub_tokens_path = f"{self.sub_tokens_dir_path}{TOKENS_ENDING}"
         self.force_recompute = force_recompute  # TODO: remove
+        self.device = device
         self.gnn_parameters = gnn_parameters
 
     def _get_data_collator(
@@ -358,20 +360,29 @@ class ClassifierBase(ABC):
                             # if True:
                             # batch = next(iter(data_loader))
                             splits_ = [split] * len(batch["input_ids"])
-                            token_type_ids = batch["token_type_ids"]
+                            batch["labels"] = batch["labels"].to(self.device)
+                            batch["token_type_ids"] = batch["token_type_ids"].to(
+                                self.device
+                            )
                             token_type_mask = torch.zeros_like(
-                                token_type_ids, dtype=torch.int
+                                batch["token_type_ids"],
+                                dtype=torch.int,
+                                device=self.device,
                             )
                             for key in combination:
                                 for pos in token_type_values_reverse[key]:
-                                    print(pos)
-                                    token_type_mask += (token_type_ids == pos).int()
-                            original_attention_mask = batch["attention_mask"]
+                                    token_type_mask += (
+                                        batch["token_type_ids"] == pos
+                                    ).int()
+                            original_attention_mask = batch["attention_mask"].to(
+                                self.device
+                            )
                             batch["attention_mask"] = replace_ranges(
                                 original_attention_mask,
                                 token_type_mask,
                                 value=0,
                             )
+                            batch["input_ids"] = batch["input_ids"].to(self.device)
                             outputs = self.model(
                                 **batch,
                                 output_hidden_states=add_hidden_states,
@@ -385,7 +396,7 @@ class ClassifierBase(ABC):
                                 attentions = torch.stack(attentions).permute(1, 2, 3, 0)
                                 attentions = mean_over_attention_ranges(
                                     attentions,
-                                    token_type_ids,
+                                    batch["token_type_ids"],
                                     attention_mask=original_attention_mask,
                                 )
                                 attentions_collected.append(
@@ -405,7 +416,7 @@ class ClassifierBase(ABC):
                                     attentions_collected = []
                             if add_logits:
                                 logits = outputs.logits
-                                logits_of_combination.append(logits.numpy())
+                                logits_of_combination.append(logits.to("cpu").numpy())
                                 del logits
                             if add_hidden_states:
                                 hidden_states = torch.stack(
@@ -413,7 +424,7 @@ class ClassifierBase(ABC):
                                 )
                                 hidden_states = mean_over_hidden_states(
                                     hidden_states,
-                                    token_type_ids,
+                                    batch["token_type_ids"],
                                     original_attention_mask,
                                 )
                                 hidden_states_collected.append(

@@ -154,10 +154,19 @@ def mean_over_hidden_states_python_slow(
     return tens
 
 
+def token_ranges_to_mask(
+    max_size: int, token_type_ranges: torch.Tensor
+) -> torch.Tensor:
+    ranges = torch.arange(max_size).unsqueeze(0).repeat(len(token_type_ranges), 1)
+    lower_boundaries = token_type_ranges[:, 0].unsqueeze(-1).repeat(1, max_size)
+    upper_boundaries = token_type_ranges[:, 1].unsqueeze(-1).repeat(1, max_size)
+    return ((ranges >= lower_boundaries) & (ranges < upper_boundaries)).int()
+
+
 def replace_ranges(
     tensor: torch.Tensor, token_type_mask: torch.Tensor, value: int = 0
 ) -> torch.Tensor:
-    value_tensor = torch.Tensor([[value]])
+    value_tensor = torch.Tensor([[value]]).to(tensor.device)
     value_tensor = value_tensor.repeat(tensor.shape)
     return tensor * (1 - token_type_mask) + value_tensor * token_type_mask
 

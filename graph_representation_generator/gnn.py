@@ -88,6 +88,9 @@ class Model(torch.nn.Module):
         return pred
 
     def forward_without_classifier(self, data: HeteroData) -> Tensor:
+        # print(data["source"].node_id.device)
+        # print(data["target"].x.device)
+        # print(data["target"].node_id.device)
         x_dict = {
             "source": self.source_emb(data["source"].node_id),
             "target": self.target_lin(data["target"].x)

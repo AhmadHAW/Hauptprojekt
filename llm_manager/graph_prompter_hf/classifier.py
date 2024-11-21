@@ -22,6 +22,7 @@ from utils import (
     replace_ranges,
     get_token_type_ranges,
     sort_ranges,
+    token_ranges_to_mask,
 )
 
 from llm_manager.classifier_base import ClassifierBase
@@ -86,7 +87,6 @@ class GraphPrompterHFBertEmbeddings(BertEmbeddings):
                     new_token_type_ids, torch.LongTensor
                 )  # added by author for better typing
                 token_type_ids = new_token_type_ids
-
         if inputs_embeds is None:
             inputs_embeds = self.word_embeddings(input_ids)
             if (
@@ -107,10 +107,13 @@ class GraphPrompterHFBertEmbeddings(BertEmbeddings):
                 target_mask = target_mask.unsqueeze(-1).repeat(
                     1, 1, inputs_embeds.shape[2]
                 )
-                ones = torch.ones_like(inputs_embeds, device=inputs_embeds.device)
                 new_inputs_embeds = (
-                    inputs_embeds * (1 - source_mask) + ones * source_mask
-                ) * (1 - target_mask) + ones * target_mask
+                    inputs_embeds * (1 - source_mask)
+                    + source_kges.unsqueeze(1).repeat(1, inputs_embeds.shape[1], 1)
+                    * source_mask
+                ) * (1 - target_mask) + target_kges.unsqueeze(1).repeat(
+                    1, inputs_embeds.shape[1], 1
+                ) * target_mask
                 inputs_embeds = new_inputs_embeds
 
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
@@ -228,7 +231,10 @@ class GraphPrompterHFBertForSequenceClassification(BertForSequenceClassification
                 source_kges, target_kges = self.get_embeddings_cb(
                     self.data[split], source_id, target_id
                 )
-
+            input_ids = input_ids.to(self.device)
+            attention_mask = attention_mask.to(self.device)
+            token_type_ids = token_type_ids.to(self.device)
+            labels = labels.to(self.device)
             inputs_embeds = self.bert.embeddings(
                 input_ids,
                 source_kges=source_kges,
@@ -382,6 +388,7 @@ class GraphPrompterHF(ClassifierBase):
             val_data_collator=val_data_collator,
             gnn_parameters=gnn_parameters,
             root_path=root_path,
+            device=self.device,
             force_recompute=force_recompute,
         )
 
@@ -400,8 +407,11 @@ class GraphPrompterHF(ClassifierBase):
         for token_type, range_position in zip(
             GRAPH_PROMPTER_TOKEN_TYPE_VALUES, range(token_type_ranges.shape[1])
         ):
+            token_type_mask = token_ranges_to_mask(
+                token_type_ids.shape[1], token_type_ranges[:, range_position]
+            )
             token_type_ids = replace_ranges(
-                token_type_ids, token_type_ranges[:, range_position], value=token_type
+                token_type_ids, token_type_mask, value=token_type
             )
 
         if return_pt:

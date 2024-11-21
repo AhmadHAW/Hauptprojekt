@@ -54,7 +54,8 @@ class MovieLensManager(KGManger):
         extracts the content into ROOT//ml-32m/"""
         movies_path = f"{ROOT}/ml-32m/movies.csv"
         ratings_path = f"{ROOT}/ml-32m/ratings.csv"
-        url = "https://files.grouplens.org/datasets/ml-32m.zip"
+        url = "https://files.grouplens.org/datasets/movielens/ml-32m.zip"
+        # url = "https://files.grouplens.org/datasets/movielens/ml-latest-small.zip"
         extract_zip(download_url(url, ROOT), ROOT)
         movies_df = pd.read_csv(movies_path, index_col="movieId")
         movies_llm_df = pd.read_csv(movies_path, index_col="movieId")

@@ -9,6 +9,7 @@ from utils import (
     replace_ranges,
     find_non_existing_source_targets,
     sort_ranges,
+    token_ranges_to_mask,
 )
 from llm_manager.vanilla.utils import row_to_vanilla_datapoint
 from llm_manager.data_collator_base import DataCollatorBase
@@ -58,8 +59,11 @@ class VanillaDataCollator(DataCollatorBase):
         for token_type, range_position in zip(
             VANILLA_TOKEN_TYPE_VALUES, range(token_type_ranges.shape[1])
         ):
+            token_type_mask = token_ranges_to_mask(
+                token_type_ids.shape[1], token_type_ranges[:, range_position]
+            )
             token_type_ids = replace_ranges(
-                token_type_ids, token_type_ranges[:, range_position], value=token_type
+                token_type_ids, token_type_mask, value=token_type
             )
         result_dict = [
             {

@@ -12,7 +12,12 @@ from transformers import (
 )
 
 from llm_manager.classifier_base import ClassifierBase
-from utils import get_token_type_ranges, replace_ranges, sort_ranges
+from utils import (
+    get_token_type_ranges,
+    replace_ranges,
+    sort_ranges,
+    token_ranges_to_mask,
+)
 from llm_manager.vanilla.config import VANILLA_TOKEN_TYPE_VALUES, VANILLA_TOKEN_TYPES
 from llm_manager.vanilla.data_collator import VanillaDataCollator
 from transformers.modeling_outputs import SequenceClassifierOutput
@@ -137,6 +142,7 @@ class VanillaClassifier(ClassifierBase):
             model = VanillaBertForSequenceClassification.from_pretrained(
                 model_name, config=config, ignore_mismatched_sizes=True
             )
+        model.to(self.device)
         assert isinstance(model, BertForSequenceClassification)
         super().__init__(
             df=df,
@@ -146,6 +152,7 @@ class VanillaClassifier(ClassifierBase):
             test_data_collator=val_data_collator,
             val_data_collator=val_data_collator,
             root_path=root_path,
+            device=self.device,
             force_recompute=force_recompute,
         )
 
@@ -164,8 +171,11 @@ class VanillaClassifier(ClassifierBase):
         for token_type, range_position in zip(
             VANILLA_TOKEN_TYPE_VALUES, range(token_type_ranges.shape[1])
         ):
+            token_type_mask = token_ranges_to_mask(
+                token_type_ids.shape[1], token_type_ranges[:, range_position]
+            )
             token_type_ids = replace_ranges(
-                token_type_ids, token_type_ranges[:, range_position], value=token_type
+                token_type_ids, token_type_mask, value=token_type
             )
         if return_pt:
             result = {

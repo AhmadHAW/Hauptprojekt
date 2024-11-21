@@ -1,7 +1,9 @@
 import json
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Callable
 import random as rd
 from pathlib import Path
+import ast
+
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
@@ -12,153 +14,303 @@ import matplotlib.cm as cm
 import joblib
 from matplotlib.collections import PathCollection
 
+from dataset_manager.kg_manager import ROOT
+from llm_manager.vanilla.config import VANILLA_TOKEN_DICT
+from llm_manager.graph_prompter_hf.config import GRAPH_PROMPTER_TOKEN_DICT
+
 
 class ExplainabilityModule:
     def __init__(
         self,
-        llm_df: pd.DataFrame,
-        vanilla_tokens: List[str],
-        additional_embedding_tokens: List[str],
-        init_pcas: bool = False,
     ) -> None:
-        self.llm_df = llm_df
-        self.vanilla_tokens = vanilla_tokens
-        self.additional_embedding_tokens = additional_embedding_tokens
-        if init_pcas:
-            self.init_pcas()
+        self.llm_df = pd.read_csv(f"{ROOT}/llm/dataset.csv")
+        self.vanilla_path = f"{ROOT}/llm/vanilla"
+        self.graph_prompter_hf_path = f"{ROOT}/llm/graph_prompter_hf"
+        self.graph_prompter_hf_frozen_path = f"{ROOT}/llm/graph_prompter_hf_frozen"
+        self.vanilla_xai_artifact_root = f"{self.vanilla_path}/xai_artifacts"
+        self.graph_prompter_hf_xai_artifact_root = (
+            f"{self.graph_prompter_hf_path}/xai_artifacts"
+        )
+        self.graph_prompter_hf_frozen_xai_artifact_root = (
+            f"{self.graph_prompter_hf_frozen_path}/xai_artifacts"
+        )
+        self.vanilla_training_path = (
+            f"{self.vanilla_path}/training/checkpoint-2210/trainer_state.json"
+        )
+        self.graph_prompter_hf_training_path = (
+            f"{self.graph_prompter_hf_path}/training/checkpoint-4420/trainer_state.json"
+        )
+        self.graph_prompter_hf_frozen_training_path = f"{self.graph_prompter_hf_frozen_path}/training/checkpoint-2210/trainer_state.json"
 
-    def plot_training_losses(
-        self,
-        root_path: str = "./data/llm",
-        model_types: List[str] = [
-            "vanilla",
-            "graph_prompter_hf",
-        ],
-        save_path=None,
-    ):
-        for model_type in model_types:
-            model_type_verbose = model_type.replace("_", " ").capitalize()
-            path_to_json = (
-                f"{root_path}/{model_type}/training/checkpoint-4420/trainer_state.json"
-            )
-            with open(path_to_json, "r") as f:
-                data = json.load(f)
-            # Extract the loss values
-            loss_values = data["log_history"]
-            losses = [entry["loss"] for entry in loss_values if "loss" in entry]
+    def plot_training_losses(self, save_plot: bool = True):
+        with open(self.vanilla_training_path, "r") as f:
+            vanilla_training_process = json.load(f)
+        with open(self.graph_prompter_hf_frozen_training_path, "r") as f:
+            graph_prompter_hf_frozen_training_process = json.load(f)
+        with open(self.graph_prompter_hf_training_path, "r") as f:
+            graph_prompter_hf_training_process = json.load(f)
+        # Extract the loss values
+        vanilla_losses = [
+            entry["loss"]
+            for entry in vanilla_training_process["log_history"]
+            if "loss" in entry
+        ]
+        graph_prompter_frozen_losses = [vanilla_losses[-1]]
+        graph_prompter_frozen_losses.extend(
+            [
+                entry["loss"]
+                for entry in graph_prompter_hf_frozen_training_process["log_history"]
+                if "loss" in entry
+            ]
+        )
+        graph_prompter_losses = [graph_prompter_frozen_losses[-1]]
+        graph_prompter_losses.extend(
+            [
+                entry["loss"]
+                for entry in graph_prompter_hf_training_process["log_history"]
+                if "loss" in entry
+            ]
+        )
+        # Extract steps
+        vanilla_steps = [
+            entry["step"]
+            for entry in vanilla_training_process["log_history"]
+            if "step" in entry and "loss" in entry
+        ]
+
+        graph_prompter_frozen_steps = [vanilla_steps[-1]]
+        graph_prompter_frozen_steps.extend(
+            [
+                entry["step"]
+                + vanilla_training_process[
+                    "global_step"
+                ]  # add last step, so we can make a continues loss curve
+                for entry in graph_prompter_hf_frozen_training_process["log_history"]
+                if "step" in entry and "loss" in entry
+            ]
+        )
+        graph_prompter_steps = [graph_prompter_frozen_steps[-1]]
+        graph_prompter_steps.extend(
+            [
+                entry["step"]
+                + vanilla_training_process["global_step"]
+                + graph_prompter_hf_frozen_training_process[
+                    "global_step"
+                ]  # add last step, so we can make a continues loss curve
+                for entry in graph_prompter_hf_training_process["log_history"]
+                if "step" in entry and "loss" in entry
+            ]
+        )
+        vanilla_label = "Vanilla Model"
+        graph_prompter_frozen_label = "GraphPrompterHF Frozen Model"
+        graph_prompter_label = "GraphPrompterHF Model"
+
+        def plot(losses: List[float], steps: list[float], label: str):
             # Plot the loss curve
-            (line,) = plt.plot(losses, label=model_type_verbose)
+            (line,) = plt.plot(steps, losses, label=label)
             color = line.get_color()
             min_loss = min(losses)
-            min_loss_index = losses.index(min_loss)
+            min_loss_index = steps[losses.index(min_loss)]
             plt.plot(
                 min_loss_index,
                 min_loss,
                 "o",
                 color=color,
-                label=f"Min {model_type_verbose}: {min_loss:.4f}",
+                label=f"Min {label}: {min_loss:.4f}",
                 markersize=8,
             )
+
+        plot(vanilla_losses, vanilla_steps, vanilla_label)
+        plot(
+            graph_prompter_frozen_losses,
+            graph_prompter_frozen_steps,
+            graph_prompter_frozen_label,
+        )
+        plot(graph_prompter_losses, graph_prompter_steps, graph_prompter_label)
         # Add title and labels
-        plt.title("Loss Curves of Different Models")
+        plt.title("Losses of Training Process")
         plt.xlabel("Training Steps")
         plt.ylabel("Loss")
 
         # Add legend
         plt.legend()
-        if save_path:
-            plt.savefig(save_path)
+        if save_plot:
+            plt.savefig("./images/training_losses.png")
 
         # Show plot
         plt.show()
 
-    def plot_training_accuracies(
-        self,
-        root_path: str = "./data/llm",
-        model_types: List[str] = [
-            "vanilla",
-            "graph_prompter_hf",
-        ],
-        save_path=None,
-    ):
-        for model_type in model_types:
-            model_type_verbose = model_type.replace("_", " ").capitalize()
-            path_to_json = (
-                f"{root_path}/{model_type}/training/checkpoint-4420/trainer_state.json"
-            )
-            with open(path_to_json, "r") as f:
-                data = json.load(f)
-            # Extract the loss values
-            accuracy_values = data["log_history"]
-            accuracies = [
+    def plot_training_accuracies(self, save_plot: bool = True):
+        with open(self.vanilla_training_path, "r") as f:
+            vanilla_training_process = json.load(f)
+        with open(self.graph_prompter_hf_frozen_training_path, "r") as f:
+            graph_prompter_hf_frozen_training_process = json.load(f)
+        with open(self.graph_prompter_hf_training_path, "r") as f:
+            graph_prompter_hf_training_process = json.load(f)
+        # Extract the loss values
+        vanilla_eval_accuracy = [
+            entry["eval_accuracy"]
+            for entry in vanilla_training_process["log_history"]
+            if "eval_accuracy" in entry
+        ]
+        graph_prompter_frozen_eval_accuracy = [vanilla_eval_accuracy[-1]]
+        graph_prompter_frozen_eval_accuracy.extend(
+            [
                 entry["eval_accuracy"]
-                for entry in accuracy_values
+                for entry in graph_prompter_hf_frozen_training_process["log_history"]
                 if "eval_accuracy" in entry
             ]
+        )
+        graph_prompter_eval_accuracy = [graph_prompter_frozen_eval_accuracy[-1]]
+        graph_prompter_eval_accuracy.extend(
+            [
+                entry["eval_accuracy"]
+                for entry in graph_prompter_hf_training_process["log_history"]
+                if "eval_accuracy" in entry
+            ]
+        )
+        # Extract epochs
+        vanilla_epochs = [
+            entry["epoch"]
+            for entry in vanilla_training_process["log_history"]
+            if "epoch" in entry and "eval_accuracy" in entry
+        ]
+        graph_prompter_frozen_epochs = [vanilla_epochs[-1]]
+        graph_prompter_frozen_epochs.extend(
+            [
+                entry["epoch"]
+                + vanilla_training_process[
+                    "epoch"
+                ]  # add last epoch, so we can make a continues eval_accuracy curve
+                for entry in graph_prompter_hf_frozen_training_process["log_history"]
+                if "epoch" in entry and "eval_accuracy" in entry
+            ]
+        )
+        graph_prompter_epochs = [graph_prompter_frozen_epochs[-1]]
+        graph_prompter_epochs.extend(
+            [
+                entry["epoch"]
+                + vanilla_training_process["epoch"]
+                + graph_prompter_hf_frozen_training_process[
+                    "epoch"
+                ]  # add last epoch, so we can make a continues eval_accuracy curve
+                for entry in graph_prompter_hf_training_process["log_history"]
+                if "epoch" in entry and "eval_accuracy" in entry
+            ]
+        )
+        vanilla_label = "Vanilla Model"
+        graph_prompter_frozen_label = "GraphPrompterHF Frozen Model"
+        graph_prompter_label = "GraphPrompterHF Model"
+
+        def plot(accuracies: List[float], epochs: list[float], label: str):
             # Plot the loss curve
-            (line,) = plt.plot(accuracies, label=model_type_verbose)
+            (line,) = plt.plot(epochs, accuracies, label=label)
             color = line.get_color()
             max_accuracy = max(accuracies)
-            max_accuracy_index = accuracies.index(max_accuracy)
+            max_accuracy_index = epochs[accuracies.index(max_accuracy)]
             plt.plot(
                 max_accuracy_index,
                 max_accuracy,
                 "o",
                 color=color,
-                label=f"Max {model_type_verbose}: {max_accuracy:.4f}",
+                label=f"max {label}: {max_accuracy:.4f}",
                 markersize=8,
             )
+
+        plot(vanilla_eval_accuracy, vanilla_epochs, vanilla_label)
+        plot(
+            graph_prompter_frozen_eval_accuracy,
+            graph_prompter_frozen_epochs,
+            graph_prompter_frozen_label,
+        )
+        plot(graph_prompter_eval_accuracy, graph_prompter_epochs, graph_prompter_label)
         # Add title and labels
-        plt.title("Accuracy Curves of Different Models")
+        plt.title(
+            "Evaluation Accuracy Curves of Vanilla and GraphPrompterHF (Frozen) Models"
+        )
         plt.xlabel("Training Epochs")
         plt.ylabel("Accuracy")
 
         # Add legend
-        plt.legend()
-        if save_path:
-            plt.savefig(save_path)
+        plt.legend(loc=4)
+        if save_plot:
+            plt.savefig("./images/training_accuracies.png")
 
         # Show plot
         plt.show()
 
-    def plot_attention_graph(
+    def __str_to_nparray(self, seq: str) -> np.ndarray:
+        return np.array(ast.literal_eval(seq))
+
+    def plot_attention_maps(
         self,
-        attentions: torch.Tensor,
-        token_labels: List[str],
-        title: str,
-        weight_coef: int | float = 5,
+        split: str,
+        masks: List[Tuple] | Tuple,
+        model: str = "vanilla",
+        filter: Optional[Callable] = None,
+        weight_coef: int | float = 15,
         fig_dpi: int = 100,
         fig_size: Tuple[int, int] = (8, 8),
-        save_path: Optional[str | Path] = None,
+        save_plot: bool = True,
     ) -> None:
         assert weight_coef > 0
         assert fig_dpi > 0
         assert fig_size[0] > 0
         assert fig_size[1] > 0
+        if model == "vanilla":
+            base_path_to_csv = f"{self.vanilla_xai_artifact_root}/{split}_{{}}.csv"
+            token_type_dict = VANILLA_TOKEN_DICT
+        elif model == "graph_prompter_hf_frozen":
+            base_path_to_csv = (
+                f"{self.graph_prompter_hf_frozen_xai_artifact_root}/{split}_{{}}.csv"
+            )
+            token_type_dict = GRAPH_PROMPTER_TOKEN_DICT
+        else:
+            base_path_to_csv = (
+                f"{self.graph_prompter_hf_xai_artifact_root}/{split}_{{}}.csv"
+            )
+            token_type_dict = GRAPH_PROMPTER_TOKEN_DICT
+        token_type_dict_reverse = {v: k for k, v in token_type_dict.items()}
 
+        if isinstance(masks, Tuple):
+            df = pd.read_csv(
+                base_path_to_csv.format(masks),
+                converters={"attention_maps": self.__str_to_nparray},
+            )
+        else:
+            dfs: List[pd.DataFrame] = []
+            for mask in masks:
+                dfs.append(
+                    pd.read_csv(
+                        base_path_to_csv.format(mask),
+                        converters={"attention_maps": self.__str_to_nparray},
+                    )
+                )
+            df = pd.concat(dfs)
+        if filter is not None:
+            df = df[df.apply(filter, axis=1)]
+        attention_maps = np.stack(df["attention_maps"].tolist())
         plt.rcParams["figure.figsize"] = fig_size
         plt.rcParams["figure.dpi"] = fig_dpi  # 200 e.g. is really fine, but slower
         plt.figure(figsize=fig_size, dpi=fig_dpi)
         # Create an undirected graph
         G = nx.Graph()
         labels = {}
-        attentions = torch.mean(attentions, dim=0).permute((2, 0, 1))
+        attentions = np.mean(attention_maps, axis=0).transpose(2, 0, 1)
         for layer, attentions_ in enumerate(attentions):
             for from_, inner in enumerate(attentions_):
-                from_name = f"{token_labels[from_]}_{layer}"
+                from_name = f"{token_type_dict[from_]}_{layer}"
                 if layer == 0:
-                    labels[from_name] = token_labels[from_]
+                    labels[from_name] = token_type_dict[from_]
                 G.add_node(from_name, name=from_name, layer=layer)
                 for to_, weight in enumerate(inner):
-                    to_name = f"{token_labels[to_]}_{layer+1}"
+                    to_name = f"{token_type_dict[to_]}_{layer+1}"
                     G.add_node(to_name, name=to_name, layer=layer + 1)
                     G.add_edge(from_name, to_name, weight=weight)
 
         pos = nx.multipartite_layout(G, subset_key="layer")
-        semantic_datapoints = token_labels.copy()
-        semantic_datapoints.reverse()
         for node, (x, y) in pos.items():
-            y = semantic_datapoints.index(node.split("_")[0])
+            y = len(token_type_dict) - token_type_dict_reverse[node.split("_")[0]]
             layer = G.nodes[node]["layer"]
             pos[node] = (layer, y)  # type: ignore # Fixing the x-coordinate to be the layer and y-coordinate can be customized
 
@@ -181,28 +333,12 @@ class ExplainabilityModule:
 
         # Adjust x-axis limits to add more whitespace on the left
         plt.xlim(x_min - (shift_to_left + 0.1), x_max)  # Increase the left limit by 0.1
-        plt.title(title)
-        if save_path:
-            plt.savefig(save_path)
+        plt.title(
+            f"Attention map of model {model}, split {split} and mask(s) {masks if len(masks) > 0 else 'None'}"
+        )
+        if save_plot:
+            plt.savefig(f"./images/attentipn_map_{model}_{split}_{masks}.png")
         plt.show()
-
-    def plot_all_attention_graphs(
-        self, save_paths: Optional[List[str]] = None, weight_coef: int = 10
-    ):
-        self.plot_attention_graph(
-            torch.Tensor(self.llm_df["vanilla_attentions"].tolist()),
-            self.vanilla_tokens,
-            "Vanilla Model Attentions Plot",
-            weight_coef=weight_coef,
-            save_path=save_paths[0] if save_paths else None,
-        )
-        self.plot_attention_graph(
-            torch.Tensor(self.llm_df["graph_prompter_hf_attentions"].tolist()),
-            self.vanilla_tokens + self.additional_embedding_tokens,
-            "Input Embeds Replace Model Attentions Plot",
-            weight_coef=weight_coef,
-            save_path=save_paths[2] if save_paths else None,
-        )
 
     def get_verbose_df(self, n: Optional[int] = None) -> pd.DataFrame:
         def make_numpy_verbose(row: pd.Series) -> pd.Series:
@@ -403,7 +539,6 @@ class ExplainabilityModule:
         df = self._preconditions_split_and_fig_size(samples, fig_size, fig_dpi, split)
         existing_df = df[df["labels"] == 1]
         non_existing_df = df[df["labels"] == 0]
-        print(len(df), len(existing_df), len(non_existing_df))
         existing_df = existing_df.sample(samples)
         non_existing_df = non_existing_df.sample(samples)
         existing_low_dim_reps = self.produce_low_dim_reps_over_layer(
@@ -562,17 +697,3 @@ class MovieLensExplainabilityModule(ExplainabilityModule):
             ["user embedding", "sep5", "movie embedding", "sep6"],
             init_pcas=init_pcas,
         )
-
-
-class HiddenStatesPlotter:
-    def __init__(
-        self,
-        vanilla_df: pd.DataFrame,
-        embedding_df: pd.DataFrame,
-        vanilla_pcas: List[List[PCA]],
-        embedding_pcas: List[List[PCA]],
-    ) -> None:
-        self.vanilla_df = vanilla_df
-        self.embedding_df = embedding_df
-        self.vanilla_pcas = vanilla_pcas
-        self.embedding_pcas = embedding_pcas
