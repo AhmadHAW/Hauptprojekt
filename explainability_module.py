@@ -1,8 +1,11 @@
 import json
-from typing import List, Tuple, Optional, Callable
+from typing import List, Tuple, Optional, Callable, Dict
 import random as rd
 from pathlib import Path
 import ast
+import os
+from os import listdir
+from os.path import isfile, join
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -13,10 +16,20 @@ from sklearn.decomposition import PCA
 import matplotlib.cm as cm
 import joblib
 from matplotlib.collections import PathCollection
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, accuracy_score
 
 from dataset_manager.kg_manager import ROOT
-from llm_manager.vanilla.config import VANILLA_TOKEN_DICT
-from llm_manager.graph_prompter_hf.config import GRAPH_PROMPTER_TOKEN_DICT
+from llm_manager.vanilla.config import (
+    VANILLA_TOKEN_DICT,
+    VANILLA_TOKEN_TYPE_VALUES,
+    VANILLA_TOKEN_TYPE_VALUES_REVERSE,
+)
+from llm_manager.graph_prompter_hf.config import (
+    GRAPH_PROMPTER_TOKEN_DICT,
+    GRAPH_PROMPTER_TOKEN_TYPE_VALUES,
+    GRAPH_PROMPTER_TOKEN_TYPE_VALUES_REVERSE,
+)
+from utils import get_combinations
 
 
 class ExplainabilityModule:
@@ -240,21 +253,117 @@ class ExplainabilityModule:
     def __str_to_nparray(self, seq: str) -> np.ndarray:
         return np.array(ast.literal_eval(seq))
 
-    def plot_attention_maps(
+    def shap_accuracies(self, save_plot: bool = True, force_recompute: bool = False):
+        def tuple_to_string(t: Tuple) -> str:
+            result = "("
+            for t_ in t:
+                result += f"{str(t_)}, "
+            result = result[:-1] + ")" if result[-1] != "(" else result + ")"
+
+            return result
+
+        logits_path = "./data/llm/logits.pkl"
+        if isfile(logits_path) and not force_recompute:
+            print("loading from disk")
+            df = pd.read_pickle(logits_path)
+        else:
+            df = None
+            accuracies = {}
+            for model, model_root in zip(
+                ["vanilla", "graph_prompter_hf_frozen", "graph_prompter_hf"],
+                [
+                    self.vanilla_xai_artifact_root,
+                    self.graph_prompter_hf_frozen_xai_artifact_root,
+                    self.graph_prompter_hf_xai_artifact_root,
+                ],
+            ):
+                for f in listdir(model_root):
+                    full_path = join(model_root, f)
+                    if isfile(full_path):
+                        mask = f.split(".")[0].split("_")[1]
+                        df_model = pd.read_csv(
+                            full_path, converters={"logits": self.__str_to_nparray}
+                        )[["logits", "labels", "source_ids", "target_ids"]].rename(
+                            columns={"logits": f"logits_{model}_{mask}"}
+                        )
+                        predictions = np.argmax(
+                            np.stack(df_model[f"logits_{model}_{mask}"].tolist()),
+                            axis=-1,
+                        )
+                        accuracies[f"{model}_{mask}"] = accuracy_score(
+                            predictions, np.stack(df_model["labels"].tolist())
+                        )
+                        if df is None:
+                            df = df_model
+                        else:
+                            df = df.merge(
+                                df_model[
+                                    [
+                                        "source_ids",
+                                        "target_ids",
+                                        f"logits_{model}_{mask}",
+                                    ]
+                                ],
+                                on=["source_ids", "target_ids"],
+                            )
+
+            df.to_pickle(logits_path)
+            print(accuracies)
+            with open("./data/llm/accuracies.json", "w") as f:
+                json.dump(accuracies, f)
+        for model in ["vanilla", "graph_prompter_hf", "graph_prompter_hf_frozen"]:
+            if model == "vanilla":
+                token_type_values = list(set(VANILLA_TOKEN_TYPE_VALUES))
+                token_dict = VANILLA_TOKEN_DICT
+            else:
+                # we are a graph prompter model
+                token_type_values = list(set(GRAPH_PROMPTER_TOKEN_TYPE_VALUES))
+                token_dict = GRAPH_PROMPTER_TOKEN_DICT
+            token_type_combinations = get_combinations(token_type_values)[1:]
+            # Initialize SHAP value arrays for both classes
+            shap_values = {str: np.ndarray}  # 2 classes, num_features
+            len_N = len(token_type_values)
+            for token_type in token_type_values:
+                shap_values[token_dict[token_type]] = np.array([0.0, 0.0])
+                N_without_i = list(
+                    filter(
+                        lambda combination: token_type in combination,
+                        token_type_combinations,
+                    )
+                )
+                for S in N_without_i:
+                    weight = (
+                        np.math.factorial(len(S))
+                        * np.math.factorial((len_N - len(S) - 1))
+                    ) / np.math.factorial(len_N)
+                    S_with_i = tuple(S.difference(set([token_type])))
+
+                    S_with_i_logits = np.mean(
+                        np.stack(
+                            df[f"logits_{model}_{tuple_to_string(S_with_i)}"].tolist()
+                        ),
+                        axis=0,
+                    )
+                    S_logits = np.mean(
+                        np.stack(
+                            df[f"logits_{model}_{tuple_to_string(tuple(S))}"].tolist()
+                        ),
+                        axis=0,
+                    )
+                    shap_values[token_dict[token_type]] += weight * (
+                        S_with_i_logits - S_logits
+                    )
+                with open(f"./data/llm/{model}/shap_values.json", "w") as f:
+                    json.dump(shap_values, f)
+
+    def load_dfs(
         self,
         split: str,
+        model: str,
         masks: List[Tuple] | Tuple,
-        model: str = "vanilla",
-        filter: Optional[Callable] = None,
-        weight_coef: int | float = 15,
-        fig_dpi: int = 100,
-        fig_size: Tuple[int, int] = (8, 8),
-        save_plot: bool = True,
-    ) -> None:
-        assert weight_coef > 0
-        assert fig_dpi > 0
-        assert fig_size[0] > 0
-        assert fig_size[1] > 0
+        convert: str,
+        filter: Optional[Callable],
+    ) -> Tuple[pd.DataFrame, Dict, Dict]:
         if model == "vanilla":
             base_path_to_csv = f"{self.vanilla_xai_artifact_root}/{split}_{{}}.csv"
             token_type_dict = VANILLA_TOKEN_DICT
@@ -269,11 +378,12 @@ class ExplainabilityModule:
             )
             token_type_dict = GRAPH_PROMPTER_TOKEN_DICT
         token_type_dict_reverse = {v: k for k, v in token_type_dict.items()}
+        converter = {convert: self.__str_to_nparray}
 
         if isinstance(masks, Tuple):
             df = pd.read_csv(
                 base_path_to_csv.format(masks),
-                converters={"attention_maps": self.__str_to_nparray},
+                converters=converter,
             )
         else:
             dfs: List[pd.DataFrame] = []
@@ -281,12 +391,57 @@ class ExplainabilityModule:
                 dfs.append(
                     pd.read_csv(
                         base_path_to_csv.format(mask),
-                        converters={"attention_maps": self.__str_to_nparray},
+                        converters=converter,
                     )
                 )
             df = pd.concat(dfs)
         if filter is not None:
             df = df[df.apply(filter, axis=1)]
+        return df, token_type_dict, token_type_dict_reverse
+
+    def plot_confusion_map(
+        self,
+        split: str,
+        masks: List[Tuple] | Tuple,
+        model: str = "vanilla",
+        filter: Optional[Callable] = None,
+        save_plot: bool = True,
+    ):
+        df, _, _ = self.load_dfs(split, model, masks, "logits", filter)
+        logits = np.stack(df["logits"].tolist())
+        # Get predicted labels and true labels
+        preds = np.argmax(logits, axis=-1)
+        labels = df["labels"].tolist()
+        # Compute confusion matrix
+        cm = confusion_matrix(labels, preds)  # type: ignore
+
+        # Display confusion matrix
+        disp = ConfusionMatrixDisplay(
+            confusion_matrix=cm, display_labels=["Negative", "Positive"]
+        )
+        disp.plot(cmap=plt.cm.Blues)  # type: ignore
+        if save_plot:
+            plt.savefig(f"./images/confusion_map_{model}_{split}_{masks}.png")
+        plt.show()
+
+    def plot_attention_maps(
+        self,
+        split: str,
+        masks: List[Tuple] | Tuple,
+        model: str = "vanilla",
+        filter: Optional[Callable] = None,
+        weight_coef: int | float = 15,
+        fig_dpi: int = 100,
+        fig_size: Tuple[int, int] = (8, 8),
+        save_plot: bool = True,
+    ) -> None:
+        assert fig_dpi > 0
+        assert fig_size[0] > 0
+        assert fig_size[1] > 0
+        assert weight_coef > 0
+        df, token_type_dict, token_type_dict_reverse = self.load_dfs(
+            split, model, masks, "attention_maps", filter
+        )
         attention_maps = np.stack(df["attention_maps"].tolist())
         plt.rcParams["figure.figsize"] = fig_size
         plt.rcParams["figure.dpi"] = fig_dpi  # 200 e.g. is really fine, but slower
@@ -335,7 +490,7 @@ class ExplainabilityModule:
             f"Attention map of model {model}, split {split} and mask(s) {masks if len(masks) > 0 else 'None'}"
         )
         if save_plot:
-            plt.savefig(f"./images/attentipn_map_{model}_{split}_{masks}.png")
+            plt.savefig(f"./images/attention_map_{model}_{split}_{masks}.png")
         plt.show()
 
     def get_verbose_df(self, n: Optional[int] = None) -> pd.DataFrame:
