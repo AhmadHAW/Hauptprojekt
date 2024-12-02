@@ -225,8 +225,8 @@ class GraphPrompterHFBertForSequenceClassification(BertForSequenceClassification
                         assert target_kges is not None
                         source_kges = source_kges.detach()
                         target_kges = target_kges.detach()
-                    source_kges.requires_grad_(True)
-                    target_kges.requires_grad_(True)
+                    source_kges = source_kges.requires_grad_(True)
+                    target_kges = target_kges.requires_grad_(True)
             else:
                 source_kges, target_kges = self.get_embeddings_cb(
                     self.data[split], source_id, target_id

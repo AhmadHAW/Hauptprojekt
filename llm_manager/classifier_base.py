@@ -310,7 +310,9 @@ class ClassifierBase(ABC):
             Path(self.sub_logits_dir_path).mkdir(parents=True, exist_ok=True)
             Path(self.sub_hidden_states_dir_path).mkdir(parents=True, exist_ok=True)
             Path(self.sub_tokens_dir_path).mkdir(parents=True, exist_ok=True)
-            if len(set(dataset[splits[0]][0]["token_type_ids"])) == 3:
+            if len(set(dataset[splits[0]][0]["token_type_ids"])) == len(
+                set(VANILLA_TOKEN_TYPE_VALUES)
+            ):
                 # we are a vanilla model
                 token_type_values = list(set(VANILLA_TOKEN_TYPE_VALUES))
                 token_type_values_reverse = VANILLA_TOKEN_TYPE_VALUES_REVERSE

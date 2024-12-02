@@ -344,13 +344,21 @@ class KGManger(ABC):
                     axis=1,
                 )
                 if get_embeddings_cb:
-                    source_kges, target_kges = get_embeddings_cb(
-                        self.data,
-                        llm_df["source_id"].to_list(),
-                        llm_df["target_id"].to_list(),
-                    )
-                    llm_df["source_kges"] = source_kges.to("cpu").detach().tolist()
-                    llm_df["target_kges"] = target_kges.to("cpu").detach().tolist()
+                    chunk_size = 20000
+                    print("chunking for KGEs")
+                    chunks = []
+                    for i in range(0, len(llm_df), chunk_size):
+                        chunk = llm_df.iloc[i : i + chunk_size].copy()  # Create chunk
+                        source_kges, target_kges = get_embeddings_cb(
+                            self.data,
+                            chunk["source_id"].to_list(),
+                            chunk["target_id"].to_list(),
+                        )
+                        chunk["source_kges"] = source_kges.to("cpu").detach().tolist()
+                        chunk["target_kges"] = target_kges.to("cpu").detach().tolist()
+                        chunks.append(chunk)
+                    llm_df = pd.concat(chunks)
+                    print(llm_df)
                 dataset = self.__dataset_from_df(llm_df)
                 dataset.save_to_disk(llm_adding_dataset_temp_path)
             dataset = load_from_disk(llm_adding_dataset_temp_path)
@@ -401,6 +409,7 @@ class KGManger(ABC):
         self,
         vanilla_root: str,
         graph_prompter_hf_root: str,
+        graph_prompter_hf_frozen_root: str,
         vanilla_dataset: Optional[DatasetDict] = None,
         graph_prompter_hf_dataset: Optional[DatasetDict] = None,
         shard_size: int = 100000,
@@ -410,6 +419,9 @@ class KGManger(ABC):
         vanilla_path = vanilla_root + "/dataset_shard_{}".format(shard_size)
         graph_prompter_hf_path = graph_prompter_hf_root + "/dataset_shard_{}".format(
             shard_size
+        )
+        graph_prompter_hf_frozen_path = (
+            graph_prompter_hf_frozen_root + "/dataset_shard_{}".format(shard_size)
         )
 
         if force_recompute or not (
@@ -432,12 +444,16 @@ class KGManger(ABC):
             vanilla_dataset = DatasetDict(vanilla_dict)
             graph_prompter_hf_dataset = DatasetDict(graph_prompter_hf_dict)
             vanilla_dataset.save_to_disk(vanilla_path)
+            graph_prompter_hf_dataset.save_to_disk(graph_prompter_hf_frozen_path)
             graph_prompter_hf_dataset.save_to_disk(graph_prompter_hf_path)
         else:
             vanilla_dataset = load_from_disk(vanilla_path)
             graph_prompter_hf_dataset = load_from_disk(graph_prompter_hf_path)
 
-        return vanilla_dataset, graph_prompter_hf_dataset
+        return (
+            vanilla_dataset,
+            graph_prompter_hf_dataset,
+        )
 
     def fuse_xai_shards(self, root: str, dataset: DatasetDict) -> None:
         def split_path(

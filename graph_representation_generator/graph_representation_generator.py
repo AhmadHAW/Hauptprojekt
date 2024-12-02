@@ -70,12 +70,6 @@ class GraphRepresentationGenerator:
         self.gnn_val_data = gnn_val_data
         self.gnn_test_data = gnn_test_data
         self.kge_dimension = kge_dimension
-        self.source_embedding_path = (
-            f"{ROOT}/gnn/model_{kge_dimension}_source_embedding_split_{{}}.pth"
-        )
-        self.target_embedding_path = (
-            f"{ROOT}/gnn/model_{kge_dimension}_target_embedding_split_{{}}.pth"
-        )
         self.force_recompute = force_recompute
 
     def train_model(self, data, epochs, batch_size=64):

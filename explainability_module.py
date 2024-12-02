@@ -35,12 +35,10 @@ class ExplainabilityModule:
             f"{self.graph_prompter_hf_frozen_path}/xai_artifacts"
         )
         self.vanilla_training_path = (
-            f"{self.vanilla_path}/training/checkpoint-2210/trainer_state.json"
+            f"{self.vanilla_path}/training/checkpoint-140002/trainer_state.json"
         )
-        self.graph_prompter_hf_training_path = (
-            f"{self.graph_prompter_hf_path}/training/checkpoint-4420/trainer_state.json"
-        )
-        self.graph_prompter_hf_frozen_training_path = f"{self.graph_prompter_hf_frozen_path}/training/checkpoint-2210/trainer_state.json"
+        self.graph_prompter_hf_training_path = f"{self.graph_prompter_hf_path}/training/checkpoint-140002/trainer_state.json"
+        self.graph_prompter_hf_frozen_training_path = f"{self.graph_prompter_hf_frozen_path}/training/checkpoint-140002/trainer_state.json"
 
     def plot_training_losses(self, save_plot: bool = True):
         with open(self.vanilla_training_path, "r") as f:
