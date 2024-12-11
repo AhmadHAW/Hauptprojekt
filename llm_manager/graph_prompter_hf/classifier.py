@@ -51,6 +51,8 @@ class GraphPrompterHFBertEmbeddings(BertEmbeddings):
         source_kges: Optional[torch.FloatTensor] = None,
         target_kges: Optional[torch.FloatTensor] = None,
         past_key_values_length: int = 0,
+        mask_source_kge: bool = False,
+        mask_target_kge: bool = False,
     ) -> torch.Tensor:
         if input_ids is not None:
             input_shape = input_ids.size()
@@ -94,19 +96,26 @@ class GraphPrompterHFBertEmbeddings(BertEmbeddings):
                 and source_kges is not None
                 and target_kges is not None
                 and inputs_embeds is not None
+                and not (mask_source_kge and mask_target_kge)
             ):
-                source_mask = (
-                    token_type_ids == GRAPH_PROMPTER_TOKEN_TYPE_VALUES[-4]
-                ).int()
-                target_mask = (
-                    token_type_ids == GRAPH_PROMPTER_TOKEN_TYPE_VALUES[-2]
-                ).int()
-                source_mask = source_mask.unsqueeze(-1).repeat(
-                    1, 1, inputs_embeds.shape[2]
-                )
-                target_mask = target_mask.unsqueeze(-1).repeat(
-                    1, 1, inputs_embeds.shape[2]
-                )
+                if not mask_source_kge:
+                    source_mask = (
+                        token_type_ids == GRAPH_PROMPTER_TOKEN_TYPE_VALUES[-4]
+                    ).int()
+                    source_mask = source_mask.unsqueeze(-1).repeat(
+                        1, 1, inputs_embeds.shape[2]
+                    )
+                else:
+                    source_mask = torch.zeros_like(inputs_embeds)
+                if not mask_target_kge:
+                    target_mask = (
+                        token_type_ids == GRAPH_PROMPTER_TOKEN_TYPE_VALUES[-2]
+                    ).int()
+                    target_mask = target_mask.unsqueeze(-1).repeat(
+                        1, 1, inputs_embeds.shape[2]
+                    )
+                else:
+                    target_mask = torch.zeros_like(inputs_embeds)
                 new_inputs_embeds = (
                     inputs_embeds * (1 - source_mask)
                     + source_kges.unsqueeze(1).repeat(1, inputs_embeds.shape[1], 1)
@@ -201,6 +210,8 @@ class GraphPrompterHFBertForSequenceClassification(BertForSequenceClassification
         source_id: Optional[List[int]] = None,
         target_id: Optional[List[int]] = None,
         split: Optional[str] = None,
+        mask_source_kge: bool = False,
+        mask_target_kge: bool = False,
     ) -> Union[Tuple[torch.Tensor], SequenceClassifierOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
@@ -214,23 +225,39 @@ class GraphPrompterHFBertForSequenceClassification(BertForSequenceClassification
         if not split:
             split = "train"
         if inputs_embeds is None:
-            if source_kges is None and source_id is not None and target_id is not None:
-                if self.detach_kges:
-                    with torch.no_grad():
-                        print("no grad")
+            if source_kges is None or target_kges is None:
+                print("should not be here")
+                if source_id is not None and target_id is not None:
+                    if self.detach_kges:
+                        with torch.no_grad():
+                            print("no grad")
+                            source_kges, target_kges = self.get_embeddings_cb(
+                                self.data[split], source_id, target_id
+                            )
+                            assert source_kges is not None
+                            assert target_kges is not None
+                            source_kges = source_kges.detach()
+                            target_kges = target_kges.detach()
+                        source_kges = source_kges.requires_grad_(True)
+                        target_kges = target_kges.requires_grad_(True)
+                else:
+                    if not (mask_source_kge and mask_target_kge):
                         source_kges, target_kges = self.get_embeddings_cb(
                             self.data[split], source_id, target_id
                         )
-                        assert source_kges is not None
-                        assert target_kges is not None
-                        source_kges = source_kges.detach()
-                        target_kges = target_kges.detach()
-                    source_kges = source_kges.requires_grad_(True)
-                    target_kges = target_kges.requires_grad_(True)
-            else:
-                source_kges, target_kges = self.get_embeddings_cb(
-                    self.data[split], source_id, target_id
-                )
+                        if mask_source_kge:
+                            source_kges = source_kges.detach()
+                        if mask_target_kge:
+                            target_kges = target_kges.detach()
+                    else:
+                        source_kges = torch.zeros(
+                            (input_ids.shape[0], self.config.hidden_size),
+                            device=self.device,
+                        )
+                        target_kges = torch.zeros(
+                            (input_ids.shape[0], self.config.hidden_size),
+                            device=self.device,
+                        )
             input_ids = input_ids.to(self.device)
             attention_mask = attention_mask.to(self.device)
             token_type_ids = token_type_ids.to(self.device)
@@ -240,6 +267,8 @@ class GraphPrompterHFBertForSequenceClassification(BertForSequenceClassification
                 source_kges=source_kges,
                 target_kges=target_kges,
                 token_type_ids=token_type_ids,
+                mask_source_kge=mask_source_kge,
+                mask_target_kge=mask_target_kge,
             )  # we replaced the placeholder padding tokens in the embedding generation with the KGEs
             assert isinstance(inputs_embeds, torch.Tensor)
         outputs = self.bert(

@@ -17,6 +17,7 @@ from transformers import (
     DataCollatorForLanguageModeling,
     TrainingArguments,
 )
+from torch_geometric.data import HeteroData
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 import matplotlib.pyplot as plt
 from utils import (
@@ -286,10 +287,12 @@ class ClassifierBase(ABC):
     def forward_dataset_and_save_outputs(
         self,
         dataset: datasets.Dataset | datasets.DatasetDict,
-        splits: List[str] = ["train", "test", "val"],
+        splits: List[str] = ["test", "val"],
         batch_size: int = 64,
         save_step_size: int = 1,
         load_fields: List[str] = ["attentions", "hidden_states", "logits"],
+        get_embeddings_cb: Optional[Callable] = None,
+        gnn_datasets: Optional[List[HeteroData]] = None,
         force_recompute: bool = False,
         combination_boundaries: Optional[Tuple[int, int]] = None,
     ) -> None:
@@ -335,7 +338,8 @@ class ClassifierBase(ABC):
                     combination_boundaries[0] : combination_boundaries[1]
                 ]
             with torch.no_grad():
-                for split in splits:
+                assert gnn_datasets is not None
+                for split, gnn_data in zip(splits, gnn_datasets):
                     print("split", split)
                     data_collator = self._get_data_collator(split)
                     data_loader = DataLoader(
@@ -343,6 +347,7 @@ class ClassifierBase(ABC):
                         batch_size=batch_size,
                         collate_fn=data_collator,
                     )
+                    kges = {}
                     for combination in token_type_combinations:
                         combination_string = str(list(combination))
                         if len(combination) == 0:
@@ -358,14 +363,31 @@ class ClassifierBase(ABC):
                         print(f"combination: {combination}")
                         total_batches = len(data_loader)
                         for idx, batch in enumerate(data_loader):
+                            if idx not in kges and get_embeddings_cb is not None:
+                                with torch.no_grad():
+                                    source_kges, target_kges = get_embeddings_cb(
+                                        gnn_data, batch["source_id"], batch["target_id"]
+                                    )
+                                    assert source_kges is not None
+                                    assert target_kges is not None
+                                    source_kges = source_kges.detach()
+                                    target_kges = target_kges.detach()
+                                    kges[idx] = (source_kges, target_kges)
+
                             # idx = 0
                             # if True:
                             # batch = next(iter(data_loader))
                             splits_ = [split] * len(batch["input_ids"])
                             batch["labels"] = batch["labels"].to(self.device)
+                            batch["attention_mask"] = batch["attention_mask"].to(
+                                self.device
+                            )
                             batch["token_type_ids"] = batch["token_type_ids"].to(
                                 self.device
                             )
+                            if get_embeddings_cb is not None:
+                                batch["source_kges"] = kges[idx][0]
+                                batch["target_kges"] = kges[idx][1]
                             token_type_mask = torch.zeros_like(
                                 batch["token_type_ids"],
                                 dtype=torch.int,
@@ -376,19 +398,19 @@ class ClassifierBase(ABC):
                                     token_type_mask += (
                                         batch["token_type_ids"] == pos
                                     ).int()
-                            original_attention_mask = batch["attention_mask"].to(
-                                self.device
-                            )
-                            batch["attention_mask"] = replace_ranges(
-                                original_attention_mask,
+                            batch["input_ids"] = replace_ranges(
+                                batch["input_ids"].to(self.device),
                                 token_type_mask,
-                                value=0,
+                                value=self.tokenizer.mask_token_id,
                             )
-                            batch["input_ids"] = batch["input_ids"].to(self.device)
+                            mask_source_kge = 4 in combination
+                            mask_target_kge = 5 in combination
                             outputs = self.model(
                                 **batch,
                                 output_hidden_states=add_hidden_states,
                                 output_attentions=add_attentions,
+                                mask_source_kge=mask_source_kge,
+                                mask_target_kge=mask_target_kge,
                             )
                             if add_attentions:
                                 attentions = outputs.attentions
@@ -399,7 +421,7 @@ class ClassifierBase(ABC):
                                 attentions = mean_over_attention_ranges(
                                     attentions,
                                     batch["token_type_ids"],
-                                    attention_mask=original_attention_mask,
+                                    attention_mask=batch["attention_mask"],
                                 )
                                 attentions_collected.append(
                                     attentions.to("cpu").numpy()
@@ -413,7 +435,10 @@ class ClassifierBase(ABC):
                                             (idx + 1) / save_step_size,
                                             combination_string,
                                         ),
-                                        np.concatenate(attentions_collected),
+                                        np.round(
+                                            np.concatenate(attentions_collected),
+                                            decimals=4,
+                                        ),
                                     )
                                     attentions_collected = []
                             if add_logits:
@@ -427,7 +452,7 @@ class ClassifierBase(ABC):
                                 hidden_states = mean_over_hidden_states(
                                     hidden_states,
                                     batch["token_type_ids"],
-                                    original_attention_mask,
+                                    attention_mask=batch["attention_mask"],
                                 )
                                 hidden_states_collected.append(
                                     hidden_states.to("cpu").numpy()
@@ -441,7 +466,10 @@ class ClassifierBase(ABC):
                                             (idx + 1) / save_step_size,
                                             combination_string,
                                         ),
-                                        np.concatenate(hidden_states_collected),
+                                        np.round(
+                                            np.concatenate(hidden_states_collected),
+                                            decimals=4,
+                                        ),
                                     )
                                     hidden_states_collected = []
                         if add_logits:
@@ -450,7 +478,7 @@ class ClassifierBase(ABC):
                             )
                             np.save(
                                 self.sub_logits_path.format(split, combination_string),
-                                logits_of_combination,
+                                np.round(logits_of_combination, decimals=4),
                             )
 
     @staticmethod

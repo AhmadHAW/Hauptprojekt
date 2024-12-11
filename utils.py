@@ -166,9 +166,10 @@ def token_ranges_to_mask(
 def replace_ranges(
     tensor: torch.Tensor, token_type_mask: torch.Tensor, value: int = 0
 ) -> torch.Tensor:
-    value_tensor = torch.Tensor([[value]]).to(tensor.device)
+    value_tensor = torch.tensor([[value]], device=tensor.device, dtype=torch.long)
     value_tensor = value_tensor.repeat(tensor.shape)
-    return tensor * (1 - token_type_mask) + value_tensor * token_type_mask
+    result = tensor * (1 - token_type_mask) + value_tensor * token_type_mask
+    return result
 
 
 def replace_ranges_slow(

@@ -455,7 +455,7 @@ class KGManger(ABC):
             graph_prompter_hf_dataset,
         )
 
-    def fuse_xai_shards(self, root: str, dataset: DatasetDict) -> None:
+    def fuse_xai_shards(self, root: str) -> None:
         def split_path(
             filename: str, basepath: str
         ) -> Tuple[str, str, float, Tuple[int]]:
@@ -467,89 +467,10 @@ class KGManger(ABC):
                 tuple(ast.literal_eval(file_name_splits[5].split(".")[0])),
             )
 
-        def generate_df_for_splits(
-            basepath: str,
-            attention_map_files: List[Tuple[str, str, float, Tuple[int]]],
-            hidden_state_files: List[Tuple[str, str, float, Tuple[int]]],
-            logit_files: List[Tuple[str, str, Tuple[int]]],
-        ):
-            xai_artifacts_dir = f"{basepath}/xai_artifacts"
-            Path(xai_artifacts_dir).mkdir(parents=True, exist_ok=True)
-            file_dict = {}
-            for attention_map_file, hidden_state_file in zip(
-                attention_map_files, hidden_state_files
-            ):
-                if attention_map_file[1] not in file_dict:  # split
-                    file_dict[attention_map_file[1]] = {}
-                if hidden_state_file[1] not in file_dict:  # split
-                    file_dict[hidden_state_file[1]] = {}
-
-                if (
-                    attention_map_file[3] not in file_dict[attention_map_file[1]]
-                ):  # mask
-                    file_dict[attention_map_file[1]][attention_map_file[3]] = {
-                        "attention_maps": [],
-                        "hidden_states": [],
-                    }
-                if hidden_state_file[3] not in file_dict[hidden_state_file[1]]:  # mask
-                    file_dict[hidden_state_file[1]][hidden_state_file[3]] = {
-                        "attention_maps": [],
-                        "hidden_states": [],
-                    }
-
-                file_dict[attention_map_file[1]][attention_map_file[3]][
-                    "attention_maps"
-                ].append((attention_map_file[0], attention_map_file[2]))
-
-                file_dict[hidden_state_file[1]][hidden_state_file[3]][
-                    "hidden_states"
-                ].append((hidden_state_file[0], hidden_state_file[2]))
-
-            for logit_file in logit_files:
-                file_dict[logit_file[1]][logit_file[2]]["logits"] = logit_file[0]
-
-            for split, split_dict in file_dict.items():
-                labels = dataset[split]["labels"]
-                source_ids = dataset[split]["source_id"]
-                target_ids = dataset[split]["target_id"]
-                for mask, mask_dict in split_dict.items():
-                    mask_dict["attention_maps"] = list(
-                        map(
-                            lambda tup: tup[0],
-                            sorted(mask_dict["attention_maps"], key=lambda tup: tup[1]),
-                        )
-                    )
-                    mask_dict["hidden_states"] = list(
-                        map(
-                            lambda tup: tup[0],
-                            sorted(mask_dict["hidden_states"], key=lambda tup: tup[1]),
-                        )
-                    )
-                    attention_maps = np.concatenate(
-                        [np.load(filepath) for filepath in mask_dict["attention_maps"]]
-                    )
-                    hidden_states = np.concatenate(
-                        [np.load(filepath) for filepath in mask_dict["hidden_states"]]
-                    )
-                    logits = np.load(mask_dict["logits"])
-
-                    print("save to ", f"{basepath}/xai_artifacts/{split}_{mask}.csv")
-                    pd.DataFrame(
-                        {
-                            "attention_maps": attention_maps.tolist(),
-                            "hidden_states": hidden_states.tolist(),
-                            "logits": logits.tolist(),
-                            "labels": labels,
-                            "source_ids": source_ids,
-                            "target_ids": target_ids,
-                        }
-                    ).to_csv(f"{xai_artifacts_dir}/{split}_{mask}.csv", index=False)
-
         attention_paths = f"{root}/attentions"
         hidden_state_paths = f"{root}/hidden_states"
-        logits_path = f"{root}/logits"
 
-        attention_files = [
+        attention_map_files = [
             split_path(f, attention_paths)
             for f in listdir(attention_paths)
             if isfile(join(attention_paths, f))
@@ -560,18 +481,99 @@ class KGManger(ABC):
             for f in listdir(hidden_state_paths)
             if isfile(join(hidden_state_paths, f))
         ]
+        file_dict = {}
+        for attention_map_file, hidden_state_file in zip(
+            attention_map_files, hidden_state_files
+        ):
+            if attention_map_file[1] not in file_dict:  # split
+                file_dict[attention_map_file[1]] = {}
+            if hidden_state_file[1] not in file_dict:  # split
+                file_dict[hidden_state_file[1]] = {}
 
-        logit_files = [
-            (
-                join(logits_path, f),
-                f.split("_")[1],
-                tuple(ast.literal_eval(f.split("_")[3].split(".")[0])),
-            )
-            for f in listdir(logits_path)
-            if isfile(join(logits_path, f))
-        ]
+            if attention_map_file[3] not in file_dict[attention_map_file[1]]:  # mask
+                file_dict[attention_map_file[1]][attention_map_file[3]] = {
+                    "attention_maps": [],
+                    "hidden_states": [],
+                }
+            if hidden_state_file[3] not in file_dict[hidden_state_file[1]]:  # mask
+                file_dict[hidden_state_file[1]][hidden_state_file[3]] = {
+                    "attention_maps": [],
+                    "hidden_states": [],
+                }
 
-        generate_df_for_splits(root, attention_files, hidden_state_files, logit_files)
+            file_dict[attention_map_file[1]][attention_map_file[3]][
+                "attention_maps"
+            ].append((attention_map_file[0], attention_map_file[2]))
+
+            file_dict[hidden_state_file[1]][hidden_state_file[3]][
+                "hidden_states"
+            ].append((hidden_state_file[0], hidden_state_file[2]))
+
+        for split, split_dict in file_dict.items():
+            for mask, mask_dict in split_dict.items():
+                mask_dict["attention_maps"] = list(
+                    map(
+                        lambda tup: tup[0],
+                        sorted(mask_dict["attention_maps"], key=lambda tup: tup[1]),
+                    )
+                )
+                mask_dict["hidden_states"] = list(
+                    map(
+                        lambda tup: tup[0],
+                        sorted(mask_dict["hidden_states"], key=lambda tup: tup[1]),
+                    )
+                )
+                attention_maps = np.concatenate(
+                    [np.load(filepath) for filepath in mask_dict["attention_maps"]]
+                )
+                hidden_states = np.concatenate(
+                    [np.load(filepath) for filepath in mask_dict["hidden_states"]]
+                )
+
+                attention_target_path = (
+                    f"{attention_paths}/split_{split}_com_{list(mask)}.npy"
+                )
+                print("save to ", f"{attention_target_path}")
+                np.save(attention_target_path, attention_maps)
+                hidden_state_target_path = (
+                    f"{hidden_state_paths}/split_{split}_com_{list(mask)}.npy"
+                )
+                print("save to ", f"{hidden_state_target_path}")
+                np.save(hidden_state_target_path, hidden_states)
+
+                for filepath in mask_dict["attention_maps"]:
+                    try:
+                        os.remove(filepath)
+                    except OSError:
+                        pass
+
+                for filepath in mask_dict["hidden_states"]:
+                    try:
+                        os.remove(filepath)
+                    except OSError:
+                        pass
+
+    def load_xai_artifact(
+        self,
+        root: str,
+        split: str,
+        token_type_mask: List[int],
+        dataset: DatasetDict,
+        filter: Optional[Callable] = None,
+    ) -> pd.DataFrame:
+        filename = f"/split_{split}_com_{token_type_mask}.npy"
+        attention_paths = f"{root}/attentions{filename}"
+        hidden_state_paths = f"{root}/hidden_states{filename}"
+        logits_path = f"{root}/logits{filename}"
+        dataset_split = dataset[split]
+        dataset_split = dataset_split.to_pandas()
+        assert isinstance(dataset_split, pd.DataFrame)
+        dataset_split["attention_map"] = list(np.load(attention_paths))
+        dataset_split["hidden_states"] = list(np.load(hidden_state_paths))
+        dataset_split["logits"] = list(np.load(logits_path))
+        if filter:
+            dataset_split = dataset_split[dataset_split.apply(filter, axis=1)]
+        return dataset_split
 
     def __flatten_and_rename_if_present(
         self, df: pd.DataFrame, prefix: str, add_tokens: bool = False
