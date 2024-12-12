@@ -361,8 +361,18 @@ class ExplainabilityModule:
             with open(f"./data/llm/{model}/shap_values.json", "w") as f:
                 json.dump(shap_values, f)
 
-    def plot_shap_values(self, save_plot: bool = True) -> None:
-        for model in ["vanilla", "graph_prompter_hf_frozen", "graph_prompter_hf"]:
+    def plot_shap_values(
+        self,
+        bar_width=0.4,
+        fig_size=(16, 8),
+        fig_dpi: int = 100,
+        save_plot: bool = True,
+    ) -> None:
+        plt.rcParams["figure.figsize"] = fig_size
+        plt.figure(figsize=fig_size)
+        for idx, model in enumerate(
+            ["vanilla", "graph_prompter_hf_frozen", "graph_prompter_hf"]
+        ):
             x_axis = []
             x_labels = []
             y_axis_1 = []
@@ -370,13 +380,35 @@ class ExplainabilityModule:
             with open(f"./data/llm/{model}/shap_values.json", "r") as f:
                 shap_values = json.load(f)
                 for feature, shap_value in shap_values.items():
-                    x_axis.append(len(x_axis) * 2)
+                    x_axis.append(len(x_axis) * 3)
                     x_labels.append(f"- {feature}")
                     y_axis_1.append(shap_value[0])
-                    y_axis_2.append(shap_value[0])
-            plt.bar(np.array(x_axis) - 0.2, y_axis_1, align="center", width=0.4)
-            plt.bar(np.array(x_axis) + 0.2, y_axis_2, align="center", width=0.4)
+                    y_axis_2.append(shap_value[1])
+            plt.bar(
+                (np.array(x_axis) - bar_width / 2) + (idx - 1) * bar_width * 2,
+                y_axis_1,
+                align="center",
+                width=bar_width,
+                label=f"negative {model}",
+            )
+            plt.bar(
+                (np.array(x_axis) + bar_width / 2) + (idx - 1) * bar_width * 2,
+                y_axis_2,
+                align="center",
+                width=bar_width,
+                label=f"positive {model}",
+            )
             plt.xticks(x_axis, x_labels)
+        plt.xlabel("Features")
+        plt.ylabel("SHAP Values")
+        # Add a single legend
+        plt.legend(
+            loc="upper left",
+            ncol=2,  # Optional: Place legends in two columns
+            title="Legend",
+        )
+        if save_plot:
+            plt.savefig("./images/shap_values.png")
 
     def plot_confusion_map(
         self,
