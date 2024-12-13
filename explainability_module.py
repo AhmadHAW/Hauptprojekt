@@ -11,7 +11,6 @@ import numpy as np
 import networkx as nx
 from sklearn.decomposition import PCA
 import matplotlib.cm as cm
-import joblib
 from matplotlib.collections import PathCollection
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, accuracy_score
 from datasets import DatasetDict
@@ -62,6 +61,7 @@ class ExplainabilityModule:
         df = self.load_xai_artifacts_cb(
             xai_root, split, token_type_mask, self.dataset, filter
         )
+        df["model"] = model
         return df, token_type_dict, token_type_dict_reverse
 
     def plot_training_losses(self, save_plot: bool = True):
@@ -517,42 +517,10 @@ class ExplainabilityModule:
             df = self.llm_df.head(n)
         return df.apply(make_numpy_verbose, axis=1)
 
-    def init_pcas_for_model(
-        self,
-        hidden_states: np.ndarray,
-        token_labels: List[str],
-        pca_target_base_path_template: Optional[str] = None,
-    ) -> List[List[PCA]]:
-        hidden_states = np.transpose(hidden_states, (1, 0, 2, 3))  # type: ignore
-        pcas: List[List[PCA]] = []
-        for layer_num, layer in enumerate(hidden_states):
-            pcas_on_layer: List[PCA] = []
-            pcas.append(pcas_on_layer)
-            for idx, label in enumerate(token_labels):
-                pca = PCA(n_components=2)  # Adjust number of components as needed
-                pcas_on_layer.append(pca)
-                position_hidden_states = layer[:, idx]
-                pca.fit_transform(position_hidden_states)
-                if pca_target_base_path_template:
-                    pca_target_path = pca_target_base_path_template.format(
-                        label, layer_num
-                    )
-                    joblib.dump(pca, pca_target_path)
-        return pcas
-
-    def init_pcas(self, split="train"):
-        df = self.llm_df[self.llm_df["split"] == split]
-        vanilla_hidden_states = np.stack(df["vanilla_hidden_states"].tolist())
-        graph_prompter_hf_hidden_states = np.stack(
-            df["graph_prompter_hf_hidden_states"].tolist()
-        )
-        self.vanilla_pcas = self.init_pcas_for_model(
-            vanilla_hidden_states, self.vanilla_tokens
-        )
-        self.graph_prompter_hf_pcas = self.init_pcas_for_model(
-            graph_prompter_hf_hidden_states,
-            self.vanilla_tokens + self.additional_embedding_tokens,
-        )
+    def fit_pca(self, embeddings: np.ndarray) -> PCA:
+        pca = PCA(n_components=2)
+        pca.fit_transform(embeddings)
+        return pca
 
     def _forward_hidden_states_to_pcas(
         self, hidden_states: np.ndarray, pcas: List[PCA]
@@ -585,31 +553,6 @@ class ExplainabilityModule:
         plt.rcParams["figure.dpi"] = fig_dpi  # 200 e.g. is really fine, but slower
         return None
 
-    def produce_low_dim_reps_over_layer(
-        self, layer: int, token_index: List[int], df: pd.DataFrame
-    ) -> np.ndarray:
-        assert layer < len(self.vanilla_pcas)
-        assert max(token_index) < len(self.vanilla_pcas[0])
-        vanilla_pcas = self.get_list_index_from_list(
-            self.vanilla_pcas[layer], token_index
-        )
-        graph_prompter_hf_pcas = self.get_list_index_from_list(
-            self.graph_prompter_hf_pcas[layer], token_index
-        )
-        vanilla_hidden_states = np.stack(df["vanilla_hidden_states"].tolist())[
-            :, layer, token_index
-        ].transpose(1, 0, 2)  # shape (token positions, dataset size, embedding size)
-        graph_prompter_hf_hidden_states = np.stack(
-            df["graph_prompter_hf_hidden_states"].tolist()
-        )[:, layer, token_index].transpose(1, 0, 2)
-        low_dim_reps_vanilla = self._forward_hidden_states_to_pcas(
-            vanilla_hidden_states, vanilla_pcas
-        )
-        low_dim_reps_embedding = self._forward_hidden_states_to_pcas(
-            graph_prompter_hf_hidden_states, graph_prompter_hf_pcas
-        )
-        return np.stack([low_dim_reps_vanilla, low_dim_reps_embedding])
-
     def _title_figure_save(
         self,
         title: str,
@@ -634,7 +577,10 @@ class ExplainabilityModule:
         plt.show()
 
     def _scatter_plot_over_low_dim_reps(
-        self, low_dim_reps: np.ndarray, markers: List[List[str]], colors: List[List]
+        self,
+        low_dim_reps: List[np.ndarray],
+        markers: List[List[str]],
+        colors: List[List],
     ) -> List[PathCollection]:
         """
         This method expects shapes in form of: [model, positions]
@@ -660,12 +606,27 @@ class ExplainabilityModule:
                 )
         return scatter_legends
 
+    def group_by_source_target_ids(self, df: pd.DataFrame) -> pd.DataFrame:
+        df_vanilla = df[df["model"] == "vanilla"][
+            ["hidden_states", "source_id", "target_id", "labels"]
+        ].rename(columns={"hidden_states": "vanilla_hidden_states"})
+        df_graph_prompter_hf_frozen = df[df["model"] == "graph_prompter_hf_frozen"][
+            ["hidden_states", "source_id", "target_id", "labels"]
+        ].rename(columns={"hidden_states": "graph_prompter_hf_frozen_hidden_states"})
+        df_graph_prompter_hf = df[df["model"] == "graph_prompter_hf"][
+            ["hidden_states", "source_id", "target_id", "labels"]
+        ].rename(columns={"hidden_states": "graph_prompter_hf_hidden_states"})
+        df = df_vanilla.merge(
+            df_graph_prompter_hf_frozen, on=["source_id", "target_id"]
+        ).merge(df_graph_prompter_hf, on=["source_id", "target_id"])
+        return df
+
     def plot_cls_embeddings(
         self,
         samples=1,
         fig_size: Tuple[int, int] = (8, 8),
         fig_dpi: int = 200,
-        save_path: Optional[str | Path] = None,
+        save_plot: bool = True,
     ):
         assert samples >= 1
         self._preconditions_split_and_fig_size(samples, fig_size, fig_dpi)
@@ -674,26 +635,98 @@ class ExplainabilityModule:
             ["test", "val"],
             ["vanilla", "graph_prompter_hf_frozen", "graph_prompter_hf"],
         ):
-            all_dfs.append(self.load_df(split, model, []))
+            df, _, _ = self.load_df(split, model, [])
+            df = df[
+                ["model", "split", "source_id", "target_id", "hidden_states", "labels"]
+            ]
+            if model == "vanilla":
+                hidden_states = np.stack(df["hidden_states"].tolist())
+                df["hidden_states"] = np.pad(
+                    hidden_states, ((0, 0), (0, 2), (0, 0), (0, 0)), mode="constant"
+                ).tolist()
+            all_dfs.append(df)
         df = pd.concat(all_dfs)
         df_test = df[df["split"] == "test"]
-        df_val = (
-            df[df["split"] == "val"].groupby(["source_id", "target_id"]).sample(samples)
+        df_val = self.group_by_source_target_ids(df[df["split"] == "val"]).sample(
+            samples
+        )
+        df_val_with_edges = df_val[df_val["labels"] == 1]
+        df_val_without_edges = df_val[df_val["labels"] == 0]
+        pca = self.fit_pca(np.stack(df_test["hidden_states"].tolist())[:, 0, 2])
+
+        vanilla_hidden_states_with_edges = np.stack(
+            df_val_with_edges["vanilla_hidden_states"].tolist()
+        )[:, 0, 2]
+        graph_prompter_hf_frozen_hidden_states_with_edges = np.stack(
+            df_val_with_edges["graph_prompter_hf_frozen_hidden_states"]
+        )[:, 0, 2]
+        graph_prompter_hf_hidden_states_with_edges = np.stack(
+            df_val_with_edges["graph_prompter_hf_hidden_states"]
+        )[:, 0, 2]
+        vanilla_hidden_states_with_edges = np.expand_dims(
+            pca.transform(vanilla_hidden_states_with_edges), axis=0
+        )
+        graph_prompter_hf_frozen_hidden_states_with_edges = np.expand_dims(
+            pca.transform(graph_prompter_hf_frozen_hidden_states_with_edges), axis=0
+        )
+        graph_prompter_hf_hidden_states_with_edges = np.expand_dims(
+            pca.transform(graph_prompter_hf_hidden_states_with_edges), axis=0
         )
 
-        low_dim_reps = self.produce_low_dim_reps_over_layer(-1, [0], df)
+        vanilla_hidden_states_without_edges = np.stack(
+            df_val_without_edges["vanilla_hidden_states"].tolist()
+        )[:, 0, 2]
+        graph_prompter_hf_frozen_hidden_states_without_edges = np.stack(
+            df_val_without_edges["graph_prompter_hf_frozen_hidden_states"]
+        )[:, 0, 2]
+        graph_prompter_hf_hidden_states_without_edges = np.stack(
+            df_val_without_edges["graph_prompter_hf_hidden_states"]
+        )[:, 0, 2]
+        vanilla_hidden_states_without_edges = np.expand_dims(
+            pca.transform(vanilla_hidden_states_without_edges), axis=0
+        )
+        graph_prompter_hf_frozen_hidden_states_without_edges = np.expand_dims(
+            pca.transform(graph_prompter_hf_frozen_hidden_states_without_edges), axis=0
+        )
+        graph_prompter_hf_hidden_states_without_edges = np.expand_dims(
+            pca.transform(graph_prompter_hf_hidden_states_without_edges), axis=0
+        )
+        hidden_states = [
+            vanilla_hidden_states_with_edges,
+            vanilla_hidden_states_without_edges,
+            graph_prompter_hf_frozen_hidden_states_with_edges,
+            graph_prompter_hf_frozen_hidden_states_without_edges,
+            graph_prompter_hf_hidden_states_with_edges,
+            graph_prompter_hf_hidden_states_without_edges,
+        ]
+
         colors = cm.rainbow(np.linspace(0, 1, 3))  # type: ignore
         scatter_legends = self._scatter_plot_over_low_dim_reps(
-            low_dim_reps,
-            markers=[["o"], ["o"], ["o"]],
-            colors=[[colors[0]], [colors[1]], [colors[2]]],
+            hidden_states,
+            markers=[["o"], ["x"], ["o"], ["x"], ["o"], ["x"]],
+            colors=[
+                [colors[0]],
+                [colors[0]],
+                [colors[1]],
+                [colors[1]],
+                [colors[2]],
+                [colors[2]],
+            ],
         )
+        save_path = "./images/cls_hidden_states.png" if save_plot else None
         self._title_figure_save(
-            "CLS Tokens Embeddings in last Layer",
+            "CLS Hidden States",
             fig_size,
             fig_dpi,
             scatter_legends,
-            ["vanilla cls", "input embeds replace cls"],
+            [
+                "Vanilla CLS with edges",
+                "Vanilla CLS without edges",
+                "GraphPrompterHF frozen CLS with edges",
+                "GraphPrompterHF frozen CLS without edges",
+                "GraphPrompterHF CLS with edges",
+                "GraphPrompterHF CLS without edges",
+            ],
             save_path,
         )
 
