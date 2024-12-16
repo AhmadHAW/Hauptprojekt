@@ -608,13 +608,31 @@ class ExplainabilityModule:
 
     def group_by_source_target_ids(self, df: pd.DataFrame) -> pd.DataFrame:
         df_vanilla = df[df["model"] == "vanilla"][
-            ["hidden_states", "source_id", "target_id", "labels"]
+            [
+                "hidden_states",
+                "source_id",
+                "target_id",
+                "labels",
+                "degree",
+            ]
         ].rename(columns={"hidden_states": "vanilla_hidden_states"})
         df_graph_prompter_hf_frozen = df[df["model"] == "graph_prompter_hf_frozen"][
-            ["hidden_states", "source_id", "target_id", "labels"]
+            [
+                "hidden_states",
+                "source_id",
+                "target_id",
+                "labels",
+                "degree",
+            ]
         ].rename(columns={"hidden_states": "graph_prompter_hf_frozen_hidden_states"})
         df_graph_prompter_hf = df[df["model"] == "graph_prompter_hf"][
-            ["hidden_states", "source_id", "target_id", "labels"]
+            [
+                "hidden_states",
+                "source_id",
+                "target_id",
+                "labels",
+                "degree",
+            ]
         ].rename(columns={"hidden_states": "graph_prompter_hf_hidden_states"})
         df = df_vanilla.merge(
             df_graph_prompter_hf_frozen, on=["source_id", "target_id"]
@@ -646,12 +664,22 @@ class ExplainabilityModule:
                 ).tolist()
             all_dfs.append(df)
         df = pd.concat(all_dfs)
+        df["degree"] = df.groupby("target_id")["target_id"].transform("count")
+        df["degree"] = df.groupby("source_id")["source_id"].transform("count")
         df_test = df[df["split"] == "test"]
-        df_val = self.group_by_source_target_ids(df[df["split"] == "val"]).sample(
-            samples
-        )
+        df_val = self.group_by_source_target_ids(df[df["split"] == "val"])
+        # produce plot for model separated
         df_val_with_edges = df_val[df_val["labels"] == 1]
         df_val_without_edges = df_val[df_val["labels"] == 0]
+        lower_bound_with_edges = df_val_with_edges["degree"].quantile(1 / 3)
+        upper_bound_with_edges = df_val_with_edges["degree"].quantile(2 / 3)
+        lower_bound__without_edges = df_val_without_edges["degree"].quantile(1 / 3)
+        upper_bound_without_edges = df_val_without_edges["degree"].quantile(2 / 3)
+        df_val = df_val.sample(samples)
+        # produce plot for model separated
+        df_val_with_edges = df_val[df_val["labels"] == 1]
+        df_val_without_edges = df_val[df_val["labels"] == 0]
+
         pca = self.fit_pca(np.stack(df_test["hidden_states"].tolist())[:, 0, 2])
 
         vanilla_hidden_states_with_edges = np.stack(
@@ -727,6 +755,92 @@ class ExplainabilityModule:
                 "GraphPrompterHF CLS with edges",
                 "GraphPrompterHF CLS without edges",
             ],
+            save_path,
+        )
+
+        hidden_states_lower = df_val_with_edges[
+            df_val_with_edges["degree"] <= lower_bound_with_edges
+        ]
+        hidden_states_middle = df_val_with_edges[
+            (df_val_with_edges["degree"] > lower_bound_with_edges)
+            & (df_val_with_edges["degree"] <= upper_bound_with_edges)
+        ]
+        hidden_states_upper = df_val_with_edges[
+            df_val_with_edges["degree"] > upper_bound_with_edges
+        ]
+        quantiles = []
+        for chunk in [hidden_states_lower, hidden_states_middle, hidden_states_upper]:
+            hidden_states = []
+            for model in ["vanilla", "graph_prompter_hf_frozen", "graph_prompter_hf"]:
+                hidden_states.append(
+                    np.stack(chunk[f"{model}_hidden_states"].tolist())[:, 0, 2]
+                )
+            hidden_states = np.concatenate(hidden_states)
+            hidden_states = np.expand_dims(pca.transform(hidden_states), axis=0)
+            quantiles.append(hidden_states)
+
+        colors = cm.rainbow(np.linspace(0, 1, 3))  # type: ignore
+        scatter_legends = self._scatter_plot_over_low_dim_reps(
+            quantiles,
+            markers=[["o"], ["o"], ["o"]],
+            colors=[
+                [colors[0]],
+                [colors[1]],
+                [colors[2]],
+            ],
+        )
+        save_path = (
+            "./images/cls_hidden_states_degree_with_edges.png" if save_plot else None
+        )
+        self._title_figure_save(
+            "CLS Hidden States of Node-Pairs with Edge Grouped by Movie Degree",
+            fig_size,
+            fig_dpi,
+            scatter_legends,
+            ["lower quantile", "middle quantile", "upper_quantil"],
+            save_path,
+        )
+
+        hidden_states_lower = df_val_without_edges[
+            df_val_without_edges["degree"] <= lower_bound__without_edges
+        ]
+        hidden_states_middle = df_val_without_edges[
+            (df_val_without_edges["degree"] > lower_bound__without_edges)
+            & (df_val_without_edges["degree"] <= upper_bound_without_edges)
+        ]
+        hidden_states_upper = df_val_without_edges[
+            df_val_without_edges["degree"] > upper_bound_without_edges
+        ]
+        quantiles = []
+        for chunk in [hidden_states_lower, hidden_states_middle, hidden_states_upper]:
+            hidden_states = []
+            for model in ["vanilla", "graph_prompter_hf_frozen", "graph_prompter_hf"]:
+                hidden_states.append(
+                    np.stack(chunk[f"{model}_hidden_states"].tolist())[:, 0, 2]
+                )
+            hidden_states = np.concatenate(hidden_states)
+            hidden_states = np.expand_dims(pca.transform(hidden_states), axis=0)
+            quantiles.append(hidden_states)
+
+        colors = cm.rainbow(np.linspace(0, 1, 3))  # type: ignore
+        scatter_legends = self._scatter_plot_over_low_dim_reps(
+            quantiles,
+            markers=[["o"], ["o"], ["o"]],
+            colors=[
+                [colors[0]],
+                [colors[1]],
+                [colors[2]],
+            ],
+        )
+        save_path = (
+            "./images/cls_hidden_states_degree_without_edges.png" if save_plot else None
+        )
+        self._title_figure_save(
+            "CLS Hidden States of Node-Pairs without Edge Grouped by Movie Degree",
+            fig_size,
+            fig_dpi,
+            scatter_legends,
+            ["lower quantile", "middle quantile", "upper_quantil"],
             save_path,
         )
 
