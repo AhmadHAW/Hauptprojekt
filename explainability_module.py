@@ -670,11 +670,8 @@ class ExplainabilityModule:
         df_val = self.group_by_source_target_ids(df[df["split"] == "val"])
         # produce plot for model separated
         df_val_with_edges = df_val[df_val["labels"] == 1]
-        df_val_without_edges = df_val[df_val["labels"] == 0]
-        lower_bound_with_edges = df_val_with_edges["degree"].quantile(1 / 3)
-        upper_bound_with_edges = df_val_with_edges["degree"].quantile(2 / 3)
-        lower_bound__without_edges = df_val_without_edges["degree"].quantile(1 / 3)
-        upper_bound_without_edges = df_val_without_edges["degree"].quantile(2 / 3)
+        lower_bound = df_val_with_edges["degree"].quantile(1 / 3)
+        upper_bound = df_val_with_edges["degree"].quantile(2 / 3)
         df_val = df_val.sample(samples)
         # produce plot for model separated
         df_val_with_edges = df_val[df_val["labels"] == 1]
@@ -758,16 +755,11 @@ class ExplainabilityModule:
             save_path,
         )
 
-        hidden_states_lower = df_val_with_edges[
-            df_val_with_edges["degree"] <= lower_bound_with_edges
+        hidden_states_lower = df_val[df_val["degree"] <= lower_bound]
+        hidden_states_middle = df_val[
+            (df_val["degree"] > lower_bound) & (df_val["degree"] <= upper_bound)
         ]
-        hidden_states_middle = df_val_with_edges[
-            (df_val_with_edges["degree"] > lower_bound_with_edges)
-            & (df_val_with_edges["degree"] <= upper_bound_with_edges)
-        ]
-        hidden_states_upper = df_val_with_edges[
-            df_val_with_edges["degree"] > upper_bound_with_edges
-        ]
+        hidden_states_upper = df_val[df_val["degree"] > upper_bound]
         quantiles = []
         for chunk in [hidden_states_lower, hidden_states_middle, hidden_states_upper]:
             hidden_states = []
@@ -789,54 +781,9 @@ class ExplainabilityModule:
                 [colors[2]],
             ],
         )
-        save_path = (
-            "./images/cls_hidden_states_degree_with_edges.png" if save_plot else None
-        )
+        save_path = "./images/cls_hidden_states_degree.png" if save_plot else None
         self._title_figure_save(
-            "CLS Hidden States of Node-Pairs with Edge Grouped by Movie Degree",
-            fig_size,
-            fig_dpi,
-            scatter_legends,
-            ["lower quantile", "middle quantile", "upper_quantil"],
-            save_path,
-        )
-
-        hidden_states_lower = df_val_without_edges[
-            df_val_without_edges["degree"] <= lower_bound__without_edges
-        ]
-        hidden_states_middle = df_val_without_edges[
-            (df_val_without_edges["degree"] > lower_bound__without_edges)
-            & (df_val_without_edges["degree"] <= upper_bound_without_edges)
-        ]
-        hidden_states_upper = df_val_without_edges[
-            df_val_without_edges["degree"] > upper_bound_without_edges
-        ]
-        quantiles = []
-        for chunk in [hidden_states_lower, hidden_states_middle, hidden_states_upper]:
-            hidden_states = []
-            for model in ["vanilla", "graph_prompter_hf_frozen", "graph_prompter_hf"]:
-                hidden_states.append(
-                    np.stack(chunk[f"{model}_hidden_states"].tolist())[:, 0, 2]
-                )
-            hidden_states = np.concatenate(hidden_states)
-            hidden_states = np.expand_dims(pca.transform(hidden_states), axis=0)
-            quantiles.append(hidden_states)
-
-        colors = cm.rainbow(np.linspace(0, 1, 3))  # type: ignore
-        scatter_legends = self._scatter_plot_over_low_dim_reps(
-            quantiles,
-            markers=[["o"], ["o"], ["o"]],
-            colors=[
-                [colors[0]],
-                [colors[1]],
-                [colors[2]],
-            ],
-        )
-        save_path = (
-            "./images/cls_hidden_states_degree_without_edges.png" if save_plot else None
-        )
-        self._title_figure_save(
-            "CLS Hidden States of Node-Pairs without Edge Grouped by Movie Degree",
+            "CLS Hidden States of Node-Pairs with Grouped by Movie Degree",
             fig_size,
             fig_dpi,
             scatter_legends,
