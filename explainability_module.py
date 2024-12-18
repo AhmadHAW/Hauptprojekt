@@ -14,6 +14,7 @@ import matplotlib.cm as cm
 from matplotlib.collections import PathCollection
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, accuracy_score
 from datasets import DatasetDict
+from matplotlib.collections import LineCollection
 
 from dataset_manager.kg_manager import ROOT
 from llm_manager.vanilla.config import (
@@ -607,36 +608,32 @@ class ExplainabilityModule:
         return scatter_legends
 
     def group_by_source_target_ids(self, df: pd.DataFrame) -> pd.DataFrame:
-        df_vanilla = df[df["model"] == "vanilla"][
-            [
-                "hidden_states",
-                "source_id",
-                "target_id",
-                "labels",
-                "degree",
-            ]
-        ].rename(columns={"hidden_states": "vanilla_hidden_states"})
-        df_graph_prompter_hf_frozen = df[df["model"] == "graph_prompter_hf_frozen"][
-            [
-                "hidden_states",
-                "source_id",
-                "target_id",
-                "labels",
-                "degree",
-            ]
+        df_vanilla = df[df["model"] == "vanilla"].rename(
+            columns={"hidden_states": "vanilla_hidden_states"}
+        )
+        df_graph_prompter_hf_frozen = df[
+            df["model"] == "graph_prompter_hf_frozen"
         ].rename(columns={"hidden_states": "graph_prompter_hf_frozen_hidden_states"})
-        df_graph_prompter_hf = df[df["model"] == "graph_prompter_hf"][
-            [
-                "hidden_states",
-                "source_id",
-                "target_id",
-                "labels",
-                "degree",
-            ]
-        ].rename(columns={"hidden_states": "graph_prompter_hf_hidden_states"})
-        df = df_vanilla.merge(
-            df_graph_prompter_hf_frozen, on=["source_id", "target_id"]
-        ).merge(df_graph_prompter_hf, on=["source_id", "target_id"])
+        df_graph_prompter_hf = df[df["model"] == "graph_prompter_hf"].rename(
+            columns={"hidden_states": "graph_prompter_hf_hidden_states"}
+        )
+        if len(df_vanilla) > 0:
+            if len(df_graph_prompter_hf_frozen) > 0:
+                df = df_vanilla.merge(
+                    df_graph_prompter_hf_frozen,
+                    on=["source_id", "target_id"],
+                    suffixes=("", "_y"),
+                )
+            else:
+                df = df_vanilla
+        else:
+            df = df_graph_prompter_hf_frozen
+        if len(df_graph_prompter_hf) > 0:
+            df = df.merge(
+                df_graph_prompter_hf,
+                on=["source_id", "target_id"],
+                suffixes=("", "_y"),
+            )
         return df
 
     def plot_cls_embeddings(
@@ -665,7 +662,6 @@ class ExplainabilityModule:
             all_dfs.append(df)
         df = pd.concat(all_dfs)
         df["degree"] = df.groupby("target_id")["target_id"].transform("count")
-        df["degree"] = df.groupby("source_id")["source_id"].transform("count")
         df_test = df[df["split"] == "test"]
         df_val = self.group_by_source_target_ids(df[df["split"] == "val"])
         # produce plot for model separated
@@ -790,6 +786,253 @@ class ExplainabilityModule:
             ["lower quantile", "middle quantile", "upper_quantil"],
             save_path,
         )
+
+    def plot_kges(
+        self,
+        samples=1,
+        fig_size: Tuple[int, int] = (8, 8),
+        fig_dpi: int = 200,
+        save_plot: bool = True,
+    ):
+        assert samples >= 1
+        self._preconditions_split_and_fig_size(samples, fig_size, fig_dpi)
+        all_dfs = []
+        for split, model in itertools.product(
+            ["test", "val"],
+            ["graph_prompter_hf_frozen", "graph_prompter_hf"],
+        ):
+            df, _, _ = self.load_df(split, model, [])
+            df = df[
+                ["model", "split", "source_id", "target_id", "hidden_states", "labels"]
+            ]
+            all_dfs.append(df)
+        df = pd.concat(all_dfs)
+
+        # compute cosine similarity between kges
+        df_val = df[df["split"] == "val"]
+        df_val_frozen_hidden_states_with_edges = np.stack(
+            df[(df["model"] == "graph_prompter_hf_frozen") & (df["labels"] == 1)][
+                "hidden_states"
+            ]
+        )
+        df_val_hidden_states_with_edges = np.stack(
+            df[(df["model"] == "graph_prompter_hf") & (df["labels"] == 1)][
+                "hidden_states"
+            ]
+        )
+        average_frozen_cosine_similarity_with_edges = self.__average_cosine_similarity(
+            df_val_frozen_hidden_states_with_edges[:, 4, 0],
+            df_val_frozen_hidden_states_with_edges[:, 5, 0],
+        )
+        average_cosine_similarity_with_edges = self.__average_cosine_similarity(
+            df_val_hidden_states_with_edges[:, 4, 0],
+            df_val_hidden_states_with_edges[:, 5, 0],
+        )
+        df_val_frozen_hidden_states_without_edges = np.stack(
+            df[(df["model"] == "graph_prompter_hf_frozen") & (df["labels"] == 0)][
+                "hidden_states"
+            ]
+        )
+        df_val_hidden_states_without_edges = np.stack(
+            df[(df["model"] == "graph_prompter_hf") & (df["labels"] == 0)][
+                "hidden_states"
+            ]
+        )
+        average_frozen_cosine_similarity_without_edges = (
+            self.__average_cosine_similarity(
+                df_val_frozen_hidden_states_without_edges[:, 4, 0],
+                df_val_frozen_hidden_states_without_edges[:, 5, 0],
+            )
+        )
+        average_cosine_similarity_without_edges = self.__average_cosine_similarity(
+            df_val_hidden_states_without_edges[:, 4, 0],
+            df_val_hidden_states_without_edges[:, 5, 0],
+        )
+        print(
+            f"Average cosine similarity of frozen GraphPrompterHF model with edges is {average_frozen_cosine_similarity_with_edges}."
+        )
+        print(
+            f"Average cosine similarity of end-to-end GraphPrompterHF model with edges is {average_cosine_similarity_with_edges}.",
+        )
+        print(
+            f"Average cosine similarity of frozen GraphPrompterHF model without edges is {average_frozen_cosine_similarity_without_edges}.",
+        )
+        print(
+            f"Average cosine similarity of end-to-end GraphPrompterHF model without edges is {average_cosine_similarity_without_edges}.",
+        )
+
+        df["degree"] = df.groupby("target_id")["target_id"].transform("count")
+        df_test = df[df["split"] == "test"]
+        df_val = self.group_by_source_target_ids(df[df["split"] == "val"])
+        df_val = df_val.sample(samples)
+
+        # produce plot for model separated
+        df_val_with_edges = df_val[df_val["labels"] == 1]
+        df_val_without_edges = df_val[df_val["labels"] == 0]
+        hidden_states = np.stack(df_test["hidden_states"].tolist())
+        user_kges = hidden_states[:, 4, 0]
+        movie_kges = hidden_states[:, 5, 0]
+        hidden_states = np.concatenate([user_kges, movie_kges])
+
+        pca = self.fit_pca(hidden_states)
+
+        graph_prompter_hf_frozen_user_hidden_states_with_edges = np.stack(
+            df_val_with_edges["graph_prompter_hf_frozen_hidden_states"]
+        )[:, 4, 0]
+        graph_prompter_hf_user_hidden_states_with_edges = np.stack(
+            df_val_with_edges["graph_prompter_hf_hidden_states"]
+        )[:, 4, 0]
+        graph_prompter_hf_frozen_movie_hidden_states_with_edges = np.stack(
+            df_val_with_edges["graph_prompter_hf_frozen_hidden_states"]
+        )[:, 5, 0]
+        graph_prompter_hf_movie_hidden_states_with_edges = np.stack(
+            df_val_with_edges["graph_prompter_hf_hidden_states"]
+        )[:, 5, 0]
+        graph_prompter_hf_frozen_user_hidden_states_with_edges = np.expand_dims(
+            pca.transform(graph_prompter_hf_frozen_user_hidden_states_with_edges),
+            axis=0,
+        )
+        graph_prompter_hf_user_hidden_states_with_edges = np.expand_dims(
+            pca.transform(graph_prompter_hf_user_hidden_states_with_edges), axis=0
+        )
+        graph_prompter_hf_frozen_movie_hidden_states_with_edges = np.expand_dims(
+            pca.transform(graph_prompter_hf_frozen_movie_hidden_states_with_edges),
+            axis=0,
+        )
+        graph_prompter_hf_movie_hidden_states_with_edges = np.expand_dims(
+            pca.transform(graph_prompter_hf_movie_hidden_states_with_edges), axis=0
+        )
+
+        graph_prompter_hf_frozen_user_hidden_states_without_edges = np.stack(
+            df_val_without_edges["graph_prompter_hf_frozen_hidden_states"]
+        )[:, 4, 0]
+        graph_prompter_hf_user_hidden_states_without_edges = np.stack(
+            df_val_without_edges["graph_prompter_hf_hidden_states"]
+        )[:, 4, 0]
+        graph_prompter_hf_frozen_movie_hidden_states_without_edges = np.stack(
+            df_val_without_edges["graph_prompter_hf_frozen_hidden_states"]
+        )[:, 5, 0]
+        graph_prompter_hf_movie_hidden_states_without_edges = np.stack(
+            df_val_without_edges["graph_prompter_hf_hidden_states"]
+        )[:, 5, 0]
+        graph_prompter_hf_frozen_user_hidden_states_without_edges = np.expand_dims(
+            pca.transform(graph_prompter_hf_frozen_user_hidden_states_without_edges),
+            axis=0,
+        )
+        graph_prompter_hf_user_hidden_states_without_edges = np.expand_dims(
+            pca.transform(graph_prompter_hf_user_hidden_states_without_edges), axis=0
+        )
+        graph_prompter_hf_frozen_movie_hidden_states_without_edges = np.expand_dims(
+            pca.transform(graph_prompter_hf_frozen_movie_hidden_states_without_edges),
+            axis=0,
+        )
+        graph_prompter_hf_movie_hidden_states_without_edges = np.expand_dims(
+            pca.transform(graph_prompter_hf_movie_hidden_states_without_edges), axis=0
+        )
+        hidden_states = [
+            graph_prompter_hf_frozen_user_hidden_states_with_edges,
+            graph_prompter_hf_user_hidden_states_with_edges,
+            graph_prompter_hf_frozen_movie_hidden_states_with_edges,
+            graph_prompter_hf_movie_hidden_states_with_edges,
+            graph_prompter_hf_frozen_user_hidden_states_without_edges,
+            graph_prompter_hf_user_hidden_states_without_edges,
+            graph_prompter_hf_frozen_movie_hidden_states_without_edges,
+            graph_prompter_hf_movie_hidden_states_without_edges,
+        ]
+
+        colors = cm.rainbow(np.linspace(0, 1, 4))  # type: ignore
+        scatter_legends = self._scatter_plot_over_low_dim_reps(
+            hidden_states,
+            markers=[["o"], ["o"], ["o"], ["o"], ["x"], ["x"], ["x"], ["x"]],
+            colors=[
+                [colors[0]],
+                [colors[1]],
+                [colors[2]],
+                [colors[3]],
+                [colors[0]],
+                [colors[1]],
+                [colors[2]],
+                [colors[3]],
+            ],
+        )
+
+        for user_kges, movie_kges in zip(
+            [
+                graph_prompter_hf_frozen_user_hidden_states_with_edges,
+                graph_prompter_hf_user_hidden_states_with_edges,
+                graph_prompter_hf_frozen_user_hidden_states_without_edges,
+                graph_prompter_hf_user_hidden_states_without_edges,
+            ],
+            [
+                graph_prompter_hf_frozen_movie_hidden_states_with_edges,
+                graph_prompter_hf_movie_hidden_states_with_edges,
+                graph_prompter_hf_frozen_movie_hidden_states_without_edges,
+                graph_prompter_hf_movie_hidden_states_without_edges,
+            ],
+        ):
+            line_segments = [
+                ((user_kge[0], user_kge[1]), (movie_kge[0], movie_kge[1]))
+                for user_kge, movie_kge in zip(user_kges[0], movie_kges[0])
+            ]
+            # Add lines as a LineCollection
+            lc = LineCollection(line_segments, colors="gray", alpha=0.3)
+            plt.gca().add_collection(lc)
+
+        save_path = "./images/kge_hidden_states.png" if save_plot else None
+        self._title_figure_save(
+            "KGEs hidden states",
+            fig_size,
+            fig_dpi,
+            scatter_legends,
+            [
+                "GraphPrompterHF frozen User KGEs with Edges",
+                "GraphPrompterHF User KGEs with Edges",
+                "GraphPrompterHF frozen Movie KGEs with Edges",
+                "GraphPrompterHF Movie KGEs with Edges",
+                "GraphPrompterHF frozen User KGEs without Edges",
+                "GraphPrompterHF User KGEs without Edges",
+                "GraphPrompterHF frozen Movie KGEs without Edges",
+                "GraphPrompterHF Movie KGEs without Edges",
+            ],
+            save_path,
+        )
+
+    def __average_cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> np.float32:
+        """
+        Compute the average cosine similarity along the first dimension of two tensors.
+        By ChatGPT
+        Returns:
+            The average cosine similarity over dimension 0.
+        """
+        similarities = []
+        for i in range(a.shape[0]):
+            slice1 = a[i]
+            slice2 = b[i]
+            similarity = self.__cosine_similarity(slice1, slice2)
+            similarities.append(similarity)
+
+        # Average the similarities
+        return np.mean(similarities)
+
+    def __cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """
+        Compute the cosine similarity between two numpy arrays.
+        From ChatGPT
+        """
+        # Ensure both arrays are 1D
+        a = np.ravel(a)
+        b = np.ravel(b)
+
+        # Compute the dot product and norms
+        dot_product = np.dot(a, b)
+        norm_a = np.linalg.norm(a)
+        norm_b = np.linalg.norm(b)
+
+        # Avoid division by zero
+        if norm_a == 0 or norm_b == 0:
+            return np.array(0.0)
+
+        return dot_product / (norm_a * norm_b)
 
     def plot_cls_true_vs_non_true(
         self,
