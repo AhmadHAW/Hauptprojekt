@@ -582,6 +582,7 @@ class ExplainabilityModule:
         low_dim_reps: List[np.ndarray],
         markers: List[List[str]],
         colors: List[List],
+        alpha: float = 1,
     ) -> List[PathCollection]:
         """
         This method expects shapes in form of: [model, positions]
@@ -590,6 +591,7 @@ class ExplainabilityModule:
         assert len(markers) == len(colors)
         assert len(low_dim_reps[0]) == len(markers[0])
         assert len(markers[0]) == len(colors[0])
+        assert alpha > 0
         scatter_legends = []
         for low_dim_reps_on_model, markers_on_model, colors_on_model in zip(
             low_dim_reps, markers, colors
@@ -603,6 +605,7 @@ class ExplainabilityModule:
                         low_dim_reps_on_position[:, 1],
                         marker=markers_on_positon,
                         color=colors_on_position,
+                        alpha=alpha,
                     )
                 )
         return scatter_legends
@@ -724,7 +727,7 @@ class ExplainabilityModule:
         colors = cm.rainbow(np.linspace(0, 1, 3))  # type: ignore
         scatter_legends = self._scatter_plot_over_low_dim_reps(
             hidden_states,
-            markers=[["o"], ["x"], ["o"], ["x"], ["o"], ["x"]],
+            markers=[["."], ["x"], ["."], ["x"], ["."], ["x"]],
             colors=[
                 [colors[0]],
                 [colors[0]],
@@ -733,6 +736,7 @@ class ExplainabilityModule:
                 [colors[2]],
                 [colors[2]],
             ],
+            alpha=0.7,
         )
         save_path = "./images/cls_hidden_states.png" if save_plot else None
         self._title_figure_save(
@@ -770,12 +774,13 @@ class ExplainabilityModule:
         colors = cm.rainbow(np.linspace(0, 1, 3))  # type: ignore
         scatter_legends = self._scatter_plot_over_low_dim_reps(
             quantiles,
-            markers=[["o"], ["o"], ["o"]],
+            markers=[["x"], ["x"], ["x"]],
             colors=[
                 [colors[0]],
                 [colors[1]],
                 [colors[2]],
             ],
+            alpha=0.7,
         )
         save_path = "./images/cls_hidden_states_degree.png" if save_plot else None
         self._title_figure_save(
@@ -943,17 +948,18 @@ class ExplainabilityModule:
         colors = cm.rainbow(np.linspace(0, 1, 4))  # type: ignore
         scatter_legends = self._scatter_plot_over_low_dim_reps(
             hidden_states,
-            markers=[["o"], ["o"], ["o"], ["o"], ["x"], ["x"], ["x"], ["x"]],
+            markers=[["."], ["."], ["x"], ["x"], ["*"], ["*"], ["+"], ["+"]],
             colors=[
                 [colors[0]],
                 [colors[1]],
-                [colors[2]],
-                [colors[3]],
                 [colors[0]],
                 [colors[1]],
                 [colors[2]],
                 [colors[3]],
+                [colors[2]],
+                [colors[3]],
             ],
+            alpha=0.7,
         )
 
         for user_kges, movie_kges in zip(
@@ -972,11 +978,11 @@ class ExplainabilityModule:
         ):
             line_segments = [
                 ((user_kge[0], user_kge[1]), (movie_kge[0], movie_kge[1]))
-                for user_kge, movie_kge in zip(user_kges[0], movie_kges[0])
+                for user_kge, movie_kge in zip(user_kges[0, :10], movie_kges[0, :10])
             ]
             # Add lines as a LineCollection
-            lc = LineCollection(line_segments, colors="gray", alpha=0.3)
-            plt.gca().add_collection(lc)
+            lc = LineCollection(line_segments, colors="gray", alpha=0.7)
+            # plt.gca().add_collection(lc)
 
         save_path = "./images/kge_hidden_states.png" if save_plot else None
         self._title_figure_save(
