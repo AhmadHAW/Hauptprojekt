@@ -562,13 +562,14 @@ class ExplainabilityModule:
         scatter_legends: List[PathCollection],
         token_labels: List[str],
         save_path: Optional[str | Path],
+        max_columns: int = 3,
     ) -> None:
         plt.legend(
             scatter_legends,
             token_labels,
             scatterpoints=1,
             loc="upper right",
-            ncol=3,
+            ncol=max_columns,
             fontsize=8,
         )
         plt.title(title)
@@ -753,6 +754,7 @@ class ExplainabilityModule:
                 "GraphPrompterHF CLS without edges",
             ],
             save_path,
+            max_columns=2,
         )
 
         hidden_states_lower = df_val[df_val["degree"] <= lower_bound]
@@ -991,16 +993,17 @@ class ExplainabilityModule:
             fig_dpi,
             scatter_legends,
             [
-                "GraphPrompterHF frozen User KGEs with Edges",
-                "GraphPrompterHF User KGEs with Edges",
-                "GraphPrompterHF frozen Movie KGEs with Edges",
-                "GraphPrompterHF Movie KGEs with Edges",
-                "GraphPrompterHF frozen User KGEs without Edges",
-                "GraphPrompterHF User KGEs without Edges",
-                "GraphPrompterHF frozen Movie KGEs without Edges",
-                "GraphPrompterHF Movie KGEs without Edges",
+                "frozen User KGEs with Edges",
+                "User KGEs with Edges",
+                "frozen Movie KGEs with Edges",
+                "Movie KGEs with Edges",
+                "frozen User KGEs without Edges",
+                "User KGEs without Edges",
+                "frozen Movie KGEs without Edges",
+                "Movie KGEs without Edges",
             ],
             save_path,
+            max_columns=2,
         )
 
     def __average_cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> np.float32:
