@@ -170,28 +170,45 @@ class ExplainabilityModule:
             graph_prompter_hf_frozen_training_process = json.load(f)
         with open(self.graph_prompter_hf_training_path, "r") as f:
             graph_prompter_hf_training_process = json.load(f)
+        gnn_frozen_accuracy = np.load("./data/gnn/gnn_frozen_val.npy").item()
+        gnn_accuracy = np.load("./data/gnn/gnn_val.npy").item()
         # Extract the loss values
         vanilla_eval_accuracy = [
             entry["eval_accuracy"]
             for entry in vanilla_training_process["log_history"]
             if "eval_accuracy" in entry
         ]
+        max_vanilla_eval_accuracy = max(vanilla_eval_accuracy)
+
+        graph_prompter_frozen_eval_accuracy_ = [
+            entry["eval_accuracy"]
+            for entry in graph_prompter_hf_frozen_training_process["log_history"]
+            if "eval_accuracy" in entry
+        ]
+        max_graph_prompter_frozen_eval_accuracy = max(
+            graph_prompter_frozen_eval_accuracy_
+        )
         graph_prompter_frozen_eval_accuracy = [vanilla_eval_accuracy[-1]]
-        graph_prompter_frozen_eval_accuracy.extend(
-            [
-                entry["eval_accuracy"]
-                for entry in graph_prompter_hf_frozen_training_process["log_history"]
-                if "eval_accuracy" in entry
-            ]
-        )
+        graph_prompter_frozen_eval_accuracy.extend(graph_prompter_frozen_eval_accuracy_)
+
+        graph_prompter_eval_accuracy_ = [
+            entry["eval_accuracy"]
+            for entry in graph_prompter_hf_training_process["log_history"]
+            if "eval_accuracy" in entry
+        ]
+        max_graph_prompter_eval_accuracy = max(graph_prompter_eval_accuracy_)
         graph_prompter_eval_accuracy = [graph_prompter_frozen_eval_accuracy[-1]]
-        graph_prompter_eval_accuracy.extend(
-            [
-                entry["eval_accuracy"]
-                for entry in graph_prompter_hf_training_process["log_history"]
-                if "eval_accuracy" in entry
-            ]
+        graph_prompter_eval_accuracy.extend(graph_prompter_eval_accuracy_)
+        print(f"Max Vanilla model accuracy is {max_vanilla_eval_accuracy}.")
+        print(
+            f"Max GraphPrompterHF frozen model accuracy is {max_graph_prompter_frozen_eval_accuracy}."
         )
+        print(
+            f"Max GraphPrompterHF model accuracy is {max_graph_prompter_eval_accuracy}."
+        )
+        print(f"GNN frozen eval accuracy is {gnn_frozen_accuracy}.")
+        print(f"GNN eval accuracy is {gnn_accuracy}.")
+
         # Extract epochs
         vanilla_epochs = [
             entry["epoch"]
@@ -225,20 +242,13 @@ class ExplainabilityModule:
         graph_prompter_frozen_label = "GraphPrompterHF Frozen Model"
         graph_prompter_label = "GraphPrompterHF Model"
 
-        def plot(accuracies: List[float], epochs: list[float], label: str):
+        def plot(
+            accuracies: List[float],
+            epochs: list[float],
+            label: str,
+        ):
             # Plot the loss curve
-            (line,) = plt.plot(epochs, accuracies, label=label)
-            color = line.get_color()
-            max_accuracy = max(accuracies)
-            max_accuracy_index = epochs[accuracies.index(max_accuracy)]
-            plt.plot(
-                max_accuracy_index,
-                max_accuracy,
-                "o",
-                color=color,
-                label=f"max {label}: {max_accuracy:.4f}",
-                markersize=8,
-            )
+            plt.plot(epochs, accuracies, label=label)
 
         plot(vanilla_eval_accuracy, vanilla_epochs, vanilla_label)
         plot(
@@ -247,6 +257,23 @@ class ExplainabilityModule:
             graph_prompter_frozen_label,
         )
         plot(graph_prompter_eval_accuracy, graph_prompter_epochs, graph_prompter_label)
+        len_pre_end_to_end_training = (
+            len(vanilla_eval_accuracy)
+            + len(graph_prompter_frozen_eval_accuracy_)
+            + len(graph_prompter_eval_accuracy_)
+        )
+        gnn_accuracies = [gnn_frozen_accuracy] * (len_pre_end_to_end_training - 2)
+        gnn_accuracies.append(gnn_accuracy)
+        gnn_epochs = list(range(1, len_pre_end_to_end_training - 1))
+        gnn_epochs = [float(epoch) for epoch in gnn_epochs]
+        gnn_epochs.append(len_pre_end_to_end_training)
+        print(gnn_epochs)
+        print(gnn_accuracies)
+        plot(
+            gnn_accuracies,
+            gnn_epochs,
+            "GNN eval accuracy",
+        )
         # Add title and labels
         plt.title(
             "Evaluation Accuracy Curves of Vanilla and GraphPrompterHF (Frozen) Models"

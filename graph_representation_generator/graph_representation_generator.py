@@ -10,6 +10,7 @@ from torch_geometric.loader import LinkNeighborLoader
 import tqdm
 from sklearn.metrics import roc_auc_score
 import pandas as pd
+import numpy as np
 
 from dataset_manager.kg_manager import ROOT
 from graph_representation_generator.gnn import Model
@@ -269,7 +270,7 @@ class GraphRepresentationGenerator:
 
         return llm_df
 
-    def validate_model(self, data, batch_size=64):
+    def validate_model(self, data, batch_size=64, target_path: Optional[str] = None):
         # Define the validation seed edges:
         edge_label_index = data["source", "edge", "target"].edge_label_index
         edge_label = data["source", "edge", "target"].edge_label
@@ -297,6 +298,8 @@ class GraphRepresentationGenerator:
         auc = roc_auc_score(ground_truth, pred)
         print()
         print(f"Validation AUC: {auc:.4f}")
+        if target_path:
+            np.save(target_path, np.array(auc))
 
     def save_model(self):
         torch.save(self.model.to(device="cpu").state_dict(), self.model_path)
