@@ -78,22 +78,31 @@ class ExplainabilityModule:
             for entry in vanilla_training_process["log_history"]
             if "loss" in entry
         ]
+        min_vanilla_losses = min(vanilla_losses)
+
+        graph_prompter_frozen_losses_ = [
+            entry["loss"]
+            for entry in graph_prompter_hf_frozen_training_process["log_history"]
+            if "loss" in entry
+        ]
+        min_graph_prompter_frozen_losses = min(graph_prompter_frozen_losses_)
         graph_prompter_frozen_losses = [vanilla_losses[-1]]
-        graph_prompter_frozen_losses.extend(
-            [
-                entry["loss"]
-                for entry in graph_prompter_hf_frozen_training_process["log_history"]
-                if "loss" in entry
-            ]
-        )
+        graph_prompter_frozen_losses.extend(graph_prompter_frozen_losses_)
+
+        graph_prompter_losses_ = [
+            entry["loss"]
+            for entry in graph_prompter_hf_training_process["log_history"]
+            if "loss" in entry
+        ]
+        min_graph_prompter_losses = min(graph_prompter_frozen_losses_)
         graph_prompter_losses = [graph_prompter_frozen_losses[-1]]
-        graph_prompter_losses.extend(
-            [
-                entry["loss"]
-                for entry in graph_prompter_hf_training_process["log_history"]
-                if "loss" in entry
-            ]
+        graph_prompter_losses.extend(graph_prompter_losses_)
+
+        print(f"Min Vanilla model loss is {min_vanilla_losses}.")
+        print(
+            f"Min GraphPrompterHF frozen model loss is {min_graph_prompter_frozen_losses}."
         )
+        print(f"Min GraphPrompterHF model loss is {min_graph_prompter_losses}.")
         # Extract steps
         vanilla_steps = [
             entry["step"]
@@ -130,18 +139,7 @@ class ExplainabilityModule:
 
         def plot(losses: List[float], steps: list[float], label: str):
             # Plot the loss curve
-            (line,) = plt.plot(steps, losses, label=label)
-            color = line.get_color()
-            min_loss = min(losses)
-            min_loss_index = steps[losses.index(min_loss)]
-            plt.plot(
-                min_loss_index,
-                min_loss,
-                "o",
-                color=color,
-                label=f"Min {label}: {min_loss:.4f}",
-                markersize=8,
-            )
+            plt.plot(steps, losses, label=label)
 
         plot(vanilla_losses, vanilla_steps, vanilla_label)
         plot(
