@@ -1196,14 +1196,9 @@ class ExplainabilityModule:
             frozen_movie_kges_with_edge,
             frozen_movie_kges_without_edge,
             frozen_cls,
-            input_movie_kges_with_edge,
-            input_movie_kges_without_edge,
-            movie_kges_with_edge,
-            movie_kges_without_edge,
-            cls,
         ]
 
-        colors = cm.rainbow(np.linspace(0, 1, 4))  # type: ignore
+        colors = cm.rainbow(np.linspace(0, 1, 3))  # type: ignore
         scatter_legends = self._scatter_plot_over_low_dim_reps(
             hidden_states,
             markers=[
@@ -1211,12 +1206,7 @@ class ExplainabilityModule:
                 ["."],
                 ["x"],
                 ["x"],
-                ["1"],
-                ["<"],
-                ["<"],
-                [">"],
-                [">"],
-                ["2"],
+                ["o"],
             ],
             colors=[
                 [colors[0]],
@@ -1224,6 +1214,50 @@ class ExplainabilityModule:
                 [colors[0]],
                 [colors[1]],
                 [colors[2]],
+            ],
+            alpha=0.7,
+        )
+
+        save_path = (
+            "./images/frozen_movie_kge_hidden_state_shift_grouped_by_ground_truth.png"
+            if save_plot
+            else None
+        )
+        self._title_figure_save(
+            "Movie KGE Hidden States Shift of frozen Model grouped by Ground Truth",
+            fig_size,
+            fig_dpi,
+            scatter_legends,
+            [
+                "frozen input movie KGE with edge",
+                "frozen input movie KGE without edge",
+                "frozen movie KGE with edge",
+                "frozen movie KGE without edge",
+                "frozen cls token",
+            ],
+            save_path,
+            max_columns=2,
+        )
+
+        hidden_states = [
+            input_movie_kges_with_edge,
+            input_movie_kges_without_edge,
+            movie_kges_with_edge,
+            movie_kges_without_edge,
+            cls,
+        ]
+
+        colors = cm.rainbow(np.linspace(0, 1, 3))  # type: ignore
+        scatter_legends = self._scatter_plot_over_low_dim_reps(
+            hidden_states,
+            markers=[
+                ["."],
+                ["."],
+                ["x"],
+                ["x"],
+                ["o"],
+            ],
+            colors=[
                 [colors[0]],
                 [colors[1]],
                 [colors[0]],
@@ -1239,16 +1273,11 @@ class ExplainabilityModule:
             else None
         )
         self._title_figure_save(
-            "Movie KGE Hidden States Shift grouped by Ground Truth",
+            "Movie KGE Hidden States Shift of end-to-end Model grouped by Ground Truth",
             fig_size,
             fig_dpi,
             scatter_legends,
             [
-                "frozen input movie KGE with edge",
-                "frozen input movie KGE without edge",
-                "frozen movie KGE with edge",
-                "frozen movie KGE without edge",
-                "frozen cls token",
                 "input movie KGE with edge",
                 "input movie KGE without edge",
                 "movie KGE with edge",
