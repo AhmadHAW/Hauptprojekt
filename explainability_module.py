@@ -1031,6 +1031,114 @@ class ExplainabilityModule:
             max_columns=2,
         )
 
+    def plot_cls_movie_kges(
+        self,
+        samples=1,
+        fig_size: Tuple[int, int] = (8, 8),
+        fig_dpi: int = 200,
+        save_plot: bool = True,
+    ):
+        assert samples >= 1
+        self._preconditions_split_and_fig_size(samples, fig_size, fig_dpi)
+        all_dfs = []
+        for split, model in itertools.product(
+            ["test", "val"],
+            ["graph_prompter_hf_frozen", "graph_prompter_hf"],
+        ):
+            df, _, _ = self.load_df(split, model, [])
+            df = df[
+                ["model", "split", "source_id", "target_id", "hidden_states", "labels"]
+            ]
+            all_dfs.append(df)
+        df = pd.concat(all_dfs)
+
+        # compute cosine similarity between kges
+
+        df_test = df[df["split"] == "test"]
+
+        hidden_states = np.stack(df_test["hidden_states"].tolist())
+        movie_kges_input = hidden_states[:, 5, 0]
+        movie_kges = hidden_states[:, 5, 1]
+        cls_kges = hidden_states[:, 0, 0]
+
+        hidden_states = np.concatenate([movie_kges_input, movie_kges, cls_kges])
+
+        pca = self.fit_pca(hidden_states)
+        df_val = self.group_by_source_target_ids(df[df["split"] == "val"]).sample(
+            samples
+        )
+
+        df_val_frozen_hidden_states = np.stack(
+            df_val["graph_prompter_hf_frozen_hidden_states"]
+        )
+        df_val_hidden_states = np.stack(df_val["graph_prompter_hf_hidden_states"])
+
+        frozen_input_movie_kges = np.expand_dims(
+            pca.transform(df_val_frozen_hidden_states[:, 5, 0]),
+            axis=0,
+        )
+        frozen_movie_kges = np.expand_dims(
+            pca.transform(df_val_frozen_hidden_states[:, 5, 1]),
+            axis=0,
+        )
+        frozen_cls = np.expand_dims(
+            pca.transform(df_val_frozen_hidden_states[:, 0, 0]),
+            axis=0,
+        )
+
+        input_movie_kges = np.expand_dims(
+            pca.transform(df_val_hidden_states[:, 5, 0]),
+            axis=0,
+        )
+        movie_kges = np.expand_dims(
+            pca.transform(df_val_hidden_states[:, 5, 1]),
+            axis=0,
+        )
+        cls = np.expand_dims(
+            pca.transform(df_val_hidden_states[:, 0, 0]),
+            axis=0,
+        )
+        hidden_states = [
+            frozen_input_movie_kges,
+            frozen_movie_kges,
+            frozen_cls,
+            input_movie_kges,
+            movie_kges,
+            cls,
+        ]
+
+        colors = cm.rainbow(np.linspace(0, 1, 4))  # type: ignore
+        scatter_legends = self._scatter_plot_over_low_dim_reps(
+            hidden_states,
+            markers=[["x"], ["x"], ["1"], ["."], ["."], ["1"]],
+            colors=[
+                [colors[0]],
+                [colors[1]],
+                [colors[0]],
+                [colors[2]],
+                [colors[3]],
+                [colors[2]],
+            ],
+            alpha=0.7,
+        )
+        save_path = "./images/kge_hidden_states.png" if save_plot else None
+        self._title_figure_save(
+            "KGEs hidden states",
+            fig_size,
+            fig_dpi,
+            scatter_legends,
+            [
+                "frozen input movie KGE",
+                "frozen movie KGE",
+                "frozen cls token",
+                "end-to-end input movie KGE",
+                "end-to-end movie KGE",
+                "end-to-end cls token",
+            ],
+            save_path,
+            max_columns=2,
+        )
+
     def __average_cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> np.float32:
         """
         Compute the average cosine similarity along the first dimension of two tensors.
