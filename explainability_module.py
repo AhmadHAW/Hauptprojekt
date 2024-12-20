@@ -1121,9 +1121,9 @@ class ExplainabilityModule:
             ],
             alpha=0.7,
         )
-        save_path = "./images/kge_hidden_states.png" if save_plot else None
+        save_path = "./images/movie_kge_hidden_state_shift.png" if save_plot else None
         self._title_figure_save(
-            "KGEs hidden states",
+            "Movie KGE Hidden States Shift",
             fig_size,
             fig_dpi,
             scatter_legends,
