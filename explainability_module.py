@@ -1121,6 +1121,7 @@ class ExplainabilityModule:
             ],
             alpha=0.7,
         )
+
         save_path = "./images/movie_kge_hidden_state_shift.png" if save_plot else None
         self._title_figure_save(
             "Movie KGE Hidden States Shift",
@@ -1134,6 +1135,125 @@ class ExplainabilityModule:
                 "end-to-end input movie KGE",
                 "end-to-end movie KGE",
                 "end-to-end cls token",
+            ],
+            save_path,
+            max_columns=2,
+        )
+
+        df_val_frozen_hidden_states_with_edge = np.stack(
+            df_val[df_val["labels"] == 1]["graph_prompter_hf_frozen_hidden_states"]
+        )
+        df_val_frozen_hidden_states_without_edge = np.stack(
+            df_val[df_val["labels"] == 0]["graph_prompter_hf_frozen_hidden_states"]
+        )
+
+        df_val_hidden_states_with_edge = np.stack(
+            df_val[df_val["labels"] == 1]["graph_prompter_hf_hidden_states"]
+        )
+        df_val_hidden_states_without_edge = np.stack(
+            df_val[df_val["labels"] == 0]["graph_prompter_hf_hidden_states"]
+        )
+
+        frozen_input_movie_kges_with_edge = np.expand_dims(
+            pca.transform(df_val_frozen_hidden_states_with_edge[:, 5, 0]),
+            axis=0,
+        )
+        frozen_input_movie_kges_without_edge = np.expand_dims(
+            pca.transform(df_val_frozen_hidden_states_without_edge[:, 5, 0]),
+            axis=0,
+        )
+
+        frozen_movie_kges_with_edge = np.expand_dims(
+            pca.transform(df_val_frozen_hidden_states_with_edge[:, 5, 1]),
+            axis=0,
+        )
+        frozen_movie_kges_without_edge = np.expand_dims(
+            pca.transform(df_val_frozen_hidden_states_without_edge[:, 5, 1]),
+            axis=0,
+        )
+
+        input_movie_kges_with_edge = np.expand_dims(
+            pca.transform(df_val_hidden_states_with_edge[:, 5, 0]),
+            axis=0,
+        )
+        input_movie_kges_without_edge = np.expand_dims(
+            pca.transform(df_val_hidden_states_without_edge[:, 5, 0]),
+            axis=0,
+        )
+
+        movie_kges_with_edge = np.expand_dims(
+            pca.transform(df_val_hidden_states_with_edge[:, 5, 1]),
+            axis=0,
+        )
+        movie_kges_without_edge = np.expand_dims(
+            pca.transform(df_val_hidden_states_without_edge[:, 5, 1]),
+            axis=0,
+        )
+
+        hidden_states = [
+            frozen_input_movie_kges_with_edge,
+            frozen_input_movie_kges_without_edge,
+            frozen_movie_kges_with_edge,
+            frozen_movie_kges_without_edge,
+            frozen_cls,
+            input_movie_kges_with_edge,
+            input_movie_kges_without_edge,
+            movie_kges_with_edge,
+            movie_kges_without_edge,
+            cls,
+        ]
+
+        colors = cm.rainbow(np.linspace(0, 1, 4))  # type: ignore
+        scatter_legends = self._scatter_plot_over_low_dim_reps(
+            hidden_states,
+            markers=[
+                ["."],
+                ["."],
+                ["x"],
+                ["x"],
+                ["1"],
+                ["<"],
+                ["<"],
+                [">"],
+                [">"],
+                ["2"],
+            ],
+            colors=[
+                [colors[0]],
+                [colors[1]],
+                [colors[0]],
+                [colors[1]],
+                [colors[2]],
+                [colors[0]],
+                [colors[1]],
+                [colors[0]],
+                [colors[1]],
+                [colors[2]],
+            ],
+            alpha=0.7,
+        )
+
+        save_path = (
+            "./images/movie_kge_hidden_state_shift_grouped_by_ground_truth.png"
+            if save_plot
+            else None
+        )
+        self._title_figure_save(
+            "Movie KGE Hidden States Shift grouped by Ground Truth",
+            fig_size,
+            fig_dpi,
+            scatter_legends,
+            [
+                "frozen input movie KGE with edge",
+                "frozen input movie KGE without edge",
+                "frozen movie KGE with edge",
+                "frozen movie KGE without edge",
+                "frozen cls token",
+                "input movie KGE with edge",
+                "input movie KGE without edge",
+                "movie KGE with edge",
+                "movie KGE without edge",
+                "cls token",
             ],
             save_path,
             max_columns=2,
