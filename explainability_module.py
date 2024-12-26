@@ -588,12 +588,13 @@ class ExplainabilityModule:
         token_labels: List[str],
         save_path: Optional[str | Path],
         max_columns: int = 3,
+        legend_pos: str = "upper right",
     ) -> None:
         plt.legend(
             scatter_legends,
             token_labels,
             scatterpoints=1,
-            loc="upper right",
+            loc=legend_pos,
             ncol=max_columns,
             fontsize=8,
         )
@@ -1045,7 +1046,7 @@ class ExplainabilityModule:
             ["test", "val"],
             ["graph_prompter_hf_frozen", "graph_prompter_hf"],
         ):
-            df, _, _ = self.load_df(split, model, [])
+            df, _, _ = self.load_df(split, model, [1, 2, 3, 5])
             df = df[
                 ["model", "split", "source_id", "target_id", "hidden_states", "labels"]
             ]
@@ -1138,6 +1139,7 @@ class ExplainabilityModule:
             ],
             save_path,
             max_columns=2,
+            legend_pos="upper left",
         )
 
         df_val_frozen_hidden_states_with_edge = np.stack(
@@ -1237,6 +1239,7 @@ class ExplainabilityModule:
             ],
             save_path,
             max_columns=2,
+            legend_pos="upper left",
         )
 
         hidden_states = [
@@ -1286,6 +1289,7 @@ class ExplainabilityModule:
             ],
             save_path,
             max_columns=2,
+            legend_pos="upper left",
         )
 
     def __average_cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> np.float32:
