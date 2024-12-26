@@ -1046,7 +1046,7 @@ class ExplainabilityModule:
             ["test", "val"],
             ["graph_prompter_hf_frozen", "graph_prompter_hf"],
         ):
-            df, _, _ = self.load_df(split, model, [1, 2, 3, 5])
+            df, _, _ = self.load_df(split, model, [1, 2, 3, 4])
             df = df[
                 ["model", "split", "source_id", "target_id", "hidden_states", "labels"]
             ]
