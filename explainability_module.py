@@ -479,6 +479,32 @@ class ExplainabilityModule:
         df, token_type_dict, token_type_dict_reverse = self.load_df(
             split, model, mask, filter
         )
+        self._plot_attention_map(
+            df=df,
+            token_type_dict=token_type_dict,
+            token_type_dict_reverse=token_type_dict_reverse,
+            split=split,
+            mask=mask,
+            model=model,
+            weight_coef=weight_coef,
+            fig_dpi=fig_dpi,
+            fig_size=fig_size,
+        )
+
+    def _plot_attention_map(
+        self,
+        df: pd.DataFrame,
+        token_type_dict: Dict,
+        token_type_dict_reverse: Dict,
+        split: str,
+        mask: List[int],
+        model: str = "vanilla",
+        title: Optional[str] = None,
+        weight_coef: int | float = 15,
+        fig_dpi: int = 100,
+        fig_size: Tuple[int, int] = (8, 8),
+        save_plot_path: Optional[str] = None,
+    ) -> None:
         attention_maps = np.stack(df["attention_map"].tolist())
         plt.rcParams["figure.figsize"] = fig_size
         plt.rcParams["figure.dpi"] = fig_dpi  # 200 e.g. is really fine, but slower
@@ -523,11 +549,15 @@ class ExplainabilityModule:
 
         # Adjust x-axis limits to add more whitespace on the left
         plt.xlim(x_min - (shift_to_left + 0.1), x_max)  # Increase the left limit by 0.1
-        plt.title(
-            f"Attention map of model {model}, split {split} and mask(s) {mask if len(mask) > 0 else 'None'}"
-        )
-        if save_plot:
-            plt.savefig(f"./images/attention_map_{model}_{split}_{mask}.png")
+        if not title:
+            plt.title(
+                f"Attention map of model {model}, split {split} and mask(s) {mask if len(mask) > 0 else 'None'}"
+            )
+        else:
+            plt.title(title)
+        if not save_plot_path:
+            save_plot_path = f"./images/attention_map_{model}_{split}_{mask}.png"
+        plt.savefig(f"./images/attention_map_{model}_{split}_{mask}.png")
         plt.show()
 
     def get_verbose_df(self, n: Optional[int] = None) -> pd.DataFrame:
@@ -1046,12 +1076,24 @@ class ExplainabilityModule:
             ["test", "val"],
             ["graph_prompter_hf_frozen", "graph_prompter_hf"],
         ):
-            df, _, _ = self.load_df(split, model, [1, 2, 3, 4])
+            df, token_type_dict, token_type_dict_reverse = self.load_df(
+                split, model, [1, 2, 3, 4]
+            )
             df = df[
-                ["model", "split", "source_id", "target_id", "hidden_states", "labels"]
+                [
+                    "model",
+                    "split",
+                    "source_id",
+                    "target_id",
+                    "hidden_states",
+                    "labels",
+                    "attention_map",
+                ]
             ]
             all_dfs.append(df)
         df = pd.concat(all_dfs)
+
+        df["degree"] = df.groupby("target_id")["target_id"].transform("count")
 
         # compute cosine similarity between kges
 
@@ -1073,7 +1115,6 @@ class ExplainabilityModule:
             df_val["graph_prompter_hf_frozen_hidden_states"]
         )
         df_val_hidden_states = np.stack(df_val["graph_prompter_hf_hidden_states"])
-
         frozen_input_movie_kges = np.expand_dims(
             pca.transform(df_val_frozen_hidden_states[:, 5, 0]),
             axis=0,
@@ -1290,6 +1331,175 @@ class ExplainabilityModule:
             save_path,
             max_columns=2,
             legend_pos="upper left",
+        )
+        # produce plot for model separated
+        df_val_with_edges = df_val[df_val["labels"] == 1]
+        mid_bound = df_val_with_edges["degree"].quantile(1 / 2)
+        df_lower = df_val[df_val["degree"] <= mid_bound]
+        df_upper = df_val[df_val["degree"] > mid_bound]
+        hidden_states_frozen_lower = np.stack(
+            df_lower["graph_prompter_hf_frozen_hidden_states"]
+        )
+        hidden_states_frozen_upper = np.stack(
+            df_upper["graph_prompter_hf_frozen_hidden_states"]
+        )
+        hidden_states_lower = np.stack(df_lower["graph_prompter_hf_hidden_states"])
+        hidden_states_upper = np.stack(df_upper["graph_prompter_hf_hidden_states"])
+
+        frozen_input_movie_kges_lower = np.expand_dims(
+            pca.transform(hidden_states_frozen_lower[:, 5, 0]),
+            axis=0,
+        )
+        frozen_input_movie_kges_upper = np.expand_dims(
+            pca.transform(hidden_states_frozen_upper[:, 5, 0]),
+            axis=0,
+        )
+
+        frozen_movie_kges_lower = np.expand_dims(
+            pca.transform(hidden_states_frozen_lower[:, 5, 1]),
+            axis=0,
+        )
+        frozen_movie_kges_upper = np.expand_dims(
+            pca.transform(hidden_states_frozen_upper[:, 5, 1]),
+            axis=0,
+        )
+
+        input_movie_kges_lower = np.expand_dims(
+            pca.transform(hidden_states_lower[:, 5, 0]),
+            axis=0,
+        )
+        input_movie_kges_upper = np.expand_dims(
+            pca.transform(hidden_states_upper[:, 5, 0]),
+            axis=0,
+        )
+
+        movie_kges_lower = np.expand_dims(
+            pca.transform(hidden_states_lower[:, 5, 1]),
+            axis=0,
+        )
+        movie_kges_upper = np.expand_dims(
+            pca.transform(hidden_states_upper[:, 5, 1]),
+            axis=0,
+        )
+
+        hidden_states = [
+            frozen_input_movie_kges_lower,
+            frozen_input_movie_kges_upper,
+            frozen_movie_kges_lower,
+            frozen_movie_kges_upper,
+            # input_movie_kges_lower,
+            # input_movie_kges_upper,
+            # movie_kges_lower,
+            # movie_kges_upper,
+            frozen_cls,
+        ]
+
+        colors = cm.rainbow(np.linspace(0, 1, 2))  # type: ignore
+        scatter_legends = self._scatter_plot_over_low_dim_reps(
+            hidden_states,
+            markers=[
+                ["x"],
+                ["x"],
+                ["."],
+                ["."],
+                ["o"],
+            ],
+            colors=[
+                [colors[0]],
+                [colors[1]],
+                [colors[0]],
+                [colors[1]],
+                [colors[0]],
+            ],
+            alpha=0.7,
+        )
+
+        save_path = (
+            "./images/frozen_movie_kge_hidden_state_shift_grouped_by_popularity.png"
+            if save_plot
+            else None
+        )
+        self._title_figure_save(
+            "Movie KGE Hidden States Shift of frozen Model grouped by Popularity",
+            fig_size,
+            fig_dpi,
+            scatter_legends,
+            [
+                "frozen input movie KGE in lower quantil",
+                "frozen input movie KGE in upper quantil",
+                "frozen movie KGE in lower quantil",
+                "frozen movie KGE in upper quantil",
+                "frozen cls token",
+            ],
+            save_path,
+            max_columns=2,
+            legend_pos="upper left",
+        )
+
+        hidden_states = [
+            # frozen_input_movie_kges_lower,
+            # frozen_input_movie_kges_upper,
+            # frozen_movie_kges_lower,
+            # frozen_movie_kges_upper,
+            input_movie_kges_lower,
+            input_movie_kges_upper,
+            movie_kges_lower,
+            movie_kges_upper,
+            frozen_cls,
+        ]
+
+        colors = cm.rainbow(np.linspace(0, 1, 2))  # type: ignore
+        scatter_legends = self._scatter_plot_over_low_dim_reps(
+            hidden_states,
+            markers=[
+                ["x"],
+                ["x"],
+                ["."],
+                ["."],
+                ["o"],
+            ],
+            colors=[
+                [colors[0]],
+                [colors[1]],
+                [colors[0]],
+                [colors[1]],
+                [colors[0]],
+            ],
+            alpha=0.7,
+        )
+
+        save_path = (
+            "./images/movie_kge_hidden_state_shift_grouped_by_popularity.png"
+            if save_plot
+            else None
+        )
+        self._title_figure_save(
+            "Movie KGE Hidden States Shift of end-to-end Model grouped by Popularity",
+            fig_size,
+            fig_dpi,
+            scatter_legends,
+            [
+                "input movie KGE in lower quantil",
+                "input movie KGE in upper quantil",
+                "movie KGE in lower quantil",
+                "movie KGE in upper quantil",
+                "cls token",
+            ],
+            save_path,
+            max_columns=2,
+            legend_pos="upper left",
+        )
+
+        df_val = df[
+            (df["split"] == "val")
+            & (df["model"].isin(["graph_prompter_hf_frozen", "graph_prompter_hf"]))
+        ]
+        df_val_lower = df_val[df_val["degree"] <= mid_bound]
+        df_val_upper = df_val[df_val["degree"] > mid_bound]
+        lower_attentions = np.mean(np.stack(df_val_lower["attention_map"])[:, 0, 5, 0])
+        upper_attentions = np.mean(np.stack(df_val_upper["attention_map"])[:, 0, 5, 0])
+        print(
+            f"Lower attentions are {lower_attentions} and upper attentions are {upper_attentions}."
         )
 
     def __average_cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> np.float32:
