@@ -491,6 +491,49 @@ class ExplainabilityModule:
             fig_size=fig_size,
         )
 
+    def calculate_attention_diffs(
+        self,
+        split: str,
+        mask: List[int],
+        model: str = "vanilla",
+        filter: Optional[Callable] = None,
+        weight_coef: int | float = 15,
+        fig_dpi: int = 100,
+        fig_size: Tuple[int, int] = (8, 8),
+        save_plot: bool = True,
+    ) -> None:
+        assert fig_dpi > 0
+        assert fig_size[0] > 0
+        assert fig_size[1] > 0
+        assert weight_coef > 0
+        df, token_type_dict, token_type_dict_reverse = self.load_df(
+            split, model, mask, filter
+        )
+
+        df["degree"] = df.groupby("target_id")["target_id"].transform("count")
+        # produce plot for model separated
+        df_with_edges = df[df["labels"] == 1]
+        middle = df_with_edges["degree"].quantile(1 / 2)
+        df_lower = df[df["degree"] <= middle]
+        df_upper = df[df["degree"] > middle]
+        df_lower_attention_maps = np.stack(df_lower["attention_map"])
+        df_upper_attention_maps = np.stack(df_upper["attention_map"])
+
+        df_lower_attention_map_mean = np.mean(df_lower_attention_maps, axis=0)
+        df_upper_attention_map_mean = np.mean(df_upper_attention_maps, axis=0)
+        df_attention_map_mean = (
+            df_lower_attention_map_mean - df_upper_attention_map_mean
+        )
+        df_attention_map_total = (
+            df_lower_attention_map_mean + df_upper_attention_map_mean
+        )
+        df_attention_map = df_attention_map_mean / df_attention_map_total
+
+        with np.printoptions(precision=4, suppress=True):
+            print(df_attention_map[:, :, 0])
+
+            print(df_attention_map[:, :, 1])
+
     def _plot_attention_map(
         self,
         df: pd.DataFrame,
@@ -1334,20 +1377,32 @@ class ExplainabilityModule:
         )
         # produce plot for model separated
         df_val_with_edges = df_val[df_val["labels"] == 1]
-        mid_bound = df_val_with_edges["degree"].quantile(1 / 2)
-        df_lower = df_val[df_val["degree"] <= mid_bound]
+        lower_bound = df_val_with_edges["degree"].quantile(1 / 3)
+        mid_bound = df_val_with_edges["degree"].quantile(2 / 3)
+        df_lower = df_val[df_val["degree"] <= lower_bound]
+        df_mid = df_val[
+            (df_val["degree"] > lower_bound) & (df_val["degree"] <= mid_bound)
+        ]
         df_upper = df_val[df_val["degree"] > mid_bound]
         hidden_states_frozen_lower = np.stack(
             df_lower["graph_prompter_hf_frozen_hidden_states"]
+        )
+        hidden_states_frozen_mid = np.stack(
+            df_mid["graph_prompter_hf_frozen_hidden_states"]
         )
         hidden_states_frozen_upper = np.stack(
             df_upper["graph_prompter_hf_frozen_hidden_states"]
         )
         hidden_states_lower = np.stack(df_lower["graph_prompter_hf_hidden_states"])
+        hidden_states_mid = np.stack(df_mid["graph_prompter_hf_hidden_states"])
         hidden_states_upper = np.stack(df_upper["graph_prompter_hf_hidden_states"])
 
         frozen_input_movie_kges_lower = np.expand_dims(
             pca.transform(hidden_states_frozen_lower[:, 5, 0]),
+            axis=0,
+        )
+        frozen_input_movie_kges_mid = np.expand_dims(
+            pca.transform(hidden_states_frozen_mid[:, 5, 0]),
             axis=0,
         )
         frozen_input_movie_kges_upper = np.expand_dims(
@@ -1359,6 +1414,10 @@ class ExplainabilityModule:
             pca.transform(hidden_states_frozen_lower[:, 5, 1]),
             axis=0,
         )
+        frozen_movie_kges_mid = np.expand_dims(
+            pca.transform(hidden_states_frozen_mid[:, 5, 1]),
+            axis=0,
+        )
         frozen_movie_kges_upper = np.expand_dims(
             pca.transform(hidden_states_frozen_upper[:, 5, 1]),
             axis=0,
@@ -1366,6 +1425,10 @@ class ExplainabilityModule:
 
         input_movie_kges_lower = np.expand_dims(
             pca.transform(hidden_states_lower[:, 5, 0]),
+            axis=0,
+        )
+        input_movie_kges_mid = np.expand_dims(
+            pca.transform(hidden_states_mid[:, 5, 0]),
             axis=0,
         )
         input_movie_kges_upper = np.expand_dims(
@@ -1377,6 +1440,10 @@ class ExplainabilityModule:
             pca.transform(hidden_states_lower[:, 5, 1]),
             axis=0,
         )
+        movie_kges_mid = np.expand_dims(
+            pca.transform(hidden_states_mid[:, 5, 1]),
+            axis=0,
+        )
         movie_kges_upper = np.expand_dims(
             pca.transform(hidden_states_upper[:, 5, 1]),
             axis=0,
@@ -1384,8 +1451,10 @@ class ExplainabilityModule:
 
         hidden_states = [
             frozen_input_movie_kges_lower,
+            frozen_input_movie_kges_mid,
             frozen_input_movie_kges_upper,
             frozen_movie_kges_lower,
+            frozen_movie_kges_mid,
             frozen_movie_kges_upper,
             # input_movie_kges_lower,
             # input_movie_kges_upper,
@@ -1394,12 +1463,14 @@ class ExplainabilityModule:
             frozen_cls,
         ]
 
-        colors = cm.rainbow(np.linspace(0, 1, 2))  # type: ignore
+        colors = cm.rainbow(np.linspace(0, 1, 4))  # type: ignore
         scatter_legends = self._scatter_plot_over_low_dim_reps(
             hidden_states,
             markers=[
                 ["x"],
                 ["x"],
+                ["x"],
+                ["."],
                 ["."],
                 ["."],
                 ["o"],
@@ -1407,9 +1478,11 @@ class ExplainabilityModule:
             colors=[
                 [colors[0]],
                 [colors[1]],
+                [colors[2]],
                 [colors[0]],
                 [colors[1]],
-                [colors[0]],
+                [colors[2]],
+                [colors[3]],
             ],
             alpha=0.7,
         )
@@ -1426,8 +1499,10 @@ class ExplainabilityModule:
             scatter_legends,
             [
                 "frozen input movie KGE in lower quantil",
+                "frozen input movie KGE in middle quantil",
                 "frozen input movie KGE in upper quantil",
                 "frozen movie KGE in lower quantil",
+                "frozen movie KGE in middle quantil",
                 "frozen movie KGE in upper quantil",
                 "frozen cls token",
             ],
@@ -1442,28 +1517,34 @@ class ExplainabilityModule:
             # frozen_movie_kges_lower,
             # frozen_movie_kges_upper,
             input_movie_kges_lower,
+            input_movie_kges_mid,
             input_movie_kges_upper,
             movie_kges_lower,
+            movie_kges_mid,
             movie_kges_upper,
             frozen_cls,
         ]
 
-        colors = cm.rainbow(np.linspace(0, 1, 2))  # type: ignore
+        colors = cm.rainbow(np.linspace(0, 1, 4))  # type: ignore
         scatter_legends = self._scatter_plot_over_low_dim_reps(
             hidden_states,
             markers=[
-                ["x"],
-                ["x"],
                 ["."],
                 ["."],
+                ["."],
+                ["x"],
+                ["x"],
+                ["x"],
                 ["o"],
             ],
             colors=[
                 [colors[0]],
                 [colors[1]],
+                [colors[2]],
                 [colors[0]],
                 [colors[1]],
-                [colors[0]],
+                [colors[2]],
+                [colors[3]],
             ],
             alpha=0.7,
         )
@@ -1480,8 +1561,10 @@ class ExplainabilityModule:
             scatter_legends,
             [
                 "input movie KGE in lower quantil",
+                "input movie KGE in middle quantil",
                 "input movie KGE in upper quantil",
                 "movie KGE in lower quantil",
+                "movie KGE in middle quantil",
                 "movie KGE in upper quantil",
                 "cls token",
             ],
@@ -1490,16 +1573,64 @@ class ExplainabilityModule:
             legend_pos="upper left",
         )
 
+        found_datapoints_frozen = []
+        average_attentions_frozen = []
+        found_datapoints_end_to_end = []
+        average_attentions_end_to_end = []
+        for idx, degree in enumerate(range(1, df["degree"].max())):
+            df_val = df[
+                (df["split"] == "val") & (df["model"] == "graph_prompter_hf_frozen")
+            ]
+            df_val_degree = df_val[df_val["degree"] == degree]
+            if len(df_val_degree) > 0:
+                found_datapoints_frozen.append(idx + 1)
+                average_attentions_frozen.append(
+                    np.mean(np.stack(df_val_degree["attention_map"])[:, 0, 5, 0])
+                )
+            df_val = df[(df["split"] == "val") & (df["model"] == "graph_prompter_hf")]
+            df_val_degree = df_val[df_val["degree"] == degree]
+            if len(df_val_degree) > 0:
+                found_datapoints_end_to_end.append(idx + 1)
+                average_attentions_end_to_end.append(
+                    np.mean(np.stack(df_val_degree["attention_map"])[:, 0, 5, 0])
+                )
+        plt.plot(found_datapoints_frozen, average_attentions_frozen, label="frozen")
+        plt.plot(
+            found_datapoints_end_to_end,
+            average_attentions_end_to_end,
+            label="end-to-end",
+        )
+        plt.title(
+            "Average movie KGE hidden state attention on classification hidden state based on movie popularity."
+        )
+        plt.xlabel("Popularity (degree)")
+        plt.ylabel("Average attention")
+
+        # Add legend
+        plt.legend(loc=4)
+        if save_plot:
+            plt.savefig("./images/average_movie_kge_shift.png")
+
+        # Show plot
+        plt.show()
+
         df_val = df[
-            (df["split"] == "val")
-            & (df["model"].isin(["graph_prompter_hf_frozen", "graph_prompter_hf"]))
+            (df["split"] == "val") & (df["model"] == "graph_prompter_hf_frozen")
         ]
-        df_val_lower = df_val[df_val["degree"] <= mid_bound]
-        df_val_upper = df_val[df_val["degree"] > mid_bound]
-        lower_attentions = np.mean(np.stack(df_val_lower["attention_map"])[:, 0, 5, 0])
-        upper_attentions = np.mean(np.stack(df_val_upper["attention_map"])[:, 0, 5, 0])
+        df_val_true = df_val[df_val["labels"] == 1]
+        df_val_false = df_val[df_val["labels"] == 0]
+        true_attentions = np.mean(np.stack(df_val_true["attention_map"])[:, 0, 5, 0])
+        false_attentions = np.mean(np.stack(df_val_false["attention_map"])[:, 0, 5, 0])
         print(
-            f"Lower attentions are {lower_attentions} and upper attentions are {upper_attentions}."
+            f"With edge ttentions for frozen GraphPrompterHF are {true_attentions}, false attentions are {false_attentions}."
+        )
+        df_val = df[(df["split"] == "val") & (df["model"] == "graph_prompter_hf")]
+        df_val_true = df_val[df_val["labels"] == 1]
+        df_val_false = df_val[df_val["labels"] == 0]
+        true_attentions = np.mean(np.stack(df_val_true["attention_map"])[:, 0, 5, 0])
+        false_attentions = np.mean(np.stack(df_val_false["attention_map"])[:, 0, 5, 0])
+        print(
+            f"With edge ttentions for end-to-end GraphPrompterHF are {true_attentions}, false attentions are {false_attentions}."
         )
 
     def __average_cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> np.float32:
