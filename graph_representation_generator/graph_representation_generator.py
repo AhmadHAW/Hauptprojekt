@@ -8,7 +8,7 @@ from torch_geometric.data import HeteroData
 import torch_geometric.transforms as T
 from torch_geometric.loader import LinkNeighborLoader
 import tqdm
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, accuracy_score, f1_score
 import pandas as pd
 import numpy as np
 
@@ -102,7 +102,7 @@ class GraphRepresentationGenerator:
         train_loader = LinkNeighborLoader(
             data=data,
             num_neighbors=[20, 10],
-            neg_sampling_ratio=2.0,
+            neg_sampling_ratio=1.0,
             edge_label_index=(("source", "edge", "target"), edge_label_index),
             edge_label=edge_label,
             batch_size=batch_size,
@@ -281,7 +281,6 @@ class GraphRepresentationGenerator:
             edge_label_index=(("source", "edge", "target"), edge_label_index),
             edge_label=edge_label,
             batch_size=batch_size,
-            shuffle=False,
         )
         preds = []
         ground_truths = []
@@ -293,13 +292,32 @@ class GraphRepresentationGenerator:
                     sampled_data["source", "edge", "target"].edge_label
                 )
 
-        pred = torch.cat(preds, dim=0).cpu().numpy()
+        pred_continues = torch.cat(preds, dim=0).cpu().numpy()
         ground_truth = torch.cat(ground_truths, dim=0).cpu().numpy()
-        auc = roc_auc_score(ground_truth, pred)
-        print()
-        print(f"Validation AUC: {auc:.4f}")
+        print(np.unique(ground_truth))
+
+        def pred_by_threshold(pred: np.ndarray, thresh: float) -> np.ndarray:
+            return (pred >= thresh).astype(float)
+
+        pred_discrete: List[np.ndarray] = []
+        for threshold_ in range(1, 10):
+            threshold = threshold_ / 10
+            pred_discrete.append(pred_by_threshold(ground_truth, threshold))
+        auc = roc_auc_score(ground_truth, pred_continues)
+        accs = [accuracy_score(ground_truth, pred) for pred in pred_discrete]
+        f1s = [f1_score(ground_truth, pred) for pred in pred_discrete]
+        max_acc = max(accs)
+        max_acc_thresold = 1 / (2 + accs.index(max_acc))
+        max_f1 = max(f1s)
+        max_f1_thresold = 1 / (2 + f1s.index(max_f1))
+        print(
+            f"Validation AUC: {auc:.4f}, Acc: {max_acc:.4f} with threshold {max_acc_thresold}, F1: {max_f1:.4f} with threshold {max_f1_thresold}"
+        )
         if target_path:
-            np.save(target_path, np.array(auc))
+            np.save(
+                target_path,
+                np.stack([np.array(auc), np.array(max_acc), np.array(max_f1)]),
+            )
 
     def save_model(self):
         torch.save(self.model.to(device="cpu").state_dict(), self.model_path)

@@ -168,8 +168,8 @@ class ExplainabilityModule:
             graph_prompter_hf_frozen_training_process = json.load(f)
         with open(self.graph_prompter_hf_training_path, "r") as f:
             graph_prompter_hf_training_process = json.load(f)
-        gnn_frozen_accuracy = np.load("./data/gnn/gnn_frozen_val.npy").item()
-        gnn_accuracy = np.load("./data/gnn/gnn_val.npy").item()
+        gnn_frozen_accuracy = np.load("./data/gnn/gnn_frozen_val.npy")[1].item()
+        gnn_accuracy = np.load("./data/gnn/gnn_val.npy")[1].item()
         # Extract the loss values
         vanilla_eval_accuracy = [
             entry["eval_accuracy"]
@@ -563,7 +563,7 @@ class ExplainabilityModule:
                     labels[from_name] = token_type_dict[from_]
                 G.add_node(from_name, name=from_name, layer=layer)
                 for to_, weight in enumerate(inner):
-                    to_name = f"{token_type_dict[to_]}_{layer+1}"
+                    to_name = f"{token_type_dict[to_]}_{layer + 1}"
                     G.add_node(to_name, name=to_name, layer=layer + 1)
                     G.add_edge(from_name, to_name, weight=weight)
 

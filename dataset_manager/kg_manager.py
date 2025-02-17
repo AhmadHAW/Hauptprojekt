@@ -180,7 +180,7 @@ class KGManger(ABC):
             Note that we also need to specify the reverse edge type `("movie", "rev_rates", "user")`.
             This allows the `RandomLinkSplit` transform to drop reverse edges accordingly to not leak any information into the training phase.
         Additional:
-            We are expecting for this method the constants the plits of the dataset to be present and
+            We are expecting for this method the constants the splits of the dataset to be present and
             to be defined as valid paths for large torch tensors.
         """
         # For this, we first split the set of edges into
